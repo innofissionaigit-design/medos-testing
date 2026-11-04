@@ -4,7 +4,6 @@ $root = Split-Path $PSScriptRoot -Parent
 $env:PRISMA_ENGINES_CACHE_DIR = 'D:\.cache\prisma'
 if (-not $env:DATABASE_URL) { $env:DATABASE_URL = 'postgresql://medos@127.0.0.1:54329/medos_dev' }
 if (-not $env:JWT_ACCESS_SECRET) { $env:JWT_ACCESS_SECRET = 'dev-only-secret-dev-only-secret-0001' }
-if (-not $env:SCRYPT_LOG_N) { $env:SCRYPT_LOG_N = '14' }
 $env:PORT = '4000'
 $env:CORS_ORIGINS = 'http://localhost:3000'
 Set-Location $root

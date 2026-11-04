@@ -39,6 +39,7 @@ export const api = {
   page: <T>(path: string, query?: Query): Promise<Page<T>> => request<Page<T>>("GET", path, { query }),
   post: async <T>(path: string, body?: unknown, key?: string): Promise<T> => (await request<{ data: T }>("POST", path, { body: body ?? {}, key }))?.data as T,
   put: async <T>(path: string, body?: unknown): Promise<T> => (await request<{ data: T }>("PUT", path, { body: body ?? {} }))?.data as T,
+  del: async <T>(path: string): Promise<T> => (await request<{ data: T }>("DELETE", path, {}))?.data as T,
   patch: async <T>(path: string, body?: unknown): Promise<T> => (await request<{ data: T }>("PATCH", path, { body: body ?? {} }))?.data as T,
 };
 

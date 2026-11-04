@@ -1,10 +1,18 @@
 "use client";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ConsentCard } from "@/components/privacy-extras";
+import { AppointmentHistoryCard } from "@/components/follow-up-extras";
 import { Gate } from "@/components/gate";
+import { AdvanceCard } from "@/components/advance-extras";
+import { DuplicateBookingNotice, isDuplicateBooking } from "@/components/booking-guard";
+import { LedgerCard } from "@/components/ledger-extras";
+import { MergeCard } from "@/components/patient-merge";
+import { RegistrationFeeCard } from "@/components/registration-fee";
 import { EditPatientModal, FilesCard, PatientPhoto, type EditablePatient } from "@/components/patient-extras";
+import { AbhaCard } from "@/components/abdm";
 import { Button, Card, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api, newKey, printUrl } from "@/lib/api";
 import { ageText, type AgeValue } from "@/lib/format";
@@ -14,10 +22,12 @@ interface Patient {
   id: string; mrn: string | null; firstName: string; lastName: string | null; gender: string; dateOfBirth: string | null; age: AgeValue; mobile: string | null;
   addressLine: string | null; city: string | null; district: string | null; state: string | null; postalCode: string | null; bloodGroup: string | null; version: number; status: string;
   guardianName: string | null; guardianRelation: string | null; guardianMobile: string | null; emergencyContactName: string | null; emergencyContactMobile: string | null;
+  mergedInto?: { id: string; mrn: string | null } | null; mergedFrom?: { id: string; mrn: string | null }[];
 }
 interface Allergy { id: string; allergen: string; type: string; severity: string; reaction: string | null; status: string }
 interface Encounter { id: string; encounterNumber: string; type: string; status: string; startedAt: string; practitionerName?: string | null; departmentName?: string | null }
 interface InvoiceRow { id: string; invoiceNumber: string | null; status: string; total: string; balanceDue: string; createdAt: string; kind: string }
+interface ConsultPay { required: boolean; status: "NOT_REQUIRED" | "PAID" | "NEEDS_PAYMENT" | "NEEDS_BILL"; invoiceId?: string; invoiceNumber?: string | null; invoiceStatus?: string; total?: string; due?: string }
 interface Practitioner { id: string; displayName: string; specialty?: string | null }
 
 function StartVisit({ patientId, onClose }: { patientId: string; onClose: () => void }) {
@@ -25,15 +35,15 @@ function StartVisit({ patientId, onClose }: { patientId: string; onClose: () => 
   const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<Practitioner[]>("/practitioners") });
   const [doc, setDoc] = useState("");
   const m = useMutation({
-    mutationFn: () => api.post<{ encounter: { id: string } }>("/appointments/walk-in", { patientId, practitionerId: doc }, newKey()),
+    mutationFn: (override?: string) => api.post<{ encounter: { id: string } }>("/appointments/walk-in", { patientId, practitionerId: doc, ...(override ? { duplicateOverride: { reason: override } } : {}) }, newKey()),
     onSuccess: () => router.push("/queue"),
   });
   return (
     <Modal title="Start an OPD visit" onClose={onClose}>
       <div className="space-y-3">
         <Field label="Doctor"><Select value={doc} onChange={(e) => setDoc(e.target.value)}><option value="">Choose a doctor…</option>{docs.data?.map((d) => <option key={d.id} value={d.id}>{d.displayName}{d.specialty ? ` — ${d.specialty}` : ""}</option>)}</Select></Field>
-        <ErrorNote error={m.error} />
-        <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!doc} loading={m.isPending} onClick={() => m.mutate()}>Check in and add to queue</Button></div>
+        {isDuplicateBooking(m.error) ? <DuplicateBookingNotice error={m.error} pending={m.isPending} onOverride={(r) => m.mutate(r)} /> : <ErrorNote error={m.error} />}
+        <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!doc} loading={m.isPending} onClick={() => m.mutate(undefined)}>Check in and add to queue</Button></div>
       </div>
     </Modal>
   );
@@ -71,8 +81,18 @@ export default function PatientPage() {
   const { can, features, date, dateTime, money } = useMe();
   const [visit, setVisit] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const router = useRouter();
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("visit") !== "1") return;
+    setVisit(true);
+    router.replace(`/patients/${id}`); // so a reload or Back does not open it again
+  }, [id, router]);
   const p = useQuery({ queryKey: ["patient", id], queryFn: () => api.get<Patient>(`/patients/${id}`) });
   const enc = useQuery({ queryKey: ["patient-enc", id], queryFn: () => api.page<Encounter>(`/patients/${id}/encounters`, { pageSize: 10 }), enabled: can("CONSULTATION_READ", "QUEUE_READ", "PATIENT_READ") });
+  // When the hospital requires the OPD consultation to be paid first, the visit can start only once it is (checked again by the server).
+  const consult = useQuery({ queryKey: ["consult-pay", id], queryFn: () => api.get<ConsultPay>(`/patients/${id}/consultation-payment`), enabled: can("APPOINTMENT_CREATE"), refetchInterval: 10_000 });
+  const mustPayFirst = consult.data?.required === true && consult.data.status !== "PAID";
   const inv = useQuery({ queryKey: ["patient-inv", id], queryFn: () => api.page<InvoiceRow>("/invoices", { patientId: id, pageSize: 10 }), enabled: can("INVOICE_READ") });
   if (p.isLoading) return <Spinner />;
   if (p.error || !p.data) return <ErrorNote error={p.error ?? new Error("Patient not found")} />;
@@ -83,15 +103,27 @@ export default function PatientPage() {
       <PageHeader
         title={name} icon={<PatientPhoto patientId={pt.id} />} subtitle={`MRN ${pt.mrn ?? "—"} · ${pt.gender.toLowerCase()}${ageText(pt.age) ? `, ${ageText(pt.age)}` : ""}`}
         actions={<>
-          {can("APPOINTMENT_CREATE") && <Button onClick={() => setVisit(true)}>Start OPD visit</Button>}
-          {can("INVOICE_CREATE") && <Link href={`/billing?patient=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">New bill</Link>}
-          {can("ADMISSION_CREATE") && features.IPD_ENABLED && <Link href={`/ipd?admit=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Admit</Link>}
-          {can("PATIENT_UPDATE") && <Button variant="secondary" onClick={() => setEditing(true)}>Edit details</Button>}
+          {!pt.mergedInto && can("APPOINTMENT_CREATE") && <Button disabled={mustPayFirst} title={mustPayFirst ? "Pay the OPD consultation bill first" : undefined} onClick={() => setVisit(true)}>Start OPD visit</Button>}
+          {!pt.mergedInto && can("INVOICE_CREATE") && <Link href={`/billing?patient=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">New bill</Link>}
+          {!pt.mergedInto && can("ADMISSION_CREATE") && features.IPD_ENABLED && <Link href={`/ipd?admit=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Admit</Link>}
+          {!pt.mergedInto && can("PATIENT_UPDATE") && <Button variant="secondary" onClick={() => setEditing(true)}>Edit details</Button>}
+          {!pt.mergedInto && can("PATIENT_MERGE") && <Button variant="secondary" onClick={() => setMerging(true)}>Merge duplicate…</Button>}
           <a href={printUrl(`patient-labels/${pt.id}`)} target="_blank" rel="noreferrer" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Print label</a>
           <a href={`${printUrl(`patient-labels/${pt.id}`)}?format=pdf&download=1`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Label PDF</a>
         </>}
       />
-      {pt.status !== "ACTIVE" && <Notice tone="warn">This patient record is inactive.</Notice>}
+      {pt.mergedInto
+        ? <Notice tone="warn">This record was merged into <Link className="font-medium underline" href={`/patients/${pt.mergedInto.id}`}>MRN {pt.mergedInto.mrn ?? "—"}</Link>. Use that patient from now on; the history below is shown on that chart too.</Notice>
+        : pt.status !== "ACTIVE" && <Notice tone="warn">This patient record is inactive.</Notice>}
+      {!pt.mergedInto && can("APPOINTMENT_CREATE") && consult.data?.required && (
+        <div className="mb-3">
+          {consult.data.status === "NEEDS_BILL" && <Notice tone="warn">Before the OPD visit: click <b>New bill</b>, add <b>OPD consultation</b>, create the bill and take the payment. Then <b>Start OPD visit</b> becomes available.</Notice>}
+          {consult.data.status === "NEEDS_PAYMENT" && <Notice tone="warn">The consultation bill {consult.data.invoiceNumber ?? "(draft)"} of {money(consult.data.total ?? "0")} is waiting for payment ({money(consult.data.due ?? "0")} due). <Link className="font-medium underline" href={`/billing/${consult.data.invoiceId}?from=patient`}>Take payment</Link></Notice>}
+          {consult.data.status === "PAID" && <Notice tone="success">The OPD consultation bill {consult.data.invoiceNumber} is paid. You can start the OPD visit.</Notice>}
+        </div>
+      )}
+      {!!pt.mergedFrom?.length && <Notice>This chart also shows the history of merged duplicate record{pt.mergedFrom.length > 1 ? "s" : ""}: {pt.mergedFrom.map((m, i) => <span key={m.id}>{i > 0 && ", "}<Link className="underline" href={`/patients/${m.id}`}>MRN {m.mrn ?? "—"}</Link></span>)}.</Notice>}
+      {merging && <MergeCard duplicate={{ id: pt.id, mrn: pt.mrn, version: pt.version }} onClose={() => setMerging(false)} onDone={(intoId) => router.push(`/patients/${intoId}`)} />}
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Details" className="lg:col-span-1">
           <dl className="grid grid-cols-2 gap-3">
@@ -103,6 +135,11 @@ export default function PatientPage() {
         </Card>
         <div className="space-y-4 lg:col-span-2">
           <Allergies patientId={pt.id} />
+          {!pt.mergedInto && <AdvanceCard patientId={pt.id} />}
+          <LedgerCard patientId={pt.id} />
+          {can("PATIENT_READ") && <ConsentCard patientId={pt.id} />}
+          {can("PATIENT_READ") && !pt.mergedInto && <AbhaCard patientId={pt.id} />}
+          <RegistrationFeeCard patientId={pt.id} />
           <FilesCard patientId={pt.id} />
           <Card title="Visits and admissions">
             {enc.isLoading ? <Spinner /> : (
@@ -116,6 +153,7 @@ export default function PatientPage() {
               </Table>
             )}
           </Card>
+          {can("APPOINTMENT_READ") && <AppointmentHistoryCard patientId={pt.id} />}
           {can("INVOICE_READ") && (
             <Card title="Bills">
               <Table head={["Bill", "Kind", "Status", "Total", "Due"]} {...(inv.data?.data.length === 0 ? { empty: "No bills yet." } : {})}>

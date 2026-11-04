@@ -16,7 +16,7 @@ export class AuthController {
   }
 
   @Public()
-  @RateLimit({ limit: 30, windowMs: 60_000 })
+  @RateLimit({ limit: 30, windowMs: 60_000, by: "refreshToken" })
   @Post("refresh")
   @HttpCode(200)
   async refresh(@Body() body: unknown, @RequestId() requestId: string | undefined) {
@@ -24,7 +24,7 @@ export class AuthController {
   }
 
   @Public()
-  @RateLimit({ limit: 30, windowMs: 60_000 })
+  @RateLimit({ limit: 30, windowMs: 60_000, by: "refreshToken" })
   @Post("logout")
   @HttpCode(204)
   async logout(@Body() body: unknown, @RequestId() requestId: string | undefined): Promise<void> {
@@ -32,7 +32,7 @@ export class AuthController {
   }
 
   @AnyAuthenticated()
-  @RateLimit({ limit: 30, windowMs: 60_000 })
+  @RateLimit({ limit: 30, windowMs: 60_000, by: "refreshToken" })
   @Post("switch-facility")
   @HttpCode(200)
   async switchFacility(@Ctx() ctx: RequestContext, @Body() body: unknown, @RequestId() requestId: string | undefined) {
@@ -42,6 +42,6 @@ export class AuthController {
   @AnyAuthenticated()
   @Get("me")
   async me(@Ctx() ctx: RequestContext) {
-    return { data: await this.auth.me(ctx.tenantId, ctx.userId, ctx.facilityId, ctx.permissions) };
+    return { data: await this.auth.me(ctx.tenantId, ctx.userId, ctx.facilityId, ctx.permissions, ctx.dataScope) };
   }
 }

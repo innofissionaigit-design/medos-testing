@@ -1,7 +1,10 @@
 "use client";
+import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { UseAdvanceButton } from "@/components/advance-extras";
+import { DoctorShareCard } from "@/components/doctor-share";
 import { Gate } from "@/components/gate";
 import { Button, Card, ConfirmButton, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api, newKey, printUrl } from "@/lib/api";
@@ -10,7 +13,7 @@ import { useMe } from "@/lib/me";
 interface Invoice {
   id: string; invoiceNumber: string | null; status: string; kind: string; patientId: string; patientName: string; mrn: string | null; notes: string | null; issuedAt: string | null;
   subtotal: string; discountTotal: string; taxTotal: string; total: string; paidTotal: string; refundedTotal: string; creditedTotal: string; netReceived: string; balanceDue: string; refundable: string;
-  version: number;
+  version: number; encounterId?: string | null;
   lines: { lineNo: number; serviceId?: string | null; description: string; quantity: string; unitPrice: string; discountAmount: string; taxPercent: string; lineTotal: string }[];
   receipts: { id: string; receiptNumber: string; total: string; receivedAt: string; payments: { method: string; amount: string; reference: string | null }[] }[];
   refunds: { id: string; refundNumber: string; method: string; amount: string; reason: string; createdAt: string }[];
@@ -74,6 +77,34 @@ function Adjust({ inv, kind, onClose, onDone }: { inv: Invoice; kind: "refund" |
   );
 }
 
+/** An approver (INVOICE_DISCOUNT) sets per-line discounts on a draft; the server recomputes totals and audits the reason. */
+function DiscountModal({ inv, onClose, onDone }: { inv: Invoice; onClose: () => void; onDone: () => void }) {
+  const { money } = useMe();
+  const [amounts, setAmounts] = useState<Record<number, string>>(() => Object.fromEntries(inv.lines.map((l) => [l.lineNo, l.discountAmount])));
+  const [reason, setReason] = useState("");
+  const changed = inv.lines.filter((l) => (amounts[l.lineNo] ?? "").trim() !== "" && Number(amounts[l.lineNo]) !== Number(l.discountAmount));
+  const save = useMutation({
+    mutationFn: () => api.post(`/invoices/${inv.id}/discount`, { version: inv.version, reason: reason.trim(), lines: changed.map((l) => ({ lineNo: l.lineNo, discountAmount: amounts[l.lineNo]!.trim() })) }),
+    onSuccess: onDone,
+  });
+  return (
+    <Modal title="Give a discount" onClose={onClose} wide>
+      <div className="space-y-3">
+        <Table head={["#", "Item", "Amount", "Discount"]}>
+          {inv.lines.map((l) => (
+            <tr key={l.lineNo}><Td>{l.lineNo}</Td><Td>{l.description}</Td><Td>{money((Number(l.quantity) * Number(l.unitPrice)).toFixed(2))}</Td>
+              <Td><Input aria-label={`Discount for line ${l.lineNo}`} className="w-28" inputMode="decimal" value={amounts[l.lineNo] ?? ""} onChange={(e) => setAmounts({ ...amounts, [l.lineNo]: e.target.value })} /></Td></tr>
+          ))}
+        </Table>
+        <Field label="Reason" hint="At least 5 characters; recorded in the audit trail."><Input value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+        <p className="text-sm text-slate-500">The new total is calculated by the server. A discount cannot be more than the line amount.</p>
+        <ErrorNote error={save.error} />
+        <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={changed.length === 0 || reason.trim().length < 5} loading={save.isPending} onClick={() => save.mutate()}>Apply discount</Button></div>
+      </div>
+    </Modal>
+  );
+}
+
 interface EditLine { serviceId?: string | null; description: string; unitPrice: string; taxPercent: string; quantity: string }
 
 /** Draft bills can be changed freely; once issued they are locked (credit note, refund or cancel instead). */
@@ -122,10 +153,13 @@ export default function InvoicePage() {
   const { id } = useParams<{ id: string }>();
   const { can, money, dateTime } = useMe();
   const qc = useQueryClient();
-  const [modal, setModal] = useState<"pay" | "refund" | "credit-notes" | "edit" | null>(null);
+  const [modal, setModal] = useState<"pay" | "refund" | "credit-notes" | "edit" | "discount" | null>(null);
   const [cancelReason, setCancelReason] = useState("");
+  // Set when the bill was just created from the patient's page (reception): offer the next step, the OPD visit.
+  const [fromPatient, setFromPatient] = useState(false);
+  useEffect(() => { setFromPatient(new URLSearchParams(window.location.search).get("from") === "patient"); }, []);
   const inv = useQuery({ queryKey: ["invoice", id], queryFn: () => api.get<Invoice>(`/invoices/${id}`) });
-  const refresh = async () => { setModal(null); await qc.invalidateQueries({ queryKey: ["invoice", id] }); await qc.invalidateQueries({ queryKey: ["invoices"] }); };
+  const refresh = async () => { setModal(null); await qc.invalidateQueries({ queryKey: ["invoice", id] }); await qc.invalidateQueries({ queryKey: ["invoices"] }); await qc.invalidateQueries({ queryKey: ["doctor-share"] }); };
   const issue = useMutation({ mutationFn: () => api.post(`/invoices/${id}/issue`), onSuccess: refresh });
   const cancel = useMutation({ mutationFn: () => api.post(`/invoices/${id}/cancel`, { reason: cancelReason.trim() }), onSuccess: refresh });
   if (inv.isLoading) return <Spinner />;
@@ -138,13 +172,23 @@ export default function InvoicePage() {
         title={i.invoiceNumber ?? "Draft bill"} subtitle={`${i.patientName} · MRN ${i.mrn ?? "—"} · ${i.kind.toLowerCase()}${i.issuedAt ? ` · issued ${dateTime(i.issuedAt)}` : ""}`}
         actions={<>
           <StatusBadge value={i.status} />
+          <Link className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`/patients/${i.patientId}`}>Patient</Link>
           {i.status === "DRAFT" && can("INVOICE_CREATE") && <Button variant="secondary" onClick={() => setModal("edit")}>Edit items</Button>}
+          {i.status === "DRAFT" && can("INVOICE_DISCOUNT") && <Button variant="secondary" onClick={() => setModal("discount")}>Discount…</Button>}
           {i.status === "DRAFT" && can("INVOICE_ISSUE") && <Button loading={issue.isPending} onClick={() => issue.mutate()}>Issue bill</Button>}
           {["ISSUED", "PARTIALLY_PAID"].includes(i.status) && can("PAYMENT_CREATE") && <Button onClick={() => setModal("pay")}>Take payment</Button>}
+          {["ISSUED", "PARTIALLY_PAID"].includes(i.status) && <UseAdvanceButton patientId={i.patientId} invoiceId={i.id} balanceDue={i.balanceDue} onDone={refresh} />}
           {i.status !== "DRAFT" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`invoices/${i.id}`)} target="_blank" rel="noreferrer">Print bill</a>}
           {i.status !== "DRAFT" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`invoices/${i.id}`)}?format=pdf&download=1`}>PDF</a>}
         </>}
       />
+      {fromPatient && (
+        <Notice tone="success">
+          <span className="mr-3">Bill created for {i.patientName}.</span>
+          {can("APPOINTMENT_CREATE") && <Link className="mr-3 inline-block rounded-md bg-brand-600 px-3 py-1 text-sm font-medium text-white hover:bg-brand-700" href={`/patients/${i.patientId}?visit=1`}>Start OPD visit</Link>}
+          <Link className="text-sm font-medium underline" href={`/patients/${i.patientId}`}>Back to patient</Link>
+        </Notice>
+      )}
       <ErrorNote error={issue.error ?? cancel.error} />
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Items" className="lg:col-span-2">
@@ -183,9 +227,11 @@ export default function InvoicePage() {
             </Table>
           )}
         </Card>
+        {i.encounterId && ["OPD", "IPD"].includes(i.kind) && i.status !== "DRAFT" && can("EARNINGS_CONFIGURE", "REPORT_READ", "REPORT_FINANCE") && <DoctorShareCard encounterId={i.encounterId} />}
       </div>
       {i.status === "DRAFT" && <div className="mt-3"><Notice>This bill is a draft. Issue it to take payment; an issued bill cannot be edited, only credited or cancelled.</Notice></div>}
       {modal === "edit" && <EditDraft inv={i} onClose={() => setModal(null)} onDone={refresh} />}
+      {modal === "discount" && <DiscountModal inv={i} onClose={() => setModal(null)} onDone={refresh} />}
       {modal === "pay" && <PayModal inv={i} onClose={() => setModal(null)} onDone={refresh} />}
       {(modal === "refund" || modal === "credit-notes") && <Adjust inv={i} kind={modal} onClose={() => setModal(null)} onDone={refresh} />}
     </Gate>

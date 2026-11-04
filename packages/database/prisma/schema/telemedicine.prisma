@@ -1,0 +1,40 @@
+// Telemedicine (docs/telemedicine.md): a booked appointment can be made a video consultation. The video call itself runs on the hospital's chosen video service
+// (a link template in the settings); MedOS keeps who may join, when, the patient's consent, and what happened. The consultation, prescription and bill are the normal
+// visit's, so nothing about them is different.
+
+enum TeleconsultStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Teleconsult {
+  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String            @db.Uuid
+  facilityId      String            @db.Uuid
+  patientId       String            @db.Uuid
+  appointmentId   String            @db.Uuid
+  practitionerId  String            @db.Uuid
+  /// Copied from the appointment when the video consultation is made; the join window is worked out from it.
+  scheduledAt     DateTime          @db.Timestamptz(3)
+  status          TeleconsultStatus @default(SCHEDULED)
+  /// The unguessable part of the video room's name. Never shown in lists; only a person allowed to join receives the full link.
+  roomToken       String            @unique
+  /// The patient agreed to be consulted by video (recorded when they first join).
+  consentAt       DateTime?         @db.Timestamptz(3)
+  doctorJoinedAt  DateTime?         @db.Timestamptz(3)
+  patientJoinedAt DateTime?         @db.Timestamptz(3)
+  endedAt         DateTime?         @db.Timestamptz(3)
+  cancelReason    String?
+  createdById     String            @db.Uuid
+  createdAt       DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime          @updatedAt @db.Timestamptz(3)
+
+  patient     Patient     @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  appointment Appointment @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, status, scheduledAt])
+  @@index([tenantId, patientId])
+}

@@ -5,6 +5,8 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { assertPatientVisible, visitScope } from "../../common/data-scope";
+import { chartPatientIds } from "../patients/patient-links";
 import { EncountersService } from "../encounters/encounters.service";
 import { bmi, fahrenheitToCelsius, inRange, OBS_META, WRITABLE_TYPES, type ObsType } from "./vitals.domain";
 
@@ -108,15 +110,16 @@ export class VitalsService {
   }
 
   async listForEncounter(ctx: RequestContext, encounterId: string, includeErrors: boolean) {
-    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true } });
+    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [visitScope(ctx)] }, select: { id: true } });
     if (!enc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     return this.listInTx(this.prisma, ctx, encounterId, includeErrors);
   }
 
   async listForPatient(ctx: RequestContext, patientId: string, q: z.infer<typeof listVitalsSchema>) {
-    const patient = await this.prisma.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
-    if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
-    const where: Prisma.ObservationWhereInput = { tenantId: ctx.tenantId, patientId, ...(q.includeErrors ? {} : { status: "FINAL" }), ...(q.type ? { type: q.type } : {}) };
+    const ids = await chartPatientIds(this.prisma, ctx.tenantId, patientId);
+    if (!ids) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+    await assertPatientVisible(this.prisma, ctx, patientId);
+    const where: Prisma.ObservationWhereInput = { tenantId: ctx.tenantId, patientId: { in: ids }, ...(q.includeErrors ? {} : { status: "FINAL" }), ...(q.type ? { type: q.type } : {}) };
     const [rows, total] = await Promise.all([
       this.prisma.observation.findMany({ where, select: VIEW, orderBy: { recordedAt: "desc" }, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
       this.prisma.observation.count({ where }),
@@ -125,7 +128,7 @@ export class VitalsService {
   }
 
   private async latestValue(tx: Db, ctx: RequestContext, patientId: string, type: ObsType): Promise<Decimal | null> {
-    const o = await tx.observation.findFirst({ where: { tenantId: ctx.tenantId, patientId, type, status: "FINAL" }, orderBy: { recordedAt: "desc" }, select: { value: true } });
+    const o = await tx.observation.findFirst({ where: { tenantId: ctx.tenantId, patientId: { in: (await chartPatientIds(tx, ctx.tenantId, patientId)) ?? [patientId] }, type, status: "FINAL" }, orderBy: { recordedAt: "desc" }, select: { value: true } });
     return o ? new Decimal(o.value.toString()) : null;
   }
 

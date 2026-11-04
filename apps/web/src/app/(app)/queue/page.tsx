@@ -1,33 +1,46 @@
 "use client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Gate } from "@/components/gate";
-import { Badge, Button, Card, ErrorNote, Modal, Field, Input, PageHeader, Spinner, StatusBadge, Table, Td } from "@/components/ui";
-import { api } from "@/lib/api";
+import { Badge, Button, Card, ErrorNote, Modal, Field, Input, Notice, PageHeader, Spinner, StatusBadge, Table, Td } from "@/components/ui";
+import { api, ApiError } from "@/lib/api";
 import { useMe } from "@/lib/me";
 
 interface Entry {
   id: string; tokenNumber: number; priority: "NORMAL" | "PRIORITY" | "EMERGENCY"; status: string; patientName: string; mrn: string | null; gender: string;
-  practitionerName: string; departmentName: string | null; waitingMinutes: number | null; encounterId?: string | null; patientId?: string;
+  practitionerName: string; departmentName: string | null; waitingMinutes: number | null; encounterId?: string | null; patientId?: string; tokenDate?: string;
 }
 
 const PRIORITY_TONE = { NORMAL: "gray", PRIORITY: "amber", EMERGENCY: "red" } as const;
 
 export default function QueuePage() {
   const router = useRouter();
-  const { can } = useMe();
+  const { can, me } = useMe();
   const qc = useQueryClient();
   const [doctor, setDoctor] = useState("");
   const [cancelId, setCancelId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
+  const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: me.facility?.timezone ?? me.tenant.timezone });
   const list = useQuery({ queryKey: ["queue", doctor], queryFn: () => api.get<Entry[]>("/queue", doctor ? { practitionerId: doctor } : undefined), refetchInterval: 15_000 });
-  const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<{ id: string; displayName: string }[]>("/practitioners") });
+  const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<{ id: string; displayName: string; userId: string | null }[]>("/practitioners") });
+  // A doctor opens on their own patients; reception (QUEUE_MANAGE) keeps the all-doctors view. The filter can still be changed.
+  const [defaulted, setDefaulted] = useState(false);
+  useEffect(() => {
+    if (defaulted || !docs.data) return;
+    const mine = docs.data.find((d) => d.userId === me.id);
+    if (mine && !can("QUEUE_MANAGE")) setDoctor(mine.id);
+    setDefaulted(true);
+  }, [defaulted, docs.data, me.id, can]);
   const refresh = () => qc.invalidateQueries({ queryKey: ["queue"] });
+  // Set when "Complete" is refused because the consultation or its prescription is still unsigned: signing happens on the visit page.
+  const [signFirst, setSignFirst] = useState<string | null>(null);
   const act = useMutation({
-    mutationFn: ({ id, action, body }: { id: string; action: string; body?: unknown }) => api.post<{ encounterId?: string | null }>(`/queue/${id}/${action}`, body),
+    mutationFn: ({ id, action, body }: { id: string; action: string; body?: unknown; encounterId?: string | null }) => api.post<{ encounterId?: string | null }>(`/queue/${id}/${action}`, body),
+    onMutate: () => setSignFirst(null),
     onSuccess: async (r, v) => { await refresh(); if (v.action === "start" && r?.encounterId) router.push(`/visits/${r.encounterId}`); },
+    onError: (e, v) => { if (v.action === "complete" && v.encounterId && e instanceof ApiError && e.code === "INVALID_STATE") setSignFirst(v.encounterId); },
   });
   const callNext = useMutation({ mutationFn: () => api.post("/queue/call-next", doctor ? { practitionerId: doctor } : {}), onSuccess: refresh });
   const priority = useMutation({ mutationFn: ({ id, priority }: { id: string; priority: string }) => api.patch(`/queue/${id}/priority`, { priority }), onSuccess: refresh });
@@ -45,7 +58,18 @@ export default function QueuePage() {
           {(manage || clinician) && <Button loading={callNext.isPending} onClick={() => callNext.mutate()}>Call next patient</Button>}
         </>}
       />
-      <ErrorNote error={act.error ?? callNext.error ?? priority.error} />
+      {signFirst && (
+        <Notice tone="warn">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>This visit cannot be completed yet. Open the visit, click Sign consultation to send the prescription to the pharmacy, then complete the visit.</span>
+            <Button onClick={() => router.push(`/visits/${signFirst}`)}>Open visit to sign</Button>
+          </div>
+        </Notice>
+      )}
+      {(list.data ?? []).some((e) => e.status === "IN_CONSULTATION" && e.tokenDate && e.tokenDate < todayStr) && (
+        <Notice tone="warn">An earlier consultation is still open (marked with its date below). A doctor can only have one open consultation, so new patients cannot be started until it is completed: open the visit, sign it if needed, then press Complete.</Notice>
+      )}
+      <ErrorNote error={(signFirst ? null : act.error) ?? callNext.error ?? priority.error} />
       <Card>
         {list.isLoading ? <Spinner /> : (
           <Table head={["Token", "Patient", "Doctor", "Status", "Waiting", ""]} {...(list.data?.length === 0 ? { empty: "Nobody is in the queue." } : {})}>
@@ -55,7 +79,7 @@ export default function QueuePage() {
               const inConsult = e.status === "IN_CONSULTATION";
               return (
                 <tr key={e.id} className={e.priority === "EMERGENCY" ? "bg-red-50" : ""}>
-                  <Td><span className="text-lg font-semibold">{e.tokenNumber}</span> {e.priority !== "NORMAL" && <Badge tone={PRIORITY_TONE[e.priority]}>{e.priority.toLowerCase()}</Badge>}</Td>
+                  <Td><span className="text-lg font-semibold">{e.tokenNumber}</span> {e.tokenDate && e.tokenDate < todayStr && <Badge tone="amber">from {e.tokenDate}</Badge>} {e.priority !== "NORMAL" && <Badge tone={PRIORITY_TONE[e.priority]}>{e.priority.toLowerCase()}</Badge>}</Td>
                   <Td>{e.patientId ? <Link className="font-medium text-brand-700 hover:underline" href={`/patients/${e.patientId}`}>{e.patientName}</Link> : <span className="font-medium">{e.patientName}</span>} <span className="text-slate-500">· {e.mrn}</span></Td>
                   <Td>{e.practitionerName}<div className="text-xs text-slate-500">{e.departmentName}</div></Td>
                   <Td><StatusBadge value={e.status} /></Td>
@@ -65,8 +89,12 @@ export default function QueuePage() {
                       {(waiting || called) && (manage || clinician) && <Button variant="secondary" onClick={() => act.mutate({ id: e.id, action: "call" })}>{called ? "Recall" : "Call"}</Button>}
                       {(waiting || called) && clinician && <Button onClick={() => act.mutate({ id: e.id, action: "start" })}>Start</Button>}
                       {inConsult && e.encounterId && can("CONSULTATION_READ") && <Button onClick={() => router.push(`/visits/${e.encounterId}`)}>Open visit</Button>}
-                      {inConsult && clinician && <Button variant="secondary" onClick={() => act.mutate({ id: e.id, action: "complete" })}>Complete</Button>}
-                      {(waiting || called) && manage && e.priority === "NORMAL" && <Button variant="ghost" onClick={() => priority.mutate({ id: e.id, priority: "PRIORITY" })}>Prioritise</Button>}
+                      {inConsult && clinician && <Button variant="secondary" onClick={() => act.mutate({ id: e.id, action: "complete", encounterId: e.encounterId })}>Complete</Button>}
+                      {(waiting || called) && manage && (
+                        <select aria-label={`Priority for ${e.patientName}`} value={e.priority} disabled={priority.isPending} onChange={(ev) => priority.mutate({ id: e.id, priority: ev.target.value })} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm">
+                          <option value="NORMAL">Normal</option><option value="PRIORITY">Priority</option><option value="EMERGENCY">Emergency</option>
+                        </select>
+                      )}
                       {(waiting || called) && manage && <Button variant="ghost" onClick={() => act.mutate({ id: e.id, action: "skip" })}>Skip</Button>}
                       {e.status === "SKIPPED" && manage && <Button variant="secondary" onClick={() => act.mutate({ id: e.id, action: "requeue" })}>Requeue</Button>}
                       {(waiting || called || e.status === "SKIPPED") && manage && <Button variant="ghost" onClick={() => { setCancelId(e.id); setReason(""); }}>Cancel</Button>}

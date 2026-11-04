@@ -194,6 +194,8 @@ model MedicationOrder {
   signedAt     DateTime?             @db.Timestamptz(3)
   supersededAtVersion Int?
   notes        String?
+  /// DIGITAL: written on the consultation screen. HANDWRITTEN: made from a scanned handwritten prescription once the doctor approved it.
+  source       String                @default("DIGITAL")
   createdAt    DateTime              @default(now()) @db.Timestamptz(3)
   updatedAt    DateTime              @updatedAt @db.Timestamptz(3)
 
@@ -201,6 +203,7 @@ model MedicationOrder {
   encounter Encounter             @relation(fields: [tenantId, facilityId, encounterId], references: [tenantId, facilityId, id], onDelete: Restrict)
   items     MedicationOrderItem[]
   dispenses Dispense[]
+  scans     PrescriptionScan[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, orderNumber])
@@ -224,6 +227,8 @@ model MedicationOrderItem {
   frequencyText     String?
   durationDays      Int?
   quantity          Int?
+  /// Before / after food etc. (BEFORE_FOOD, AFTER_FOOD, WITH_FOOD, EMPTY_STOMACH, ANY_TIME); null when not stated.
+  foodRelation       String?
   instructions      String?
   status            OrderItemStatus     @default(ACTIVE)
   /// Increased by pharmacy dispensing; an item that was partly dispensed can never be edited away.
@@ -238,4 +243,319 @@ model MedicationOrderItem {
 
   @@unique([tenantId, id])
   @@unique([orderId, lineNo])
+}
+
+// ───────────────────────── Doctor earnings split (docs/earnings-and-reports.md) ─────────────────────────
+
+enum ShareMode {
+  PERCENT
+  FIXED
+  MIXED
+}
+
+/// How the amount collected for a consultation is split between the hospital and the doctor. Rules are append-only and dated: a change adds a new rule,
+/// and a report uses the rule that was in force on the day of the visit, so history is never rewritten. A rule for one doctor beats the facility default
+/// (`practitionerId` null). PERCENT is the doctor's percentage of the amount collected; FIXED is a fixed amount per consulted visit (never more than was
+/// collected); MIXED is a fixed amount plus a percentage.
+model DoctorShareRule {
+  id             String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String    @db.Uuid
+  facilityId     String    @db.Uuid
+  practitionerId String?   @db.Uuid
+  mode           ShareMode
+  percent        Decimal?  @db.Decimal(5, 2)
+  fixedAmount    Decimal?  @db.Decimal(12, 2)
+  effectiveFrom  DateTime  @db.Date
+  note           String?
+  createdById    String    @db.Uuid
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+
+  facility     Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  practitioner Practitioner? @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  entries      DoctorShareEntry[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, practitionerId, effectiveFrom(sort: Desc)])
+}
+
+enum ShareTrigger {
+  PAYMENT
+  REFUND
+}
+
+/// The doctor-share ledger (docs/earnings-and-reports.md): one append-only line each time money received or given back on a visit's OPD/IPD bills changes what the
+/// doctor earns under the rule in force. Amounts are signed (a refund gives a negative line), `hospitalDelta` is what the hospital keeps, and the three always add
+/// up (collected = doctor + hospital). The running total of a visit is the sum of its lines, so the ledger can always be rebuilt. Never edited or deleted.
+model DoctorShareEntry {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String       @db.Uuid
+  facilityId     String       @db.Uuid
+  encounterId    String       @db.Uuid
+  patientId      String       @db.Uuid
+  practitionerId String       @db.Uuid
+  /// The bill whose payment or refund caused this line.
+  invoiceId      String       @db.Uuid
+  trigger        ShareTrigger
+  ruleId         String       @db.Uuid
+  ruleMode       ShareMode
+  collectedDelta Decimal      @db.Decimal(14, 2)
+  doctorDelta    Decimal      @db.Decimal(14, 2)
+  hospitalDelta  Decimal      @db.Decimal(14, 2)
+  createdById    String       @db.Uuid
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+
+  facility     Facility        @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  encounter    Encounter       @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+  practitioner Practitioner    @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  invoice      Invoice         @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  rule         DoctorShareRule @relation(fields: [ruleId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, encounterId, createdAt])
+  @@index([tenantId, facilityId, createdAt(sort: Desc)])
+  @@index([tenantId, practitionerId, createdAt(sort: Desc)])
+}
+
+// ───────────────────────── Handwritten prescription scans and OCR (docs/prescriptions.md) ─────────────────────────
+
+enum ScanStatus {
+  UPLOADED
+  OCR_DONE
+  OCR_FAILED
+  OCR_NOT_CONFIGURED
+}
+
+/// A photo or scan of a handwritten prescription attached to a visit. The image itself is a patient file (virus-scanned, access-controlled). The OCR text is
+/// what the OCR service read, kept exactly as returned; the doctor's corrections are stored separately and the original is never overwritten. Nothing here
+/// orders, dispenses or bills anything: it is a record, and the doctor decides what to copy into the digital prescription.
+model PrescriptionScan {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String     @db.Uuid
+  facilityId    String     @db.Uuid
+  patientId     String     @db.Uuid
+  encounterId   String     @db.Uuid
+  fileId        String     @db.Uuid
+  status        ScanStatus @default(UPLOADED)
+  ocrProvider   String?
+  ocrText       String?
+  ocrConfidence Decimal?   @db.Decimal(5, 4)
+  ocrError      String?
+  ocrAttempts   Int        @default(0)
+  ocrAt         DateTime?  @db.Timestamptz(3)
+  correctedText String?
+  correctedById String?    @db.Uuid
+  correctedAt   DateTime?  @db.Timestamptz(3)
+  /// The doctor's structured medicine lines (the same shape as a prescription item), kept as a draft until approval; frozen after it.
+  lines         Json?
+  linesById     String?    @db.Uuid
+  linesAt       DateTime?  @db.Timestamptz(3)
+  /// Approval is the doctor's verification: it creates the prescription (a signed HANDWRITTEN order) that the pharmacy sees.
+  approvedById  String?    @db.Uuid
+  approvedAt    DateTime?  @db.Timestamptz(3)
+  medicationOrderId String? @db.Uuid
+  /// What the pharmacy did with the picture: DISPENSED (the pharmacist verified it, entered the medicines and billed) or REJECTED (could not be used, with the reason).
+  pharmacyOutcome String?
+  pharmacyAt    DateTime?  @db.Timestamptz(3)
+  pharmacyById  String?    @db.Uuid
+  pharmacyNote  String?
+  createdById   String     @db.Uuid
+  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
+
+  facility Facility    @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  medicationOrder MedicationOrder? @relation(fields: [tenantId, medicationOrderId], references: [tenantId, id], onDelete: Restrict)
+  pages PrescriptionScanPage[]
+  dispenses Dispense[]
+  patient  Patient     @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter Encounter  @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  file     PatientFile @relation(fields: [tenantId, fileId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, fileId])
+  @@unique([tenantId, medicationOrderId])
+  @@index([tenantId, encounterId, createdAt(sort: Desc)])
+  @@index([tenantId, facilityId, pharmacyOutcome, createdAt])
+}
+
+// ───────────────────────── OCR service connection ─────────────────────────
+
+/// How a facility reads handwritten prescriptions: the OCR service address, its API key (encrypted at rest, never returned) and timeout.
+/// Without a row the server's OCR_* settings apply. Whether OCR is used at all is the PRESCRIPTION_OCR_ENABLED setting.
+model OcrConfig {
+  tenantId        String    @db.Uuid
+  facilityId      String    @db.Uuid
+  apiUrl          String?
+  apiKeyEnc       String?
+  keyLast4        String?
+  timeoutMs       Int       @default(20000)
+  lastTestAt      DateTime? @db.Timestamptz(3)
+  lastTestOk      Boolean?
+  lastTestMessage String?
+  updatedById     String    @db.Uuid
+  updatedAt       DateTime  @default(now()) @updatedAt @db.Timestamptz(3)
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([tenantId, facilityId])
+}
+
+// ───────────────────────── Prescription templates ─────────────────────────
+
+/// A doctor's saved prescription (medicines, tests advised, advice) to reuse in one click. Private to its owner unless shared with the facility.
+model PrescriptionTemplate {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String       @db.Uuid
+  facilityId String       @db.Uuid
+  ownerId    String       @db.Uuid
+  name       String
+  shared     Boolean      @default(false)
+  content    Json
+  status     ActiveStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  owner    User     @relation(fields: [tenantId, ownerId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, ownerId, name])
+  @@index([tenantId, facilityId, status])
+}
+
+// ───────────────────────── Further pages of a handwritten prescription ─────────────────────────
+
+/// A second, third, … page of the same handwritten prescription (page 1 is the scan's own file). Each page is read on its own; the scan's text is the pages in order.
+/// Pages can only be added until the scan is approved; what OCR returned for a page is kept unchanged.
+model PrescriptionScanPage {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String     @db.Uuid
+  facilityId    String     @db.Uuid
+  scanId        String     @db.Uuid
+  pageNo        Int
+  fileId        String     @db.Uuid
+  status        ScanStatus @default(UPLOADED)
+  ocrProvider   String?
+  ocrText       String?
+  ocrConfidence Decimal?   @db.Decimal(5, 4)
+  ocrError      String?
+  ocrAttempts   Int        @default(0)
+  ocrAt         DateTime?  @db.Timestamptz(3)
+  createdById   String     @db.Uuid
+  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
+
+  scan PrescriptionScan @relation(fields: [tenantId, scanId], references: [tenantId, id], onDelete: Restrict)
+  file PatientFile      @relation(fields: [tenantId, fileId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, fileId])
+  @@unique([scanId, pageNo])
+  @@index([tenantId, scanId])
+}
+
+// ───────────────────────── Sharing a signed prescription with the patient ─────────────────────────
+
+/// A link the patient can open to see and download their signed prescription, without signing in. Only a hash of the link's secret is stored; the link expires
+/// and can be revoked. Opening it is recorded. Nothing is sent by the system itself (delivery is by the staff member who shares it).
+model PrescriptionShare {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String    @db.Uuid
+  facilityId    String    @db.Uuid
+  encounterId   String    @db.Uuid
+  patientId     String    @db.Uuid
+  tokenHash     String    @unique
+  expiresAt     DateTime  @db.Timestamptz(3)
+  status        String    @default("ACTIVE")
+  /// The patient's mobile with all but the last digits hidden, so staff can see who it was meant for.
+  recipientMask String?
+  createdById   String    @db.Uuid
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  revokedAt     DateTime? @db.Timestamptz(3)
+  revokedById   String?   @db.Uuid
+  openCount     Int       @default(0)
+  lastOpenedAt  DateTime? @db.Timestamptz(3)
+
+  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, encounterId, createdAt(sort: Desc)])
+}
+
+// ───────────────────────── Doctor payouts (docs/doctor-payouts.md) ─────────────────────────
+
+enum PayoutKind {
+  PAYMENT
+  REVERSAL
+}
+
+/// A voucher for money paid to a doctor out of what the doctor share ledger says they have earned. What is still owed is the doctor's earned total (the ledger)
+/// less everything paid out. A voucher is never edited or deleted: a mistake is put right with a REVERSAL voucher that mirrors it with the opposite sign.
+model DoctorPayout {
+  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String        @db.Uuid
+  facilityId     String        @db.Uuid
+  practitionerId String        @db.Uuid
+  payoutNumber   String
+  kind           PayoutKind    @default(PAYMENT)
+  /// For a reversal, the voucher it undoes.
+  reversesId     String?       @unique @db.Uuid
+  /// The share paid, before tax deducted at source; negative on a reversal.
+  grossAmount    Decimal       @db.Decimal(14, 2)
+  tdsPercent     Decimal       @db.Decimal(5, 2)
+  tdsAmount      Decimal       @db.Decimal(14, 2)
+  /// What the doctor receives: gross less tax deducted.
+  netAmount      Decimal       @db.Decimal(14, 2)
+  method         PaymentMethod
+  reference      String?
+  note           String?
+  paidAt         DateTime      @default(now()) @db.Timestamptz(3)
+  createdById    String        @db.Uuid
+  createdAt      DateTime      @default(now()) @db.Timestamptz(3)
+
+  facility     Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  practitioner Practitioner  @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  reverses     DoctorPayout? @relation("PayoutReversal", fields: [reversesId], references: [id], onDelete: Restrict)
+  reversedBy   DoctorPayout? @relation("PayoutReversal")
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, payoutNumber])
+  @@index([tenantId, practitionerId, createdAt(sort: Desc)])
+  @@index([tenantId, facilityId, createdAt(sort: Desc)])
+}
+
+// ───────────────────────── Prescription delivery to the patient (docs/prescriptions.md) ─────────────────────────
+
+enum MessageStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+/// One message that carries the patient's prescription link to the patient's own mobile, by WhatsApp or SMS through the connected provider. The text and the
+/// full number are never kept here, only who it was for (masked), the channel, and what happened.
+model PrescriptionDelivery {
+  id                String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String        @db.Uuid
+  facilityId        String        @db.Uuid
+  encounterId       String        @db.Uuid
+  patientId         String        @db.Uuid
+  shareId           String?       @db.Uuid
+  channel           String
+  toMask            String
+  /// AUTO (when the prescription is signed) or MANUAL (staff pressed Send).
+  trigger           String
+  status            MessageStatus @default(PENDING)
+  attempts          Int           @default(0)
+  nextAttemptAt     DateTime      @default(now()) @db.Timestamptz(3)
+  providerName      String?
+  providerMessageId String?
+  lastError         String?
+  createdById       String        @db.Uuid
+  createdAt         DateTime      @default(now()) @db.Timestamptz(3)
+  sentAt            DateTime?     @db.Timestamptz(3)
+
+  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, encounterId, createdAt(sort: Desc)])
 }

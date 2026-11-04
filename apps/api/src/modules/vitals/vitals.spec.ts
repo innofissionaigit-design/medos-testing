@@ -149,7 +149,7 @@ describe("vitals recording", () => {
     const { v } = await fresh();
     await record(nurse.token, v.encounterId, [{ type: "PULSE", value: 70 }]);
     await record(nurse.token, v.encounterId, [{ type: "PULSE", value: 90 }]);
-    const r = await t.api("get", `/encounters/${v.encounterId}/observations`, doc.token);
+    const r = await t.api("get", `/encounters/${v.encounterId}/observations`, nurse.token);
     assert.equal(r.body.data.items.length, 2);
     assert.equal(r.body.data.latest.PULSE.value, "90");
     const times = r.body.data.items.map((i: { recordedAt: string }) => i.recordedAt);
@@ -227,9 +227,9 @@ describe("vitals recording", () => {
     await t.api("post", `/queue/${v1.queueId}/complete`, d.token);
     const v2 = await startVisit(t, rec.token, d, p.id);
     await record(nurse.token, v2.encounterId, [{ type: "PULSE", value: 82 }]);
-    const all = await t.api("get", `/patients/${p.id}/observations`, doc.token);
+    const all = await t.api("get", `/patients/${p.id}/observations`, d.token);
     assert.equal(all.body.meta.total, 3);
-    const pulse = await t.api("get", `/patients/${p.id}/observations`, doc.token).query({ type: "PULSE", pageSize: 1 });
+    const pulse = await t.api("get", `/patients/${p.id}/observations`, d.token).query({ type: "PULSE", pageSize: 1 });
     assert.equal(pulse.body.data.length, 1);
     assert.equal(pulse.body.data[0].value, "82");
     assert.equal(pulse.body.meta.total, 2);

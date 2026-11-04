@@ -285,6 +285,8 @@ export const HI: Record<string, string> = {
   "MRN": "MRN",
   "MRP": "MRP",
   "My account": "मेरा खाता",
+  "You see only your own patients, records and reports.": "आप केवल अपने मरीज़, रिकॉर्ड और रिपोर्ट देख सकते हैं।",
+  "You see only the data of your department:": "आप केवल अपने विभाग का डेटा देख सकते हैं:",
   "My cash shift": "मेरी कैश शिफ्ट",
   "Name": "नाम",
   "Name shown on prescriptions": "पर्ची पर दिखने वाला नाम",

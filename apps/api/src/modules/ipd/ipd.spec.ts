@@ -449,6 +449,26 @@ describe("IPD: wards, beds, admission, transfer, charges", () => {
       assert.equal(list.body.data.items.length, 1);
     });
 
+    it("the cashier's unbilled-charges view lists admitted patients' pending charges, only for this hospital and only with billing access", async () => {
+      const { ad, p } = await admitNew();
+      await t.api("post", `/admissions/${ad.id}/charges`, nurse.token).send({ type: "DOCTOR_VISIT", serviceId: consult, quantity: 2 });
+      const posted = await t.api("post", `/admissions/${ad.id}/charges`, rec.token).send({ type: "PROCEDURE", description: "Dressing", unitPrice: "150.00", taxPercent: 0, quantity: 1 });
+      const cashier = await t.makeUser(a, ["CASHIER"]);
+      const r = await t.api("get", "/charges/unbilled", cashier.token);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      const g = (r.body.data as { admissionId: string; pendingTotal: string; charges: number; patientName: string; items: { description: string }[] }[]).find((x) => x.admissionId === ad.id)!;
+      assert.equal(g.pendingTotal, "990.00");
+      assert.equal(g.charges, 2);
+      assert.ok(g.patientName.length > 0 && p.mrn.length > 0);
+      await t.api("post", `/charges/${posted.body.data.id}/void`, rec.token).send({ reason: "Entered in error" });
+      const again = (await t.api("get", "/charges/unbilled", cashier.token)).body.data as { admissionId: string; pendingTotal: string }[];
+      assert.equal(again.find((x) => x.admissionId === ad.id)!.pendingTotal, "840.00", "voided charges drop out");
+      const other = (await t.api("get", "/charges/unbilled", b.admin.token)).body.data as { admissionId: string }[];
+      assert.equal(other.some((x) => x.admissionId === ad.id), false, "another hospital never sees it");
+      assert.equal((await t.api("get", "/charges/unbilled", nurse.token)).status, 403);
+      assert.equal((await t.api("get", "/charges/unbilled")).status, 401);
+    });
+
     it("free-price charges need billing permission; unauthorised roles cannot post at all", async () => {
       const { ad } = await admitNew();
       const manual = { type: "PROCEDURE", description: "Minor suturing", unitPrice: "650.00", taxPercent: 0, quantity: 1 };

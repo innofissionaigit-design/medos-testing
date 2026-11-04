@@ -47,8 +47,8 @@ Found earlier on the API side (each has a regression test): trigger bugs in invo
 | G2 | Appointment owns the scheduling lifecycle; queue entry owns real-time flow; one domain service keeps them in sync. |
 | G3 | Permission list extended (`ALLERGY_WRITE`, `DUPLICATE_OVERRIDE`, `CASHIER_SHIFT_MANAGE`, `APPOINTMENT_OVERBOOK`, `INVOICE_ADJUST`, `PHARMACY_MASTERS`, `CHARGE_CREATE`). |
 | G4 | Login takes tenant code + identifier; tenant/facility come only from the session afterwards. |
-| G5 | **Not implemented**: no PostgreSQL row-level security. Isolation relies on tenant-scoped queries, composite foreign keys and a sweep test over every id route. Recommended hardening before multi-tenant production. |
-| G6 | Per-line tax, decimal-safe, half-up to 2 dp; medicines are MRP-inclusive. **Needs a tax/legal review**; not certified. |
+| G5 | **Implemented and verified in development; not yet switched in staging or production** ([ADR-010](adr/010-row-level-security.md), [`rls.md`](rls.md)). PostgreSQL row-level security is a second layer behind tenant-scoped queries, composite foreign keys and the id-sweep test: a restricted `medos_app` login, a policy on every tenant table, a transaction-local tenant taken from the verified session, narrow explicit paths for login, token refresh and the reminder worker, and a startup check. Over a real restricted login: 470 of 470 API tests, 24 escalation attempts refused, no leakage through a reused connection, an evidence tool, and a restore rehearsal. **Before production:** run the first-switch procedure in staging (real password authentication) and keep the evidence. |
+| G6 | **Partly implemented; not certified; needs a tax review.** Built: per-line tax, decimal-safe, half-up to 2 dp; medicines MRP-inclusive with selling price capped at MRP (API and database); optional HSN/SAC codes on services and medicines, copied onto each invoice line when billed and printed when present (tests: `hsn.spec.ts`, final-bill test in `discharge.spec.ts`). **Not built:** CGST/SGST/IGST split, round-off, e-invoicing, GST return export. Every provisional rule awaits the reviewer: [reviews/pending-decisions.md](reviews/pending-decisions.md) (T1 to T8). |
 | G7 | Cash requires an open cashier shift; non-cash does not. |
 | G8 | Overpayment rejected; advance payments deferred (backlog). |
 | G9 | Refunds and credit notes are separate records; `REFUNDED` only for a full refund. |
@@ -56,7 +56,7 @@ Found earlier on the API side (each has a regression test): trigger bugs in invo
 | G11 | One `MedicationOrder` model for OPD and IPD. |
 | G12 | Server-rendered HTML and PDF (pdfkit, Latin fonts) from one document model. |
 | G13 | scrypt instead of Argon2 (ADR-009). |
-| G14 | **Flagged for legal review** (DPDP Act 2023, retention). Engineering does not certify compliance. |
+| G14 | **Partly implemented; not certified; needs legal review (DPDP Act 2023).** Engineering does not certify compliance. Built (API plus basic screens: patient record card, Administration "Privacy" tab; the screens are not browser-tested): append-only patient consent record; reminders honour withdrawal and an opt-in setting; patient data-request log (never deleted, no erasure performed); `PRIVACY_MANAGE` permission; audit events; hospital isolation tests (`privacy.spec.ts`, [privacy.md](privacy.md)). **Not built:** a consent step at registration, notice management, retention schedule or erasure tooling, guardian consent, break-glass access, breach tooling (draft checklist only). Open decisions: [reviews/pending-decisions.md](reviews/pending-decisions.md) (D1 to D10). |
 | G15 | No Redis in MLP-1; patient files on local disk behind a storage interface (ADR-009). |
 
 ## 5. Known limitations (read before any production use)
@@ -64,15 +64,15 @@ Found earlier on the API side (each has a regression test): trigger bugs in invo
 **Not production-approved.** This is a release candidate for review. Deferred items are tracked in [`../REMINDER.md`](../REMINDER.md). Summary:
 
 - Docker images, compose stack and the CI workflow were written but **never run** (no Docker here).
-- No PostgreSQL row-level security (G5); rate limiting is per API instance.
+- PostgreSQL row-level security (G5) is implemented and verified in development only; staging and production still have to be switched with the documented procedure and evidence. Its limits are in `rls.md` (owner and superuser bypass by design; no automated check against building SQL from strings; hospital-level isolation only, not facility-level). Rate limiting is shared across API instances through PostgreSQL; the web server's refresh cache is still per instance.
 - `pnpm audit`: 1 moderate advisory in `@nestjs/core`, fixed only by a Nest 11 upgrade.
-- Backups are logical dumps only: no point-in-time recovery, encryption or scheduled restore drill.
-- PDFs use Latin fonts only (Bengali/Hindi text prints as "?"); Bengali/Hindi UI strings need native-speaker review; uploaded files are not virus-scanned; files live on local disk.
+- Backups: encrypted backup, restore, restore drill, alerts, a point-in-time-recovery rehearsal and schedule templates are built and verified in development (`backup.md`). Not yet done on staging/production: WAL archiving, installed schedules, off-host storage (only the upload hook is verified), a first real drill; the schedule files and Windows scripts were not run here.
+- PDFs use Latin fonts only (Bengali/Hindi text prints as "?"); Bengali/Hindi UI strings need native-speaker review; uploaded files are virus-scanned only when a ClamAV daemon is configured (`CLAMAV_HOST`, tested against a stand-in, not a real ClamAV); files live on local disk.
 - Not verified as built in the UI: stock `TRANSFER` movements, supplier management, a custom-role editor, discharge waivers and OPD prescription stop/amend. Check before relying on them.
 - Verification scope: Chromium only, one machine; no multi-user load test, accessibility audit, penetration test, clinical-safety review, GST/tax review or data-protection review.
 
 ## 6. Recommended next steps
 1. Run the Docker build, compose stack and CI workflow; fix what surfaces.
-2. Decide on PostgreSQL row-level security; upgrade to Nest 11.
-3. Independent reviews: clinical safety, tax/GST, DPDP, penetration test.
+2. Switch PostgreSQL row-level security on in staging (procedure and evidence tool in `rls.md`), then production; upgrade to Nest 11.
+3. Independent reviews: clinical safety, tax/GST, DPDP, penetration test, accessibility audit. Briefs are prepared in [reviews/](reviews/README.md); **none has been performed**. Engineering also ran a multi-user load test and a partial automated accessibility self-check ([load-test.md](load-test.md)): neither replaces the independent reviews.
 4. Pilot with synthetic then anonymised data in a staging environment before any real patient data.

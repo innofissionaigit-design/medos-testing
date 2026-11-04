@@ -1,0 +1,92 @@
+name: release
+
+# Builds the two container images from a commit and promotes them, one stage at a time, by moving the :staging and :production
+# tags (CLAUDE.md §52: production needs explicit approval; nothing deploys on a merge). Run it by hand: Actions → release.
+#
+# The rollout itself is "the host pulls the :staging / :production tag" (docker compose pull && up -d, or your platform's equivalent).
+# The approvals are GitHub *environments*, which only you can switch on (Settings → Environments, see docs/deployment.md):
+#   staging     optional reviewers
+#   production  Required reviewers = the people allowed to approve a production release; "Deployment branches" = main only
+# Until "production" has required reviewers, nothing stops this workflow promoting to production without a human click.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA, branch or tag to release (default: the branch you run this from)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      prefix: ${{ steps.meta.outputs.prefix }}
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - id: meta
+        name: Image names (registry paths must be lowercase)
+        run: |
+          echo "prefix=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/api.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.prefix }}/api:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+      - name: Build and push the web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/web.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.prefix }}/web:${{ steps.meta.outputs.tag }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  staging:
+    needs: images
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: Point :staging at this build
+        run: |
+          for app in api web; do
+            docker buildx imagetools create -t "${{ needs.images.outputs.prefix }}/$app:staging" "${{ needs.images.outputs.prefix }}/$app:${{ needs.images.outputs.tag }}"
+          done
+
+  production:
+    needs: [images, staging]
+    runs-on: ubuntu-latest
+    environment: production   # waits here for the required reviewers configured on the "production" environment
+    steps:
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - name: Point :production at the build that passed staging
+        run: |
+          for app in api web; do
+            docker buildx imagetools create -t "${{ needs.images.outputs.prefix }}/$app:production" "${{ needs.images.outputs.prefix }}/$app:${{ needs.images.outputs.tag }}"
+          done

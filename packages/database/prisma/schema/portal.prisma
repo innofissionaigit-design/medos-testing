@@ -1,0 +1,64 @@
+// Patient app (docs/patient-app.md): a patient signs in with a one-time code sent to the mobile number the hospital has on record, and sees only their own
+// records. These tables hold the codes, the sessions they open, and the appointment requests a patient makes (the front desk books them).
+
+enum AppointmentRequestStatus {
+  PENDING
+  BOOKED
+  DECLINED
+  CANCELLED
+}
+
+/// A one-time sign-in code. Only a keyed hash of the code is kept; it expires in minutes and allows a few wrong tries.
+model PatientOtp {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String    @db.Uuid
+  mobile     String
+  codeHash   String
+  expiresAt  DateTime  @db.Timestamptz(3)
+  attempts   Int       @default(0)
+  consumedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, mobile, createdAt(sort: Desc)])
+}
+
+/// A signed-in patient app session for one mobile number. Only a hash of the token is kept.
+model PatientSession {
+  id         String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String    @db.Uuid
+  mobile     String
+  tokenHash  String    @unique
+  expiresAt  DateTime  @db.Timestamptz(3)
+  revokedAt  DateTime? @db.Timestamptz(3)
+  lastUsedAt DateTime? @db.Timestamptz(3)
+  createdAt  DateTime  @default(now()) @db.Timestamptz(3)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, mobile])
+}
+
+model AppointmentRequest {
+  id             String                   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String                   @db.Uuid
+  facilityId     String                   @db.Uuid
+  patientId      String                   @db.Uuid
+  practitionerId String?                  @db.Uuid
+  preferredDate  DateTime                 @db.Date
+  /// MORNING, AFTERNOON, EVENING or ANY.
+  timeOfDay      String
+  reason         String
+  status         AppointmentRequestStatus @default(PENDING)
+  handledById    String?                  @db.Uuid
+  handledAt      DateTime?                @db.Timestamptz(3)
+  handleNote     String?
+  appointmentId  String?                  @db.Uuid
+  createdAt      DateTime                 @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime                 @updatedAt @db.Timestamptz(3)
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, status, createdAt])
+  @@index([tenantId, patientId])
+}

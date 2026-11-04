@@ -5,6 +5,7 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { visitScope } from "../../common/data-scope";
 import { dateOnly, localDateStr } from "../../common/time";
 import { EncountersService } from "../encounters/encounters.service";
 
@@ -41,7 +42,7 @@ export const callNextSchema = z.object({ practitionerId: z.string().uuid().optio
 export const doctorViewSchema = z.object({ practitionerId: z.string().uuid().optional() }).strict();
 
 const VIEW = {
-  id: true, tokenNumber: true, priority: true, status: true, checkedInAt: true, calledAt: true, consultationStartedAt: true,
+  id: true, tokenNumber: true, tokenDate: true, priority: true, status: true, checkedInAt: true, calledAt: true, consultationStartedAt: true,
   completedAt: true, encounterId: true, patientId: true, practitionerId: true, departmentId: true, appointmentId: true, version: true,
   patient: { select: { firstName: true, lastName: true, gender: true, identifiers: { where: { type: "MRN" as const }, select: { value: true } } } },
   practitioner: { select: { displayName: true, userId: true } },
@@ -54,6 +55,7 @@ export function toQueueView(q: Row, now = Date.now()) {
   const waiting = q.status === "WAITING" || q.status === "CALLED";
   return {
     ...rest,
+    tokenDate: q.tokenDate.toISOString().slice(0, 10),
     patientName: [patient.firstName, patient.lastName].filter(Boolean).join(" "),
     gender: patient.gender, mrn: patient.identifiers[0]?.value ?? null,
     practitionerName: practitioner.displayName, departmentName: department?.name ?? null,
@@ -75,7 +77,7 @@ export class QueueService {
   async list(ctx: RequestContext, q: z.infer<typeof queueListSchema>) {
     const tokenDate = await this.today(this.prisma, ctx);
     const rows = await this.prisma.queueEntry.findMany({
-      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, tokenDate, ...(q.practitionerId ? { practitionerId: q.practitionerId } : {}), ...(q.status ? { status: q.status } : {}) },
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, OR: [{ tokenDate }, { status: "IN_CONSULTATION", tokenDate: { lt: tokenDate } }], AND: [visitScope(ctx)], ...(q.practitionerId ? { practitionerId: q.practitionerId } : {}), ...(q.status ? { status: q.status } : {}) },
       select: VIEW, orderBy: ORDER, take: 500,
     });
     const now = Date.now();
@@ -91,13 +93,16 @@ export class QueueService {
         tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE",
         ...(practitionerId ? { id: practitionerId } : { userId: ctx.userId }),
       },
-      select: { id: true, displayName: true, userId: true },
+      select: { id: true, displayName: true, userId: true, departmentId: true },
     });
     if (!practitioner) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+    const sc = ctx.dataScope;
+    if (sc.kind === "DOCTOR" && !sc.practitionerIds.includes(practitioner.id)) throw new DomainError("FORBIDDEN", "You can only view your own queue", 403);
+    if (sc.kind === "DEPARTMENT" && !(practitioner.departmentId && sc.departmentIds.includes(practitioner.departmentId))) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     if (practitioner.userId !== ctx.userId && !ctx.permissions.has("QUEUE_MANAGE")) throw new DomainError("FORBIDDEN", "You can only view your own queue", 403);
 
     const rows = await this.prisma.queueEntry.findMany({
-      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId: practitioner.id, tokenDate }, select: VIEW, orderBy: ORDER, take: 500,
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId: practitioner.id, OR: [{ tokenDate }, { status: "IN_CONSULTATION", tokenDate: { lt: tokenDate } }] }, select: VIEW, orderBy: ORDER, take: 500,
     });
     const now = Date.now();
     const views = rows.map((r) => toQueueView(r, now));
@@ -143,6 +148,9 @@ export class QueueService {
       if (action === "complete") {
         const doc = await tx.clinicalDocument.findFirst({ where: { tenantId: ctx.tenantId, encounterId: entry.encounterId, kind: "CONSULTATION" }, select: { status: true } });
         if (doc?.status === "DRAFT") throw new DomainError("INVALID_STATE", "Sign the consultation before completing the visit", 409);
+        // Prescriptions are signed together with the consultation, and a completed visit can no longer be signed: an unsigned draft would never reach the pharmacy.
+        const draftRx = await tx.medicationOrder.findFirst({ where: { tenantId: ctx.tenantId, encounterId: entry.encounterId, status: "DRAFT" }, select: { id: true } });
+        if (draftRx) throw new DomainError("INVALID_STATE", "Sign the consultation to send the prescription to the pharmacy before completing the visit", 409);
         await this.encounters.transition(tx, ctx, entry.encounterId, "COMPLETED");
       }
       if (action === "cancel") await this.encounters.transition(tx, ctx, entry.encounterId, "CANCELLED", reason);

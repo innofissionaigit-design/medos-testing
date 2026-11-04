@@ -16,7 +16,7 @@ export default function NursingPage() {
   const list = useQuery({ queryKey: ["worklist"], queryFn: () => api.get<Row[]>("/nursing/worklist"), refetchInterval: 30_000 });
   return (
     <Gate anyOf={["NURSING_READ"]} feature="NURSING_ENABLED">
-      <PageHeader title="Ward worklist" subtitle="Admitted patients with medication and tasks due" />
+      <PageHeader title="Ward worklist" subtitle={list.data ? `${list.data.length} admitted patient${list.data.length === 1 ? "" : "s"} · medication and tasks due` : "Admitted patients with medication and tasks due"} />
       <Card>
         {list.isLoading ? <Spinner /> : (
           <Table head={["Bed", "Patient", "Doctor", "Medication", "Tasks", "Alerts"]} {...(list.data?.length === 0 ? { empty: "No admitted patients." } : {})}>

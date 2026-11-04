@@ -5,12 +5,13 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { admissionScope } from "../../common/data-scope";
 import { dateOnly, localDateStr } from "../../common/time";
 import { computeLine, fmt } from "../billing/billing.domain";
 import { amount, percent, quantity } from "../billing/money.schema";
 
 const catalogCharge = z.object({ type: z.enum(["DOCTOR_VISIT", "PROCEDURE", "SERVICE"]).default("SERVICE"), serviceId: z.string().uuid(), quantity }).strict();
-const manualCharge = z.object({ type: z.enum(["DOCTOR_VISIT", "PROCEDURE", "SERVICE"]).default("SERVICE"), description: z.string().trim().min(2).max(200), unitPrice: amount(), taxPercent: percent.default(0), quantity }).strict();
+const manualCharge = z.object({ type: z.enum(["DOCTOR_VISIT", "PROCEDURE", "SERVICE"]).default("SERVICE"), description: z.string().trim().min(2).max(200), unitPrice: amount(), taxPercent: percent.prefault(0), quantity }).strict();
 export const postChargeSchema = z.union([catalogCharge, manualCharge]);
 export const voidChargeSchema = z.object({ reason: z.string().trim().min(3).max(240) }).strict();
 export const listChargesSchema = z.object({ status: z.enum(["PENDING", "BILLED", "VOIDED"]).optional() }).strict();
@@ -38,9 +39,28 @@ export class ChargesService {
   constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   async list(ctx: RequestContext, admissionId: string, status?: "PENDING" | "BILLED" | "VOIDED") {
-    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true } });
+    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] }, select: { id: true } });
     if (!adm) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     return this.summarise(this.prisma, ctx, admissionId, status);
+  }
+
+  /** Charges waiting to be billed, grouped by current admission, so the cashier sees what each admitted patient owes before discharge. */
+  async unbilled(ctx: RequestContext) {
+    const rows = await this.prisma.charge.findMany({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "PENDING", admission: { status: "ADMITTED" } },
+      select: { ...VIEW, admission: { select: { id: true, admissionNumber: true, admittedAt: true, patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" }, select: { value: true }, take: 1 } } } } } },
+      orderBy: { chargedAt: "asc" },
+      take: 5000,
+    });
+    const byAdmission = new Map<string, { admissionId: string; admissionNumber: string; admittedAt: Date; patientName: string; mrn: string | null; charges: number; pendingTotal: Decimal; items: ReturnType<typeof toChargeView>[] }>();
+    for (const { admission, ...c } of rows) {
+      const g = byAdmission.get(admission.id) ?? { admissionId: admission.id, admissionNumber: admission.admissionNumber, admittedAt: admission.admittedAt, patientName: [admission.patient.firstName, admission.patient.lastName].filter(Boolean).join(" "), mrn: admission.patient.identifiers[0]?.value ?? null, charges: 0, pendingTotal: new Decimal(0), items: [] };
+      g.charges += 1;
+      g.pendingTotal = g.pendingTotal.plus(chargeAmounts(c).total);
+      g.items.push(toChargeView(c));
+      byAdmission.set(admission.id, g);
+    }
+    return [...byAdmission.values()].map((g) => ({ ...g, pendingTotal: fmt(g.pendingTotal) }));
   }
 
   async post(ctx: RequestContext, admissionId: string, input: z.infer<typeof postChargeSchema>) {

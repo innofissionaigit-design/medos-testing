@@ -7,22 +7,30 @@ import { Button, Card, ErrorNote, Input, KV, PageHeader, Select, Spinner, Table,
 import { reportToCsv } from "@/lib/csv";
 import { api } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { REPORT_PERMISSIONS } from "@/lib/nav";
 
-interface ReportDef { id: string; label: string; path: string; ranged: boolean; feature?: "PHARMACY_ENABLED" | "IPD_ENABLED"; extra?: Record<string, string> }
+/** `perm` is the report's area: shown to holders of that permission or of REPORT_READ (the API applies the same rule). */
+interface ReportDef { id: string; label: string; path: string; ranged: boolean; perm: "REPORT_OPD" | "REPORT_FINANCE" | "REPORT_IPD" | "REPORT_PHARMACY" | "REPORT_MY_PRACTICE"; feature?: "PHARMACY_ENABLED" | "IPD_ENABLED"; extra?: Record<string, string> }
 const REPORTS: ReportDef[] = [
-  { id: "opd-daily", label: "OPD visits per day", path: "opd/daily", ranged: true },
-  { id: "opd-doctor", label: "OPD visits by doctor", path: "opd/by-doctor", ranged: true },
-  { id: "opd-dept", label: "OPD visits by department", path: "opd/by-department", ranged: true },
-  { id: "collections", label: "Collections and payment modes", path: "collections", ranged: true },
-  { id: "shifts", label: "Cashier shifts", path: "cashier-shifts", ranged: true },
-  { id: "outstanding", label: "Outstanding bills", path: "outstanding-invoices", ranged: false },
-  { id: "cur-adm", label: "Current admissions", path: "ipd/current-admissions", ranged: false, feature: "IPD_ENABLED" },
-  { id: "adm-dis", label: "Admissions and discharges", path: "ipd/admissions-discharges", ranged: true, feature: "IPD_ENABLED" },
-  { id: "occupancy", label: "Bed occupancy", path: "ipd/bed-occupancy", ranged: false, feature: "IPD_ENABLED" },
-  { id: "sales", label: "Pharmacy sales", path: "pharmacy/sales", ranged: true, feature: "PHARMACY_ENABLED" },
-  { id: "stock", label: "Current pharmacy stock", path: "pharmacy/stock", ranged: false, feature: "PHARMACY_ENABLED" },
-  { id: "low", label: "Low stock", path: "pharmacy/low-stock", ranged: false, feature: "PHARMACY_ENABLED" },
-  { id: "expiry", label: "Near-expiry stock", path: "pharmacy/near-expiry", ranged: false, feature: "PHARMACY_ENABLED" },
+  { id: "bookings-earnings", label: "Bookings and earnings by doctor", path: "bookings/by-doctor", ranged: true, perm: "REPORT_FINANCE" },
+  { id: "my-bookings", label: "My bookings and earnings", path: "bookings/my", ranged: true, perm: "REPORT_MY_PRACTICE" },
+  { id: "my-payouts", label: "My payout statement", path: "earnings/my-statement", ranged: true, perm: "REPORT_MY_PRACTICE" },
+  { id: "opd-daily", label: "OPD visits per day", path: "opd/daily", ranged: true, perm: "REPORT_OPD" },
+  { id: "opd-doctor", label: "OPD visits by doctor", path: "opd/by-doctor", ranged: true, perm: "REPORT_OPD" },
+  { id: "opd-dept", label: "OPD visits by department", path: "opd/by-department", ranged: true, perm: "REPORT_OPD" },
+  { id: "collections", label: "Collections and payment modes", path: "collections", ranged: true, perm: "REPORT_FINANCE" },
+  { id: "registrations", label: "Patient registrations and fees", path: "registrations", ranged: true, perm: "REPORT_FINANCE" },
+  { id: "fee-skips", label: "Booking fees skipped", path: "booking-fee-skips", ranged: true, perm: "REPORT_FINANCE" },
+  { id: "shifts", label: "Cashier shifts", path: "cashier-shifts", ranged: true, perm: "REPORT_FINANCE" },
+  { id: "outstanding", label: "Outstanding bills", path: "outstanding-invoices", ranged: false, perm: "REPORT_FINANCE" },
+  { id: "cur-adm", label: "Current admissions", path: "ipd/current-admissions", ranged: false, perm: "REPORT_IPD", feature: "IPD_ENABLED" },
+  { id: "adm-dis", label: "Admissions and discharges", path: "ipd/admissions-discharges", ranged: true, perm: "REPORT_IPD", feature: "IPD_ENABLED" },
+  { id: "occupancy", label: "Bed occupancy", path: "ipd/bed-occupancy", ranged: false, perm: "REPORT_IPD", feature: "IPD_ENABLED" },
+  { id: "sales", label: "Pharmacy sales", path: "pharmacy/sales", ranged: true, perm: "REPORT_PHARMACY", feature: "PHARMACY_ENABLED" },
+  { id: "movement", label: "Stock movement", path: "pharmacy/stock-movement", ranged: true, perm: "REPORT_PHARMACY", feature: "PHARMACY_ENABLED" },
+  { id: "stock", label: "Current pharmacy stock", path: "pharmacy/stock", ranged: false, perm: "REPORT_PHARMACY", feature: "PHARMACY_ENABLED" },
+  { id: "low", label: "Low stock", path: "pharmacy/low-stock", ranged: false, perm: "REPORT_PHARMACY", feature: "PHARMACY_ENABLED" },
+  { id: "expiry", label: "Near-expiry stock", path: "pharmacy/near-expiry", ranged: false, perm: "REPORT_PHARMACY", feature: "PHARMACY_ENABLED" },
 ];
 
 const humanize = (k: string) => k.replace(/([A-Z])/g, " $1").replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
@@ -47,7 +55,7 @@ function Render({ data }: { data: Record<string, unknown> }) {
         const cols = Object.keys(rows[0] ?? {}).filter((c) => isPrim(rows[0]?.[c]) && !/(^id$|Id$)/.test(c));
         return (
           <div key={name}>
-            <h3 className="mb-1 text-sm font-semibold text-slate-700">{humanize(name)}</h3>
+            <h2 className="mb-1 text-sm font-semibold text-slate-700">{humanize(name)}</h2>
             <Table head={cols.map(humanize)}>{rows.map((r, i) => <tr key={i}>{cols.map((c) => <Td key={c}>{cell(r[c])}</Td>)}</tr>)}</Table>
           </div>
         );
@@ -58,7 +66,8 @@ function Render({ data }: { data: Record<string, unknown> }) {
 }
 
 function download(title: string, base: string, data: Record<string, unknown>) {
-  const blob = new Blob([reportToCsv(title, data)], { type: "text/csv;charset=utf-8" });
+  // The byte-order mark makes Excel read the file as UTF-8, so ₹ and Bengali/Hindi names are not garbled.
+  const blob = new Blob(["\uFEFF", reportToCsv(title, data)], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = `${base}.csv`;
@@ -67,29 +76,32 @@ function download(title: string, base: string, data: Record<string, unknown>) {
 }
 
 export default function ReportsPage() {
-  const { me, features } = useMe();
+  const { me, features, can } = useMe();
   const tz = me.facility?.timezone ?? me.tenant.timezone;
-  const available = REPORTS.filter((r) => !r.feature || features[r.feature]);
+  const available = REPORTS.filter((r) => (!r.feature || features[r.feature]) && (r.perm === "REPORT_MY_PRACTICE" ? can("REPORT_MY_PRACTICE") : can("REPORT_READ", r.perm)));
   const [id, setId] = useState(available[0]?.id ?? "opd-daily");
   const [from, setFrom] = useState(todayIn(tz));
   const [to, setTo] = useState(todayIn(tz));
   const [days, setDays] = useState("90");
-  const def = available.find((r) => r.id === id) ?? available[0]!;
+  const def = available.find((r) => r.id === id) ?? available[0];
   const q = useQuery({
-    queryKey: ["report", def.id, from, to, days],
-    queryFn: () => api.get<Record<string, unknown>>(`/reports/${def.path}`, def.ranged ? { from, to } : def.id === "expiry" ? { withinDays: days } : undefined),
+    queryKey: ["report", def?.id, from, to, days],
+    queryFn: () => api.get<Record<string, unknown>>(`/reports/${def!.path}`, def!.ranged ? { from, to } : def!.id === "expiry" ? { withinDays: days } : undefined),
+    enabled: !!def,
   });
   return (
-    <Gate anyOf={["REPORT_READ"]}>
+    <Gate anyOf={REPORT_PERMISSIONS}>
       <PageHeader title="Reports" subtitle="Operational reports for your facility" />
-      <Card actions={<>
-        <Select aria-label="Report" className="w-64" value={def.id} onChange={(e) => setId(e.target.value)}>{available.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}</Select>
-        {def.ranged && <><Input type="date" aria-label="From" className="w-40" value={from} onChange={(e) => setFrom(e.target.value)} /><Input type="date" aria-label="To" className="w-40" value={to} onChange={(e) => setTo(e.target.value)} /></>}
-        {def.id === "expiry" && <Input aria-label="Days" className="w-24" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} />}
-        <Button variant="secondary" disabled={!q.data} onClick={() => download(def.label, def.ranged ? `${def.id}_${from}_${to}` : def.id, q.data!)}>Download CSV</Button>
-      </>}>
-        {q.isLoading ? <Spinner /> : q.error ? <ErrorNote error={q.error} /> : q.data ? <Render data={q.data} /> : null}
-      </Card>
+      {!def ? <Card><p className="text-sm text-slate-500">No reports are available for your role at this facility.</p></Card> : (
+        <Card actions={<>
+          <Select aria-label="Report" className="w-64" value={def.id} onChange={(e) => setId(e.target.value)}>{available.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}</Select>
+          {def.ranged && <><Input type="date" aria-label="From" className="w-40" value={from} onChange={(e) => setFrom(e.target.value)} /><Input type="date" aria-label="To" className="w-40" value={to} onChange={(e) => setTo(e.target.value)} /></>}
+          {def.id === "expiry" && <Input aria-label="Days" className="w-24" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} />}
+          <Button variant="secondary" disabled={!q.data} onClick={() => download(def.label, def.ranged ? `${def.id}_${from}_${to}` : def.id, q.data!)}>Download CSV</Button>
+        </>}>
+          {q.isLoading ? <Spinner /> : q.error ? <ErrorNote error={q.error} /> : q.data ? <Render data={q.data} /> : null}
+        </Card>
+      )}
     </Gate>
   );
 }

@@ -1,0 +1,9 @@
+# Enable with: systemctl enable --now medos-backup-drill.timer   (runs medos-backup@drill.service)
+[Unit]
+Description=Weekly MedOS restore drill
+[Timer]
+Unit=medos-backup@drill.service
+OnCalendar=Sun *-*-* 03:30:00
+Persistent=true
+[Install]
+WantedBy=timers.target

@@ -14,7 +14,8 @@ export const createServiceSchema = z.object({
   name: z.string().trim().min(2).max(120),
   category: z.enum(CATEGORIES),
   price: amount(),
-  taxPercent: percent.default(0),
+  taxPercent: percent.prefault(0),
+  sacCode: z.string().trim().regex(/^\d{4,8}$/, "SAC/HSN code must be 4-8 digits").optional(),
 }).strict();
 
 export const updateServiceSchema = z.object({
@@ -22,6 +23,7 @@ export const updateServiceSchema = z.object({
   category: z.enum(CATEGORIES),
   price: amount(),
   taxPercent: percent,
+  sacCode: z.string().trim().regex(/^\d{4,8}$/, "SAC/HSN code must be 4-8 digits").nullable(),
   status: z.enum(["ACTIVE", "INACTIVE"]),
 }).partial().strict().refine((v) => Object.keys(v).length > 0, "No changes supplied");
 
@@ -33,7 +35,7 @@ export const listServicesSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(200).default(100),
 }).strict();
 
-const SELECT = { id: true, code: true, name: true, category: true, price: true, taxPercent: true, status: true } satisfies Prisma.ServiceSelect;
+const SELECT = { id: true, code: true, name: true, category: true, price: true, taxPercent: true, sacCode: true, status: true } satisfies Prisma.ServiceSelect;
 type Row = Prisma.ServiceGetPayload<{ select: typeof SELECT }>;
 export const toServiceView = (s: Row) => ({ ...s, price: s.price.toFixed(2), taxPercent: s.taxPercent.toFixed(2) });
 
@@ -74,6 +76,7 @@ export class CatalogService {
       if (input.status !== undefined) data.status = input.status;
       if (input.price !== undefined) data.price = input.price.toFixed(2);
       if (input.taxPercent !== undefined) data.taxPercent = input.taxPercent.toFixed(2);
+      if (input.sacCode !== undefined) data.sacCode = input.sacCode;
       const s = await tx.service.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id } }, data, select: SELECT });
       const priceChanged = input.price !== undefined && !existing.price.equals(input.price);
       const taxChanged = input.taxPercent !== undefined && !existing.taxPercent.equals(input.taxPercent);

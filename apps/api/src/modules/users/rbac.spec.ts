@@ -3,7 +3,7 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { PERMISSIONS, SYSTEM_ROLES } from "@medos/shared";
 import { CONTROLLERS } from "../../app.module";
-import { ANY_AUTHENTICATED, IS_PUBLIC, REQUIRED_PERMISSIONS } from "../../common/http";
+import { ANY_AUTHENTICATED, IS_PUBLIC, REQUIRED_ANY_PERMISSIONS, REQUIRED_PERMISSIONS } from "../../common/http";
 import { PASSWORD, startApp, type TestApp, type TestTenant } from "../../test/harness";
 
 describe("route access policy", () => {
@@ -20,7 +20,8 @@ describe("route access policy", () => {
         const declared =
           Reflect.getMetadata(IS_PUBLIC, handler) === true ||
           Reflect.getMetadata(ANY_AUTHENTICATED, handler) === true ||
-          (Reflect.getMetadata(REQUIRED_PERMISSIONS, handler) as unknown[] | undefined)?.length;
+          (Reflect.getMetadata(REQUIRED_PERMISSIONS, handler) as unknown[] | undefined)?.length ||
+          (Reflect.getMetadata(REQUIRED_ANY_PERMISSIONS, handler) as unknown[] | undefined)?.length;
         if (!declared) undeclared.push(`${C.name}.${name}`);
       }
     }

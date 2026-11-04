@@ -1,0 +1,47 @@
+// ABDM groundwork (docs/abdm.md): a patient's ABHA number recorded on their chart, and a facility's connection details for the ABDM gateway with a connection test.
+// Verifying an ABHA with ABDM, linking care contexts and sharing health records are NOT built: they need ABDM sandbox credentials and the current ABDM specifications.
+
+enum AbdmEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+
+model AbdmConfig {
+  tenantId        String          @db.Uuid
+  facilityId      String          @db.Uuid
+  environment     AbdmEnvironment @default(SANDBOX)
+  /// The address of ABDM's gateway session service, exactly as ABDM's current documentation gives it for the chosen environment.
+  sessionUrl      String?
+  clientId        String?
+  clientSecretEnc String?
+  secretLast4     String?
+  /// The facility's id in the Health Facility Registry.
+  hfrId           String?
+  lastTestAt      DateTime?       @db.Timestamptz(3)
+  lastTestOk      Boolean?
+  lastTestMessage String?
+  updatedById     String          @db.Uuid
+  updatedAt       DateTime        @default(now()) @updatedAt @db.Timestamptz(3)
+
+  @@id([tenantId, facilityId])
+}
+
+/// An ABHA number (and address) recorded for a patient by staff. It is recorded, not verified: nothing here has been checked with ABDM. Removing one keeps the row.
+model AbhaLink {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String    @db.Uuid
+  patientId    String    @db.Uuid
+  /// 14 digits, no dashes.
+  abhaNumber   String
+  abhaAddress  String?
+  recordedById String    @db.Uuid
+  recordedAt   DateTime  @default(now()) @db.Timestamptz(3)
+  removedById  String?   @db.Uuid
+  removedAt    DateTime? @db.Timestamptz(3)
+  removeReason String?
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, patientId])
+}

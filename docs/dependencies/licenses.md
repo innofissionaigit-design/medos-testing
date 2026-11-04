@@ -34,7 +34,7 @@ MedOS is proprietary commercial software. Engineering records licences as known 
 | Playwright | E2E | Apache-2.0 | planned |
 | Vitest or Jest | unit tests | MIT | planned |
 | Docker Engine / Compose | local infra | Apache-2.0 (Docker Desktop has separate commercial terms for larger organisations) | planned; not installed |
-| Argon2 binding (`argon2` or `@node-rs/argon2`) | password hashing | believed MIT | decide Stage 3 |
+| Argon2 binding `@node-rs/argon2` | password hashing | MIT | **adopted** ([ADR-011](../adr/011-argon2id.md)); prebuilt binaries, no install scripts |
 | Decimal library (e.g. `decimal.js`) | money maths | believed MIT | decide Stage 18 |
 
 ## 3. Flagged items — decision needed before Stage 1
@@ -52,7 +52,10 @@ None yet. Stage 0 adds no code and no dependencies. (`D:\Claude\package.json` at
 
 | Package | Version | Licence | Why needed | Added in stage |
 |---|---|---|---|---|
-| — | — | — | — | — |
+| `@node-rs/argon2` | 2.2.2 | MIT | Argon2id password hashing, off the main thread (ADR-011) | after MLP-1 hardening |
+| `@aws-sdk/client-s3` | 3.1152.0 (pinned, over two weeks old at adoption) | Apache-2.0 | S3-compatible patient-file storage (docs/storage.md); replaces nothing, the local driver remains | after MLP-1 hardening |
+| Noto Sans, Noto Sans Bengali, Noto Sans Devanagari (font files, 6 TTF) | 2022–2025 releases | **SIL Open Font License 1.1** (not on the allow-list above) | Bengali and Hindi text in printed PDFs. Added with the project owner's explicit approval on 2026-10-29; licence texts and checksums are in `apps/api/assets/fonts/`. Counsel should confirm the licence (REMINDER.md). | after MLP-1 hardening |
+| Caddy 2 (container image `caddy:2-alpine`, not linked into our code) | 2.x | Apache-2.0 | HTTPS reverse proxy in the compose `proxy` profile | after MLP-1 hardening |
 
 ## Audit result (2026-10-05)
 

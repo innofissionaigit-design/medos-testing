@@ -1,7 +1,7 @@
 {
   "version": "0.0.1",
   "configurations": [
-    { "name": "api", "runtimeExecutable": "powershell", "runtimeArgs": ["-NoProfile", "-File", "scripts/dev-api.ps1"], "port": 4000 },
-    { "name": "web", "runtimeExecutable": "pnpm", "runtimeArgs": ["--filter", "@medos/web", "dev"], "port": 3000 }
+    { "name": "api", "runtimeExecutable": "C:\\Users\\Chakravardhan\\medos-tools\\node\\node-v22.23.4-win-x64\\node.exe", "runtimeArgs": ["--env-file=.local/api.dev.env", "apps/api/dist/main.js"], "port": 4000 },
+    { "name": "web", "runtimeExecutable": "C:\\Users\\Chakravardhan\\medos-tools\\node\\node-v22.23.4-win-x64\\node.exe", "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "-p", "3000"], "cwd": "apps/web", "port": 3000 }
   ]
 }

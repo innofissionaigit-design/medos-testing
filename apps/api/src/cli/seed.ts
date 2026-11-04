@@ -1,6 +1,7 @@
 import "reflect-metadata";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import { tenantScope } from "../common/tenant-scope";
 import { FIRST_NAMES_F, FIRST_NAMES_M, GENERICS, LAST_NAMES, LOCALITIES } from "./seed-data";
 
 /**
@@ -157,6 +158,10 @@ async function main(): Promise<void> {
   for (const [c, n, price, cat] of [["CONS", "OPD consultation", "500", "CONSULTATION"], ["DRESS", "Dressing (small)", "150", "INJECTION_DRESSING"], ["INJ", "Injection charge", "80", "INJECTION_DRESSING"], ["ECG", "ECG", "300", "PROCEDURE"]] as const) {
     services.push((await call("POST", "/services", admin, { code: c, name: n, category: cat, price, taxPercent: 0 }))["id"] as string);
   }
+  // The hospital's lab-test and investigation list, which feeds the Lab test dropdown of the prescription and the Cashier's test billing (synthetic prices).
+  for (const [c, n, price] of [["CBC", "CBC (complete blood count)", "250"], ["ESR", "ESR", "100"], ["LFT", "Liver function test (LFT)", "600"], ["KFT", "Kidney function test (KFT)", "550"], ["RBS", "Random blood sugar", "80"], ["FBS", "Fasting blood sugar", "80"], ["HBA1C", "HbA1c", "450"], ["LIPID", "Lipid profile", "700"], ["TSH", "TSH", "350"], ["CRP", "CRP", "400"], ["URINE", "Urine routine", "120"], ["XRAYCH", "Chest X-ray", "400"], ["USGAB", "USG abdomen", "900"], ["ECHO", "2D echo", "1500"]] as const) {
+    await call("POST", "/services", admin, { code: c, name: n, category: "INVESTIGATION", price, taxPercent: 0 });
+  }
   await call("POST", "/shifts/open", cashier, { openingCash: "2000" });
   for (let i = 0; i < COUNTS.invoices; i++) {
     const inv = await call("POST", "/invoices", cashier, { patientId: patients[COUNTS.invAt + i], lines: [{ serviceId: pick(services), quantity: 1 }, ...(i % 3 === 0 ? [{ serviceId: pick(services), quantity: 2 }] : [])] });
@@ -175,7 +180,8 @@ async function main(): Promise<void> {
   process.stdout.write(generated ? `Password (generated, shown once): ${password}\n` : "Password: the value of SEED_PASSWORD\n");
 }
 
-main().catch((e: unknown) => {
+// The seed provisions a hospital and writes across it: an owner operation, run with the OWNER database login (docs/rls.md).
+tenantScope.owner(() => main()).catch((e: unknown) => {
   process.stderr.write(`Seed failed: ${e instanceof Error ? e.message : String(e)}\n`);
   process.exit(1);
 });

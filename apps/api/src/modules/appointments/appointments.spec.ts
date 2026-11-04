@@ -272,7 +272,8 @@ describe("appointments", () => {
       const p = await registerPatient(t, rec.token);
       const future = await book(rec.token, { patientId: p.id, practitionerId: d.practitionerId, startAt: inMinutes(24 * 60 * 15) });
       assert.equal((await t.api("post", `/appointments/${future.body.data.id}/no-show`, rec.token)).status, 409);
-      const past = await book(rec.token, { patientId: p.id, practitionerId: d.practitionerId, startAt: inMinutes(-10), durationMinutes: 5 });
+      const p2 = await registerPatient(t, rec.token); // another patient: the same patient twice with one doctor is a duplicate booking
+      const past = await book(rec.token, { patientId: p2.id, practitionerId: d.practitionerId, startAt: inMinutes(-10), durationMinutes: 5 });
       assert.equal(past.status, 201, "up to 15 minutes late is accepted");
       const ns = await t.api("post", `/appointments/${past.body.data.id}/no-show`, rec.token);
       assert.equal(ns.status, 200);

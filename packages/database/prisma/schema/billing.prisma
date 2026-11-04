@@ -20,12 +20,15 @@ model Service {
   price      Decimal         @db.Decimal(12, 2)
   /// GST / tax rate in percent. Tax treatment of each service needs professional review before go-live.
   taxPercent Decimal         @default(0) @db.Decimal(5, 2)
+  /// Optional SAC/HSN code for the service (4-8 digits); copied onto each invoice line when billed.
+  sacCode    String?
   status     ActiveStatus    @default(ACTIVE)
   createdAt  DateTime        @default(now()) @db.Timestamptz(3)
   updatedAt  DateTime        @updatedAt @db.Timestamptz(3)
 
   facility Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
   lines    InvoiceLine[]
+  labDefinitions LabTestDefinition[]
   charges  Charge[]
 
   @@unique([tenantId, id])
@@ -49,6 +52,8 @@ enum InvoiceKind {
   IPD
   PHARMACY
   OTHER
+  /// The one-time patient registration fee (docs/registration-fee.md).
+  REGISTRATION
 }
 
 model Invoice {
@@ -81,14 +86,20 @@ model Invoice {
 
   patient     Patient       @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
   facility    Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  registration PatientRegistration?
+  visitCover   VisitConsultationBill?
   encounter   Encounter?    @relation(fields: [encounterId], references: [id], onDelete: Restrict)
   lines       InvoiceLine[]
   receipts    Receipt[]
   refunds     Refund[]
   creditNotes CreditNote[]
+  advanceUses AdvanceUse[]
+  advanceReturns AdvanceReturn[]
   dispenses   Dispense[]
   charges     Charge[]
+  claims      Claim[]
   finalFor    Admission[] @relation("AdmissionFinalInvoice")
+  shareEntries DoctorShareEntry[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, invoiceNumber])
@@ -112,6 +123,8 @@ model InvoiceLine {
   /// Net after discount plus tax.
   lineTotal      Decimal  @db.Decimal(12, 2)
   /// Links a line to the operational record it bills (CHARGE, DISPENSE), so nothing is billed twice.
+  /// HSN/SAC code as it was when the line was created (a snapshot: later changes to the master never alter an issued invoice).
+  hsnSac         String?
   sourceType     String?
   sourceId       String?  @db.Uuid
 
@@ -148,6 +161,7 @@ model Receipt {
   invoice  Invoice       @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
   shift    CashierShift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
   payments Payment[]
+  advanceUses AdvanceUse[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, receiptNumber])
@@ -163,11 +177,14 @@ model Payment {
   method    PaymentMethod
   amount    Decimal       @db.Decimal(14, 2)
   reference String?
+  /// Set when this tender is an advance being used up (docs/advance-payments.md): the money was received when the advance was taken, so reports do not count it again.
+  advanceUseId String? @db.Uuid
 
   receipt Receipt @relation(fields: [tenantId, receiptId], references: [tenantId, id], onDelete: Restrict)
 
   @@unique([tenantId, id])
   @@index([tenantId, receiptId])
+  @@index([advanceUseId])
 }
 
 // ───────────────────────── Stage 20: refunds and credit notes ─────────────────────────
@@ -184,12 +201,15 @@ model Refund {
   reference    String?
   /// True when the refund is part of cancelling the whole invoice.
   cancelsInvoice Boolean     @default(false)
+  /// The part of this refund that was returned to the patient's advance instead of being paid out (docs/advance-payments.md). Reports leave it out of money paid out.
+  advanceReturned Decimal    @default(0) @db.Decimal(14, 2)
   createdById  String        @db.Uuid
   createdAt    DateTime      @default(now()) @db.Timestamptz(3)
   shiftId      String?       @db.Uuid
 
   invoice Invoice       @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
   shift   CashierShift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  advanceReturns AdvanceReturn[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, refundNumber])
@@ -240,8 +260,398 @@ model CashierShift {
   facility Facility  @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
   receipts Receipt[]
   refunds  Refund[]
+  advanceDeposits AdvanceDeposit[]
+  advanceRefunds  AdvanceRefund[]
 
   @@unique([tenantId, id])
   @@index([tenantId, facilityId, status])
   @@index([tenantId, cashierId, openedAt(sort: Desc)])
+}
+
+// ───────────────────────── Advance payments (deposits) ─────────────────────────
+// Money taken before it is billed (docs/advance-payments.md). It is the hospital's liability to the patient, not income: it becomes a payment
+// only when it is applied to an issued invoice. All four tables are append-only; the balance is amount minus uses minus refunds.
+
+/// One receipt per advance taken; a split tender is one deposit with several tender lines.
+model AdvanceDeposit {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String   @db.Uuid
+  facilityId    String   @db.Uuid
+  patientId     String   @db.Uuid
+  receiptNumber String
+  amount        Decimal  @db.Decimal(14, 2)
+  note          String?
+  /// Set when this advance is the booking fee of an appointment.
+  appointmentId String?  @db.Uuid
+  receivedById  String   @db.Uuid
+  receivedAt    DateTime @default(now()) @db.Timestamptz(3)
+  shiftId       String?  @db.Uuid
+
+  patient Patient       @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  appointment Appointment? @relation(fields: [tenantId, appointmentId], references: [tenantId, id], onDelete: Restrict)
+  shift   CashierShift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  tenders AdvanceTender[]
+  uses    AdvanceUse[]
+  refunds AdvanceRefund[]
+  returns AdvanceReturn[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, receiptNumber])
+  @@index([tenantId, patientId, receivedAt(sort: Desc)])
+  @@index([tenantId, appointmentId])
+  @@index([shiftId])
+}
+
+model AdvanceTender {
+  id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String        @db.Uuid
+  depositId String        @db.Uuid
+  method    PaymentMethod
+  amount    Decimal       @db.Decimal(14, 2)
+  reference String?
+
+  deposit AdvanceDeposit @relation(fields: [tenantId, depositId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, depositId])
+}
+
+/// An advance applied to an issued invoice. The invoice is paid through an ordinary receipt (method OTHER, `Payment.advanceUseId` set).
+model AdvanceUse {
+  id          String   @id @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  depositId   String   @db.Uuid
+  invoiceId   String   @db.Uuid
+  receiptId   String   @db.Uuid
+  amount      Decimal  @db.Decimal(14, 2)
+  appliedById String   @db.Uuid
+  appliedAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  deposit AdvanceDeposit @relation(fields: [tenantId, depositId], references: [tenantId, id], onDelete: Restrict)
+  invoice Invoice        @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  receipt Receipt        @relation(fields: [tenantId, receiptId], references: [tenantId, id], onDelete: Restrict)
+  returns AdvanceReturn[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, depositId])
+  @@index([tenantId, invoiceId])
+}
+
+/// Unused advance given back to the patient.
+model AdvanceRefund {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String        @db.Uuid
+  facilityId   String        @db.Uuid
+  depositId    String        @db.Uuid
+  refundNumber String
+  method       PaymentMethod
+  amount       Decimal       @db.Decimal(14, 2)
+  reason       String
+  reference    String?
+  createdById  String        @db.Uuid
+  createdAt    DateTime      @default(now()) @db.Timestamptz(3)
+  shiftId      String?       @db.Uuid
+
+  deposit AdvanceDeposit @relation(fields: [tenantId, depositId], references: [tenantId, id], onDelete: Restrict)
+  shift   CashierShift?  @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, refundNumber])
+  @@index([tenantId, depositId])
+  @@index([shiftId])
+}
+
+/// Advance that went back into the patient's advance because the bill it paid was refunded or cancelled. It restores the balance of the
+/// advance it came from; it is never more than what that use took (a trigger enforces it).
+model AdvanceReturn {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  facilityId String   @db.Uuid
+  useId      String   @db.Uuid
+  depositId  String   @db.Uuid
+  invoiceId  String   @db.Uuid
+  refundId   String   @db.Uuid
+  amount     Decimal  @db.Decimal(14, 2)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  use     AdvanceUse     @relation(fields: [tenantId, useId], references: [tenantId, id], onDelete: Restrict)
+  deposit AdvanceDeposit @relation(fields: [tenantId, depositId], references: [tenantId, id], onDelete: Restrict)
+  invoice Invoice        @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  refund  Refund         @relation(fields: [tenantId, refundId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, useId])
+  @@index([tenantId, depositId])
+  @@index([tenantId, refundId])
+}
+
+// ───────────────────────── tests advised by the doctor ─────────────────────────
+
+enum TestCategory {
+  LABORATORY
+  RADIOLOGY
+  CARDIOLOGY
+  PROCEDURE
+}
+
+enum TestOrderStatus {
+  ORDERED
+  BILLED
+  CANCELLED
+}
+
+/// A test the doctor asked for (laboratory, imaging, cardiology or another procedure). Digital: made when the consultation is signed or amended.
+/// Handwritten: made by the Cashier from the doctor's picture, at the price list. The Cashier bills it (docs/test-orders.md). Once billed or
+/// cancelled an order never changes. serviceId and invoiceId are checked in the service (same hospital) because Prisma cannot model optional composite keys.
+model TestOrder {
+  id                  String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String          @db.Uuid
+  facilityId          String          @db.Uuid
+  patientId           String          @db.Uuid
+  encounterId         String          @db.Uuid
+  category            TestCategory
+  name                String
+  /// The price-list item this test is billed as; empty until the Cashier chooses one when the doctor's wording matches nothing.
+  serviceId           String?         @db.Uuid
+  /// DIGITAL: from the signed consultation. HANDWRITTEN: entered by the Cashier from the doctor's picture.
+  source              String          @default("DIGITAL")
+  scanId              String?         @db.Uuid
+  status              TestOrderStatus @default(ORDERED)
+  invoiceId           String?         @db.Uuid
+  consultationVersion Int?
+  cancelReason        String?
+  orderedById         String          @db.Uuid
+  billedById          String?         @db.Uuid
+  billedAt            DateTime?       @db.Timestamptz(3)
+  createdAt           DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime        @updatedAt @db.Timestamptz(3)
+
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  labSamples LabSample[]
+  labResult  LabResult?
+  radStudy   RadStudy?
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, status, createdAt])
+  @@index([tenantId, encounterId])
+}
+
+/// The Cashier has dealt with a handwritten picture: its tests were billed (BILLED) or it has none (NONE). Written once, never changed.
+model ScanTestReview {
+  scanId       String   @id @db.Uuid
+  tenantId     String   @db.Uuid
+  facilityId   String   @db.Uuid
+  encounterId  String   @db.Uuid
+  outcome      String
+  reviewedById String   @db.Uuid
+  reviewedAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([tenantId, facilityId, reviewedAt])
+}
+
+enum BillingLineStatus {
+  DRAFT
+  BILLED
+  DROPPED
+}
+
+/// What the Cashier will bill for a test, kept apart from the doctor's order, which never changes (docs/test-orders.md). A line either bills one of the doctor's
+/// test orders under the Cashier's own wording, price and quantity (testOrderId set) or is a test the Cashier added (testOrderId empty, or set once billed).
+/// DRAFT lines are what the Cashier is still editing; once billed (or dropped) a line never changes. serviceId, invoiceId and scanId are checked in the
+/// service (same hospital) because Prisma cannot model optional composite keys.
+model TestBillingLine {
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String            @db.Uuid
+  facilityId  String            @db.Uuid
+  patientId   String            @db.Uuid
+  encounterId String            @db.Uuid
+  testOrderId String?           @db.Uuid
+  /// The handwritten picture the Cashier read this test from.
+  scanId      String?           @db.Uuid
+  name        String
+  category    TestCategory
+  serviceId   String?           @db.Uuid
+  quantity    Int               @default(1)
+  unitPrice   Decimal           @db.Decimal(12, 2)
+  taxPercent  Decimal           @default(0) @db.Decimal(5, 2)
+  /// The Cashier took this test off the bill. The doctor's order itself is untouched.
+  removed     Boolean           @default(false)
+  status      BillingLineStatus @default(DRAFT)
+  invoiceId   String?           @db.Uuid
+  version     Int               @default(1)
+  createdById String            @db.Uuid
+  updatedById String            @db.Uuid
+  createdAt   DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime          @updatedAt @db.Timestamptz(3)
+
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, encounterId, status])
+}
+
+// ───────────────────────── Laboratory (LIMS): docs/lims.md ─────────────────────────
+
+enum LabParamType {
+  NUMERIC
+  TEXT
+  CHOICE
+}
+
+enum LabSampleStatus {
+  COLLECTED
+  REJECTED
+}
+
+enum LabResultStatus {
+  DRAFT
+  VERIFIED
+}
+
+enum LabResultKind {
+  VERIFIED
+  AMENDED
+}
+
+/// What the laboratory measures for one price-list test (a service of category INVESTIGATION): the specimen, how long it takes and the parameters to fill in.
+model LabTestDefinition {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String       @db.Uuid
+  facilityId      String       @db.Uuid
+  serviceId       String       @db.Uuid
+  specimen        String
+  method          String?
+  /// Patient preparation, such as fasting, printed on the sample label sheet and shown to staff.
+  instructions    String?
+  turnaroundHours Int?
+  status          ActiveStatus @default(ACTIVE)
+  createdById     String       @db.Uuid
+  createdAt       DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @db.Timestamptz(3)
+
+  facility   Facility       @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  service    Service        @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  parameters LabParameter[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, serviceId])
+}
+
+/// One thing measured by a test, with its unit and reference ranges. A range may differ for men and women; a critical range marks a result that needs the
+/// doctor's attention at once. Parameters are never deleted (a removed one becomes INACTIVE), and every verified result keeps its own copy of the name, unit and range.
+model LabParameter {
+  id           String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String       @db.Uuid
+  definitionId String       @db.Uuid
+  lineNo       Int
+  name         String
+  unit         String?
+  type         LabParamType @default(NUMERIC)
+  /// For CHOICE parameters, the answers that can be picked.
+  choices      String[]     @default([])
+  decimals     Int          @default(1)
+  low          Decimal?     @db.Decimal(12, 3)
+  high         Decimal?     @db.Decimal(12, 3)
+  lowMale      Decimal?     @db.Decimal(12, 3)
+  highMale     Decimal?     @db.Decimal(12, 3)
+  lowFemale    Decimal?     @db.Decimal(12, 3)
+  highFemale   Decimal?     @db.Decimal(12, 3)
+  criticalLow  Decimal?     @db.Decimal(12, 3)
+  criticalHigh Decimal?     @db.Decimal(12, 3)
+  status       ActiveStatus @default(ACTIVE)
+
+  definition LabTestDefinition @relation(fields: [tenantId, definitionId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([definitionId, lineNo])
+}
+
+/// A sample taken from a patient for one billed laboratory test, with its accession number (the number on the label). A sample that cannot be used is rejected with a
+/// reason, and another can be taken; only one sample of a test is live at a time.
+model LabSample {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String          @db.Uuid
+  facilityId      String          @db.Uuid
+  patientId       String          @db.Uuid
+  encounterId     String          @db.Uuid
+  testOrderId     String          @db.Uuid
+  accessionNumber String
+  specimen        String
+  status          LabSampleStatus @default(COLLECTED)
+  notes           String?
+  collectedAt     DateTime        @default(now()) @db.Timestamptz(3)
+  collectedById   String          @db.Uuid
+  rejectReason    String?
+  rejectedAt      DateTime?       @db.Timestamptz(3)
+  rejectedById    String?         @db.Uuid
+
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  testOrder TestOrder @relation(fields: [tenantId, testOrderId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, accessionNumber])
+  @@index([tenantId, testOrderId])
+}
+
+/// The result of one laboratory test order. While DRAFT the values being entered are kept in `draft`; verifying writes version 1 to LabResultVersion and the
+/// report is released. A correction after that is an amendment: a new version with its reason, the earlier versions kept. A critical result stays flagged until
+/// the doctor acknowledges it.
+model LabResult {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String          @db.Uuid
+  facilityId      String          @db.Uuid
+  patientId       String          @db.Uuid
+  encounterId     String          @db.Uuid
+  testOrderId     String          @db.Uuid
+  sampleId        String?         @db.Uuid
+  definitionId    String?         @db.Uuid
+  name            String
+  specimen        String?
+  status          LabResultStatus @default(DRAFT)
+  /// { values: [{ parameterId?, name, value }], comment? } while being entered.
+  draft           Json            @default("{}")
+  /// Token for the draft: changes on every save, so two people entering at once cannot overwrite each other.
+  version         Int             @default(1)
+  currentVersion  Int             @default(0)
+  hasCritical     Boolean         @default(false)
+  criticalAckById String?         @db.Uuid
+  criticalAckAt   DateTime?       @db.Timestamptz(3)
+  createdAt       DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime        @updatedAt @db.Timestamptz(3)
+
+  patient   Patient            @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter Encounter          @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  testOrder TestOrder          @relation(fields: [tenantId, testOrderId], references: [tenantId, id], onDelete: Restrict)
+  versions  LabResultVersion[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, testOrderId])
+  @@index([tenantId, facilityId, status, updatedAt(sort: Desc)])
+}
+
+/// A verified (or amended) report of a result: the values with their flags and the ranges as they were. Never edited or deleted.
+model LabResultVersion {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String        @db.Uuid
+  resultId     String        @db.Uuid
+  version      Int
+  kind         LabResultKind
+  /// [{ name, unit, type, value, flag, low, high, criticalLow, criticalHigh }]
+  values       Json
+  comment      String?
+  /// For an amendment: why the earlier version was wrong.
+  reason       String?
+  hasCritical  Boolean       @default(false)
+  enteredById  String?       @db.Uuid
+  verifiedById String        @db.Uuid
+  verifiedAt   DateTime      @default(now()) @db.Timestamptz(3)
+
+  result LabResult @relation(fields: [tenantId, resultId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([resultId, version])
 }

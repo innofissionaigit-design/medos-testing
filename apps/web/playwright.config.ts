@@ -23,7 +23,7 @@ export default defineConfig({
   webServer: [
     {
       command: "node apps/api/dist/main.js", cwd: root, url: `http://127.0.0.1:${API_PORT}/api/v1/health`, reuseExistingServer: false, timeout: 60_000,
-      env: { DATABASE_URL: DB_URL, JWT_ACCESS_SECRET: "e2e-only-secret-e2e-only-secret-0001", PORT: String(API_PORT), SCRYPT_LOG_N: "12", RATE_LIMIT_ENABLED: "false", CORS_ORIGINS: `http://localhost:${WEB_PORT}`, ...(process.platform === "win32" ? { PRISMA_ENGINES_CACHE_DIR: "D:\\.cache\\prisma" } : {}) },
+      env: { DATABASE_URL: DB_URL, JWT_ACCESS_SECRET: "e2e-only-secret-e2e-only-secret-0001", PORT: String(API_PORT), ARGON2_MEMORY_KIB: "1024", ARGON2_PASSES: "1", RATE_LIMIT_ENABLED: "false", CORS_ORIGINS: `http://localhost:${WEB_PORT}`, ...(process.platform === "win32" ? { PRISMA_ENGINES_CACHE_DIR: process.env.PRISMA_ENGINES_CACHE_DIR ?? "D:\\.cache\\prisma" } : {}) },
     },
     {
       command: `pnpm --filter @medos/web exec next start -p ${WEB_PORT}`, cwd: root, url: `http://localhost:${WEB_PORT}/login`, reuseExistingServer: false, timeout: 60_000,

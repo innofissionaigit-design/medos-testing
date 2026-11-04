@@ -4,10 +4,18 @@
 **/.next
 .local
 .git
+.github
+.vscode
 .env
 .env.*
 !.env.example
+# Secrets, deployment settings and operator tooling never go into an image
+secrets
+deploy
+ops
 .npmrc
-*.log
+**/*.log
+**/*.tsbuildinfo
+medos-tree.txt
 docs
 .claude

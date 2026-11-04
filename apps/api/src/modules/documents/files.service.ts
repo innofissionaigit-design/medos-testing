@@ -6,6 +6,8 @@ import { z } from "zod";
 import { actorOf, AuditService } from "../../common/audit.service";
 import { PrismaService } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { chartPatientIds } from "../patients/patient-links";
+import { ScanService } from "./scan.service";
 import { StorageService } from "./storage.service";
 
 export const MAX_FILE_BYTES = 5 * 1024 * 1024;
@@ -33,7 +35,7 @@ const VIEW = { id: true, kind: true, title: true, fileName: true, contentType: t
 
 @Injectable()
 export class FilesService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly storage: StorageService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly storage: StorageService, private readonly scanner: ScanService) {}
 
   async upload(ctx: RequestContext, patientId: string, q: z.infer<typeof uploadQuerySchema>, contentType: string | undefined, data: unknown) {
     if (!Buffer.isBuffer(data) || data.length === 0) throw new DomainError("VALIDATION_FAILED", "Send the file as the request body with its own content type (PNG, JPEG or PDF)", 415);
@@ -45,9 +47,18 @@ export class FilesService {
     const title = q.title ?? (q.kind === "PHOTO" ? "Photo" : null);
     if (!title) throw new DomainError("VALIDATION_FAILED", "Give the document a title", 400, [{ path: "title", message: "Required for documents" }]);
 
+    // Scan before anything is stored. Only the signature name is recorded, never the file or its name.
+    const scan = await this.scanner.scan(data);
+    if (scan.status === "UNAVAILABLE") throw new DomainError("SCAN_UNAVAILABLE", "Files cannot be checked for viruses right now. Please try again shortly.", 503);
+    if (scan.status === "INFECTED") {
+      await this.prisma.$transaction((tx) => this.audit.record(tx, actorOf(ctx), { action: "PATIENT_FILE_REJECTED", entityType: "Patient", entityId: patientId, metadata: { reason: "VIRUS_FOUND", signature: scan.signature, sizeBytes: data.length } }));
+      throw new DomainError("FILE_INFECTED", "This file was rejected because the virus scan found a problem with it.", 422);
+    }
+
     return this.prisma.$transaction(async (tx) => {
-      const patient = await tx.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
+      const patient = await tx.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true, mergedIntoId: true } });
       if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+      if (patient.mergedIntoId) throw new DomainError("PATIENT_MERGED", "This patient record was merged into another. Add the file to the real patient.", 409, { mergedIntoId: patient.mergedIntoId });
       if (q.kind === "PHOTO") {
         await tx.patientFile.updateMany({
           where: { tenantId: ctx.tenantId, patientId, kind: "PHOTO", status: "ACTIVE" },
@@ -70,9 +81,9 @@ export class FilesService {
   }
 
   async list(ctx: RequestContext, patientId: string) {
-    const patient = await this.prisma.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
-    if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
-    return this.prisma.patientFile.findMany({ where: { tenantId: ctx.tenantId, patientId, status: "ACTIVE" }, select: VIEW, orderBy: { uploadedAt: "desc" } });
+    const ids = await chartPatientIds(this.prisma, ctx.tenantId, patientId);
+    if (!ids) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+    return this.prisma.patientFile.findMany({ where: { tenantId: ctx.tenantId, patientId: { in: ids }, status: "ACTIVE" }, select: VIEW, orderBy: { uploadedAt: "desc" } });
   }
 
   /** Returns the bytes. Viewing a document (not a profile photo) leaves an audit trail because it is access to patient records. */

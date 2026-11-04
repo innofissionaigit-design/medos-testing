@@ -285,6 +285,8 @@ export const BN: Record<string, string> = {
   "MRN": "MRN",
   "MRP": "MRP",
   "My account": "আমার অ্যাকাউন্ট",
+  "You see only your own patients, records and reports.": "আপনি শুধু আপনার নিজের রোগী, রেকর্ড ও রিপোর্ট দেখতে পাবেন।",
+  "You see only the data of your department:": "আপনি শুধু আপনার বিভাগের তথ্য দেখতে পাবেন:",
   "My cash shift": "আমার ক্যাশ শিফট",
   "Name": "নাম",
   "Name shown on prescriptions": "প্রেসক্রিপশনে দেখানো নাম",

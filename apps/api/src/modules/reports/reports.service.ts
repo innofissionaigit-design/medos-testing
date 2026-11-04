@@ -1,10 +1,13 @@
 import { Injectable } from "@nestjs/common";
-import { DomainError } from "@medos/shared";
+import { Decimal, DomainError } from "@medos/shared";
 import { z } from "zod";
 import { PrismaService } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { admissionScopeSql, visitScopeSql } from "../../common/data-scope";
 import { dateOnly, endOfLocalDay, localDateStr, startOfLocalDay } from "../../common/time";
 import { balanceDue, fmt } from "../billing/billing.domain";
+import { doctorShare, pickRule, type EarningKind, type ShareRule } from "../earnings/earnings.domain";
+import { EarningsService } from "../earnings/earnings.service";
 
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((s) => !Number.isNaN(dateOnly(s).getTime()) && dateOnly(s).toISOString().startsWith(s), "Invalid date");
 const MAX_DAYS = 93;
@@ -17,7 +20,7 @@ interface Range { from: string; to: string; start: Date; end: Date; tz: string }
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService, private readonly earnings: EarningsService) {}
 
   /** Facility-local calendar range (default: today). Bounds are converted to UTC instants once. */
   private async range(ctx: RequestContext, q: z.infer<typeof rangeSchema>): Promise<Range> {
@@ -36,8 +39,8 @@ export class ReportsService {
     const r = await this.range(ctx, q);
     const rows = await this.prisma.$queryRaw<{ day: string; visits: number; completed: number }[]>`
       SELECT to_char(("startedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS visits, COUNT(*) FILTER (WHERE status = 'COMPLETED')::int AS completed
-      FROM "Encounter" WHERE "tenantId" = ${ctx.tenantId}::uuid AND "facilityId" = ${ctx.facilityId}::uuid AND type = 'OPD' AND status <> 'CANCELLED'
-        AND "startedAt" >= ${r.start} AND "startedAt" < ${r.end} GROUP BY 1 ORDER BY 1`;
+      FROM "Encounter" e WHERE e."tenantId" = ${ctx.tenantId}::uuid AND e."facilityId" = ${ctx.facilityId}::uuid AND e.type = 'OPD' AND e.status <> 'CANCELLED'
+        AND e."startedAt" >= ${r.start} AND e."startedAt" < ${r.end} ${visitScopeSql(ctx, "e")} GROUP BY 1 ORDER BY 1`;
     return { from: r.from, to: r.to, total: rows.reduce((n, x) => n + x.visits, 0), days: rows };
   }
 
@@ -47,7 +50,7 @@ export class ReportsService {
       SELECT e."practitionerId" AS "practitionerId", p."displayName" AS doctor, COUNT(*)::int AS visits, COUNT(*) FILTER (WHERE e.status = 'COMPLETED')::int AS completed
       FROM "Encounter" e LEFT JOIN "Practitioner" p ON p.id = e."practitionerId" AND p."tenantId" = e."tenantId"
       WHERE e."tenantId" = ${ctx.tenantId}::uuid AND e."facilityId" = ${ctx.facilityId}::uuid AND e.type = 'OPD' AND e.status <> 'CANCELLED'
-        AND e."startedAt" >= ${r.start} AND e."startedAt" < ${r.end} GROUP BY 1, 2 ORDER BY visits DESC, doctor`;
+        AND e."startedAt" >= ${r.start} AND e."startedAt" < ${r.end} ${visitScopeSql(ctx, "e")} GROUP BY 1, 2 ORDER BY visits DESC, doctor`;
     return { from: r.from, to: r.to, rows };
   }
 
@@ -57,7 +60,7 @@ export class ReportsService {
       SELECT e."departmentId" AS "departmentId", d.name AS department, COUNT(*)::int AS visits, COUNT(*) FILTER (WHERE e.status = 'COMPLETED')::int AS completed
       FROM "Encounter" e LEFT JOIN "Department" d ON d.id = e."departmentId" AND d."tenantId" = e."tenantId"
       WHERE e."tenantId" = ${ctx.tenantId}::uuid AND e."facilityId" = ${ctx.facilityId}::uuid AND e.type = 'OPD' AND e.status <> 'CANCELLED'
-        AND e."startedAt" >= ${r.start} AND e."startedAt" < ${r.end} GROUP BY 1, 2 ORDER BY visits DESC, department`;
+        AND e."startedAt" >= ${r.start} AND e."startedAt" < ${r.end} ${visitScopeSql(ctx, "e")} GROUP BY 1, 2 ORDER BY visits DESC, department`;
     return { from: r.from, to: r.to, rows };
   }
 
@@ -70,17 +73,37 @@ export class ReportsService {
     const f = ctx.facilityId;
     const [received, refunded, byMode, credits] = await Promise.all([
       this.prisma.$queryRaw<{ day: string; amount: string }[]>`
-        SELECT to_char(("receivedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, COALESCE(SUM(total), 0)::numeric(14,2)::text AS amount
-        FROM "Receipt" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "receivedAt" >= ${r.start} AND "receivedAt" < ${r.end} GROUP BY 1`,
+        SELECT day, COALESCE(SUM(amount), 0)::numeric(14,2)::text AS amount FROM (
+          SELECT to_char((r."receivedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, p.amount
+          FROM "Payment" p JOIN "Receipt" r ON r.id = p."receiptId" AND r."tenantId" = p."tenantId"
+          WHERE r."tenantId" = ${t}::uuid AND r."facilityId" = ${f}::uuid AND r."receivedAt" >= ${r.start} AND r."receivedAt" < ${r.end} AND p."advanceUseId" IS NULL
+          UNION ALL
+          SELECT to_char(("receivedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD'), amount
+          FROM "AdvanceDeposit" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "receivedAt" >= ${r.start} AND "receivedAt" < ${r.end}
+        ) x GROUP BY day`,
       this.prisma.$queryRaw<{ day: string; amount: string }[]>`
-        SELECT to_char(("createdAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, COALESCE(SUM(amount), 0)::numeric(14,2)::text AS amount
-        FROM "Refund" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} AND "createdAt" < ${r.end} GROUP BY 1`,
+        SELECT day, COALESCE(SUM(amount), 0)::numeric(14,2)::text AS amount FROM (
+          SELECT to_char(("createdAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, amount - "advanceReturned" AS amount
+          FROM "Refund" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} AND "createdAt" < ${r.end}
+          UNION ALL
+          SELECT to_char(("createdAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD'), amount
+          FROM "AdvanceRefund" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} AND "createdAt" < ${r.end}
+        ) x GROUP BY day`,
       this.prisma.$queryRaw<{ method: string; received: string; refunded: string }[]>`
         SELECT m.method::text AS method, COALESCE(rc.amount, 0)::numeric(14,2)::text AS received, COALESCE(rf.amount, 0)::numeric(14,2)::text AS refunded
         FROM (SELECT unnest(enum_range(NULL::"PaymentMethod")) AS method) m
-        LEFT JOIN (SELECT p.method, SUM(p.amount) AS amount FROM "Payment" p JOIN "Receipt" r ON r.id = p."receiptId" AND r."tenantId" = p."tenantId"
-                   WHERE r."tenantId" = ${t}::uuid AND r."facilityId" = ${f}::uuid AND r."receivedAt" >= ${r.start} AND r."receivedAt" < ${r.end} GROUP BY p.method) rc ON rc.method = m.method
-        LEFT JOIN (SELECT method, SUM(amount) AS amount FROM "Refund" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} AND "createdAt" < ${r.end} GROUP BY method) rf ON rf.method = m.method
+        LEFT JOIN (SELECT method, SUM(amount) AS amount FROM (
+                     SELECT p.method, p.amount FROM "Payment" p JOIN "Receipt" r ON r.id = p."receiptId" AND r."tenantId" = p."tenantId"
+                     WHERE r."tenantId" = ${t}::uuid AND r."facilityId" = ${f}::uuid AND r."receivedAt" >= ${r.start} AND r."receivedAt" < ${r.end} AND p."advanceUseId" IS NULL
+                     UNION ALL
+                     SELECT a.method, a.amount FROM "AdvanceTender" a JOIN "AdvanceDeposit" d ON d.id = a."depositId" AND d."tenantId" = a."tenantId"
+                     WHERE d."tenantId" = ${t}::uuid AND d."facilityId" = ${f}::uuid AND d."receivedAt" >= ${r.start} AND d."receivedAt" < ${r.end}
+                   ) y GROUP BY method) rc ON rc.method = m.method
+        LEFT JOIN (SELECT method, SUM(amount) AS amount FROM (
+                     SELECT method, amount - "advanceReturned" AS amount FROM "Refund" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} AND "createdAt" < ${r.end}
+                     UNION ALL
+                     SELECT method, amount FROM "AdvanceRefund" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} AND "createdAt" < ${r.end}
+                   ) z GROUP BY method) rf ON rf.method = m.method
         ORDER BY m.method`,
       this.prisma.$queryRaw<{ amount: string }[]>`
         SELECT COALESCE(SUM(amount), 0)::numeric(14,2)::text AS amount FROM "CreditNote" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} AND "createdAt" < ${r.end}`,
@@ -88,31 +111,109 @@ export class ReportsService {
     const days = new Map<string, { day: string; received: string; refunded: string }>();
     for (const x of received) days.set(x.day, { day: x.day, received: x.amount, refunded: "0.00" });
     for (const x of refunded) days.set(x.day, { day: x.day, received: days.get(x.day)?.received ?? "0.00", refunded: x.amount });
-    const dayRows = [...days.values()].sort((a, b) => a.day.localeCompare(b.day)).map((d) => ({ ...d, net: fmt(Number(d.received) - Number(d.refunded)) }));
-    const sum = (xs: string[]) => xs.reduce((n, v) => n + Math.round(Number(v) * 100), 0) / 100;
-    const totalReceived = sum(byMode.map((m) => m.received));
-    const totalRefunded = sum(byMode.map((m) => m.refunded));
+    const dayRows = [...days.values()].sort((a, b) => a.day.localeCompare(b.day)).map((d) => ({ ...d, net: fmt(new Decimal(d.received).minus(d.refunded)) }));
+    const totalReceived = byMode.reduce((n, m) => n.plus(m.received), new Decimal(0));
+    const totalRefunded = byMode.reduce((n, m) => n.plus(m.refunded), new Decimal(0));
     return {
       from: r.from, to: r.to, days: dayRows,
-      byMode: byMode.map((m) => ({ ...m, net: fmt(Math.round((Number(m.received) - Number(m.refunded)) * 100) / 100) })),
-      totals: { received: fmt(totalReceived), refunded: fmt(totalRefunded), net: fmt(Math.round((totalReceived - totalRefunded) * 100) / 100), creditNotes: credits[0]?.amount ?? "0.00" },
+      byMode: byMode.map((m) => ({ ...m, net: fmt(new Decimal(m.received).minus(m.refunded)) })),
+      totals: { received: fmt(totalReceived), refunded: fmt(totalRefunded), net: fmt(totalReceived.minus(totalRefunded)), creditNotes: credits[0]?.amount ?? "0.00" },
     };
   }
 
+  /**
+   * Patient registrations of the period with their registration fee: who was registered, by whom, the bill, the receipt, how it was paid and whether it was
+   * paid, exempted (with the reason) or is still due. Read by the Cashier, Manager and Administrator; it is live data, so a registration at Reception shows here at once.
+   */
+  async registrations(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
+    const r = await this.range(ctx, q);
+    const where = { tenantId: ctx.tenantId, facilityId: ctx.facilityId };
+    const rows = await this.prisma.patientRegistration.findMany({
+      where: { ...where, createdAt: { gte: r.start, lt: r.end } }, orderBy: { createdAt: "desc" }, take: 1000,
+      include: {
+        patient: { select: { id: true, firstName: true, lastName: true, mobile: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } },
+        invoice: { select: { id: true, invoiceNumber: true, status: true, total: true, paidTotal: true, refundedTotal: true, receipts: { orderBy: { receivedAt: "asc" }, select: { id: true, receiptNumber: true, payments: { select: { method: true, amount: true } } } } } },
+      },
+    });
+    const ids = [...new Set(rows.flatMap((x) => [x.createdById, x.settledById].filter((v): v is string => !!v)))];
+    const users = new Map((await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: ids } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
+    const zero = new Decimal(0);
+    const byMethod = new Map<string, Decimal>();
+    let collected = zero; let exempted = zero; let pending = zero;
+    const count = { paid: 0, exempted: 0, pending: 0 };
+    const out = rows.map((x) => {
+      const pays = x.invoice?.receipts.flatMap((rc) => rc.payments) ?? [];
+      const net = x.invoice ? new Decimal(x.invoice.paidTotal.toString()).minus(x.invoice.refundedTotal.toString()) : zero;
+      if (x.status === "PAID") { count.paid += 1; collected = collected.plus(net); for (const p of pays) byMethod.set(p.method, (byMethod.get(p.method) ?? zero).plus(p.amount.toString())); }
+      else if (x.status === "EXEMPTED") { count.exempted += 1; exempted = exempted.plus(x.amount.toString()); }
+      else { count.pending += 1; pending = pending.plus(x.amount.toString()); }
+      return {
+        registeredAt: x.createdAt, patientId: x.patientId, patient: [x.patient.firstName, x.patient.lastName].filter(Boolean).join(" "), mrn: x.patient.identifiers[0]?.value ?? null, mobile: x.patient.mobile,
+        registeredBy: users.get(x.createdById) ?? null, status: x.status, fee: fmt(x.amount.toString()), amountPaid: x.status === "PAID" ? fmt(net) : "0.00",
+        paymentMethods: pays.map((p) => `${p.method} ${fmt(p.amount.toString())}`).join(" + ") || null, invoiceId: x.invoice?.id ?? null, invoiceNumber: x.invoice?.invoiceNumber ?? null, invoiceStatus: x.invoice?.status ?? null,
+        receiptId: x.invoice?.receipts[0]?.id ?? null, receiptNumber: x.invoice?.receipts[0]?.receiptNumber ?? null,
+        exemptionReason: x.exemptionReason, settledBy: (x.settledById && users.get(x.settledById)) || null, settledAt: x.settledAt,
+      };
+    });
+    const due = await this.prisma.patientRegistration.aggregate({ where: { ...where, status: "PENDING" }, _count: true, _sum: { amount: true } });
+    return {
+      from: r.from, to: r.to,
+      totals: { registrations: rows.length, paid: count.paid, exempted: count.exempted, pending: count.pending, collected: fmt(collected), exemptedAmount: fmt(exempted), pendingAmount: fmt(pending) },
+      byMethod: [...byMethod.entries()].map(([method, amount]) => ({ method, amount: fmt(amount) })),
+      /** Every registration fee still waiting to be collected, whatever its date. */
+      stillDue: { count: due._count, amount: fmt(due._sum.amount?.toString() ?? 0) },
+      rows: out,
+    };
+  }
+
+  /** Booking fees that were skipped in the period, with who skipped them and why, so special cases can be reviewed. */
+  async bookingFeeSkips(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
+    const r = await this.range(ctx, q);
+    const rows = await this.prisma.appointment.findMany({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, feeSkippedAt: { gte: r.start, lt: r.end } },
+      orderBy: { feeSkippedAt: "asc" }, take: 2000,
+      select: { feeSkippedAt: true, startAt: true, bookingFee: true, feeSkipReason: true, feeSkipNote: true, feeSkippedById: true, patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } } },
+    });
+    const users = await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set(rows.map((x) => x.feeSkippedById).filter((x): x is string => !!x))] } }, select: { id: true, fullName: true } });
+    const name = new Map(users.map((u) => [u.id, u.fullName]));
+    const byReason = new Map<string, { reason: string; count: number; amount: Decimal }>();
+    let total = new Decimal(0);
+    for (const x of rows) {
+      const fee = new Decimal(x.bookingFee?.toString() ?? 0);
+      total = total.plus(fee);
+      const g = byReason.get(x.feeSkipReason ?? "") ?? { reason: x.feeSkipReason ?? "", count: 0, amount: new Decimal(0) };
+      g.count += 1; g.amount = g.amount.plus(fee); byReason.set(g.reason, g);
+    }
+    return {
+      from: r.from, to: r.to, skipped: rows.length, feeNotCollected: fmt(total),
+      byReason: [...byReason.values()].sort((a, b) => b.count - a.count).map((g) => ({ reason: g.reason, count: g.count, amount: fmt(g.amount) })),
+      rows: rows.map((x) => ({
+        skippedAt: x.feeSkippedAt, appointmentAt: x.startAt, patient: [x.patient.firstName, x.patient.lastName].filter(Boolean).join(" "), mrn: x.patient.identifiers[0]?.value ?? null,
+        fee: fmt(x.bookingFee?.toString() ?? 0), reason: x.feeSkipReason, note: x.feeSkipNote, skippedBy: (x.feeSkippedById && name.get(x.feeSkippedById)) || null,
+      })),
+    };
+  }
+
+  /** Everyone's shifts for holders of REPORT_READ; otherwise (a cashier with REPORT_FINANCE) only the caller's own shifts. */
   async shifts(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
     const r = await this.range(ctx, q);
+    const ownOnly = !ctx.permissions.has("REPORT_READ");
     const rows = await this.prisma.$queryRaw<{
       id: string; cashier: string | null; status: string; openedAt: Date; closedAt: Date | null; openingCash: string; receipts: string; cashReceived: string; cashRefunded: string;
       expectedCash: string | null; actualCash: string | null; difference: string | null;
     }[]>`
       SELECT s.id, u."fullName" AS cashier, s.status::text AS status, s."openedAt", s."closedAt", s."openingCash"::numeric(14,2)::text AS "openingCash",
-        COALESCE((SELECT SUM(r.total) FROM "Receipt" r WHERE r."shiftId" = s.id AND r."tenantId" = s."tenantId"), 0)::numeric(14,2)::text AS receipts,
-        COALESCE((SELECT SUM(p.amount) FROM "Payment" p JOIN "Receipt" r ON r.id = p."receiptId" AND r."tenantId" = p."tenantId" WHERE r."shiftId" = s.id AND r."tenantId" = s."tenantId" AND p.method = 'CASH'), 0)::numeric(14,2)::text AS "cashReceived",
-        COALESCE((SELECT SUM(f.amount) FROM "Refund" f WHERE f."shiftId" = s.id AND f."tenantId" = s."tenantId" AND f.method = 'CASH'), 0)::numeric(14,2)::text AS "cashRefunded",
+        (COALESCE((SELECT SUM(p.amount) FROM "Payment" p JOIN "Receipt" r ON r.id = p."receiptId" AND r."tenantId" = p."tenantId" WHERE r."shiftId" = s.id AND r."tenantId" = s."tenantId" AND p."advanceUseId" IS NULL), 0)
+          + COALESCE((SELECT SUM(d.amount) FROM "AdvanceDeposit" d WHERE d."shiftId" = s.id AND d."tenantId" = s."tenantId"), 0))::numeric(14,2)::text AS receipts,
+        (COALESCE((SELECT SUM(p.amount) FROM "Payment" p JOIN "Receipt" r ON r.id = p."receiptId" AND r."tenantId" = p."tenantId" WHERE r."shiftId" = s.id AND r."tenantId" = s."tenantId" AND p.method = 'CASH' AND p."advanceUseId" IS NULL), 0)
+          + COALESCE((SELECT SUM(a.amount) FROM "AdvanceTender" a JOIN "AdvanceDeposit" d ON d.id = a."depositId" AND d."tenantId" = a."tenantId" WHERE d."shiftId" = s.id AND d."tenantId" = s."tenantId" AND a.method = 'CASH'), 0))::numeric(14,2)::text AS "cashReceived",
+        (COALESCE((SELECT SUM(f.amount) FROM "Refund" f WHERE f."shiftId" = s.id AND f."tenantId" = s."tenantId" AND f.method = 'CASH'), 0)
+          + COALESCE((SELECT SUM(f.amount) FROM "AdvanceRefund" f WHERE f."shiftId" = s.id AND f."tenantId" = s."tenantId" AND f.method = 'CASH'), 0))::numeric(14,2)::text AS "cashRefunded",
         s."expectedCash"::numeric(14,2)::text AS "expectedCash", s."actualCash"::numeric(14,2)::text AS "actualCash", s.difference::numeric(14,2)::text AS difference
       FROM "CashierShift" s LEFT JOIN "User" u ON u.id = s."cashierId" AND u."tenantId" = s."tenantId"
-      WHERE s."tenantId" = ${ctx.tenantId}::uuid AND s."facilityId" = ${ctx.facilityId}::uuid AND s."openedAt" >= ${r.start} AND s."openedAt" < ${r.end} ORDER BY s."openedAt"`;
-    return { from: r.from, to: r.to, rows };
+      WHERE s."tenantId" = ${ctx.tenantId}::uuid AND s."facilityId" = ${ctx.facilityId}::uuid AND s."openedAt" >= ${r.start} AND s."openedAt" < ${r.end}
+        AND (NOT ${ownOnly}::boolean OR s."cashierId" = ${ctx.userId}::uuid) ORDER BY s."openedAt"`;
+    return { from: r.from, to: r.to, scope: ownOnly ? "Your shifts only" : "All cashiers", rows };
   }
 
   async outstanding(ctx: RequestContext, q: z.infer<typeof outstandingSchema>) {
@@ -145,7 +246,7 @@ export class ReportsService {
       LEFT JOIN "BedAssignment" ba ON ba."admissionId" = a.id AND ba."tenantId" = a."tenantId" AND ba."releasedAt" IS NULL
       LEFT JOIN "Bed" b ON b.id = ba."bedId" AND b."tenantId" = a."tenantId" LEFT JOIN "Ward" w ON w.id = b."wardId" AND w."tenantId" = a."tenantId"
       LEFT JOIN "Practitioner" pr ON pr.id = a."consultantId" AND pr."tenantId" = a."tenantId"
-      WHERE a."tenantId" = ${ctx.tenantId}::uuid AND a."facilityId" = ${ctx.facilityId}::uuid AND a.status = 'ADMITTED' ORDER BY a."admittedAt"`;
+      WHERE a."tenantId" = ${ctx.tenantId}::uuid AND a."facilityId" = ${ctx.facilityId}::uuid AND a.status = 'ADMITTED' ${admissionScopeSql(ctx)} ORDER BY a."admittedAt"`;
     return { total: rows.length, rows };
   }
 
@@ -154,11 +255,11 @@ export class ReportsService {
     const r = await this.range(ctx, q);
     const [adm, dis] = await Promise.all([
       this.prisma.$queryRaw<{ day: string; count: number }[]>`
-        SELECT to_char(("admittedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS count FROM "Admission"
-        WHERE "tenantId" = ${ctx.tenantId}::uuid AND "facilityId" = ${ctx.facilityId}::uuid AND status <> 'CANCELLED' AND "admittedAt" >= ${r.start} AND "admittedAt" < ${r.end} GROUP BY 1`,
+        SELECT to_char(("admittedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS count FROM "Admission" a
+        WHERE a."tenantId" = ${ctx.tenantId}::uuid AND a."facilityId" = ${ctx.facilityId}::uuid AND a.status <> 'CANCELLED' AND a."admittedAt" >= ${r.start} AND a."admittedAt" < ${r.end} ${admissionScopeSql(ctx)} GROUP BY 1`,
       this.prisma.$queryRaw<{ day: string; count: number }[]>`
-        SELECT to_char(("dischargedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS count FROM "Admission"
-        WHERE "tenantId" = ${ctx.tenantId}::uuid AND "facilityId" = ${ctx.facilityId}::uuid AND status = 'DISCHARGED' AND "dischargedAt" >= ${r.start} AND "dischargedAt" < ${r.end} GROUP BY 1`,
+        SELECT to_char(("dischargedAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, COUNT(*)::int AS count FROM "Admission" a
+        WHERE a."tenantId" = ${ctx.tenantId}::uuid AND a."facilityId" = ${ctx.facilityId}::uuid AND a.status = 'DISCHARGED' AND a."dischargedAt" >= ${r.start} AND a."dischargedAt" < ${r.end} ${admissionScopeSql(ctx)} GROUP BY 1`,
     ]);
     const days = [...new Set([...adm.map((x) => x.day), ...dis.map((x) => x.day)])].sort();
     return {
@@ -200,41 +301,186 @@ export class ReportsService {
         WHERE d."tenantId" = ${t}::uuid AND d."facilityId" = ${f}::uuid AND d."dispensedAt" >= ${r.start} AND d."dispensedAt" < ${r.end}
         GROUP BY m.id, m."brandName", m.strength HAVING SUM(i.quantity - i."returnedQuantity") > 0 ORDER BY SUM((i.quantity - i."returnedQuantity") * i."unitPrice") DESC LIMIT 10`,
     ]);
-    const cents = (v: string) => Math.round(Number(v) * 100);
-    const gross = days.reduce((n, x) => n + cents(x.gross), 0);
-    const returns = days.reduce((n, x) => n + cents(x.returns), 0);
+    const gross = days.reduce((n, x) => n.plus(x.gross), new Decimal(0));
+    const returns = days.reduce((n, x) => n.plus(x.returns), new Decimal(0));
     return {
-      from: r.from, to: r.to, days: days.map((x) => ({ ...x, net: fmt((cents(x.gross) - cents(x.returns)) / 100) })), topMedicines: top,
-      totals: { dispenses: days.reduce((n, x) => n + x.dispenses, 0), gross: fmt(gross / 100), returns: fmt(returns / 100), net: fmt((gross - returns) / 100) },
+      from: r.from, to: r.to, days: days.map((x) => ({ ...x, net: fmt(new Decimal(x.gross).minus(x.returns)) })), topMedicines: top,
+      totals: { dispenses: days.reduce((n, x) => n + x.dispenses, 0), gross: fmt(gross), returns: fmt(returns), net: fmt(gross.minus(returns)) },
     };
   }
 
+  /**
+   * Units in and out per medicine over the range, by movement type, from the append-only stock ledger.
+   * Closing = current balance minus everything recorded after the range; opening = closing minus the range's net movement.
+   * (The database keeps StockBalance reconciled to the ledger, so only ledger rows from the range start onward are read.)
+   */
+  async stockMovement(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
+    const r = await this.range(ctx, q);
+    const t = ctx.tenantId;
+    const f = ctx.facilityId;
+    const rows = await this.prisma.$queryRaw<{
+      medicineId: string; medicine: string; opening: number; purchased: number; patientReturns: number; adjustedIn: number; transferredIn: number;
+      sold: number; returnedToSupplier: number; damaged: number; adjustedOut: number; transferredOut: number; totalIn: number; totalOut: number; closing: number;
+    }[]>`
+      WITH bal AS (
+        SELECT "medicineId", SUM(quantity)::int AS qty FROM "StockBalance" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid GROUP BY 1
+      ), mv AS (
+        SELECT "medicineId",
+          COALESCE(SUM(CASE WHEN direction = 'IN' THEN quantity ELSE -quantity END) FILTER (WHERE "createdAt" >= ${r.end}), 0)::int AS after,
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'IN'), 0)::int AS "totalIn",
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'OUT'), 0)::int AS "totalOut",
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'IN' AND type = 'PURCHASE'), 0)::int AS purchased,
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'IN' AND type = 'PATIENT_RETURN'), 0)::int AS "patientReturns",
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'IN' AND type = 'ADJUSTMENT'), 0)::int AS "adjustedIn",
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'IN' AND type = 'TRANSFER'), 0)::int AS "transferredIn",
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'OUT' AND type = 'SALE'), 0)::int AS sold,
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'OUT' AND type = 'PURCHASE_RETURN'), 0)::int AS "returnedToSupplier",
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'OUT' AND type = 'DAMAGE'), 0)::int AS damaged,
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'OUT' AND type = 'ADJUSTMENT'), 0)::int AS "adjustedOut",
+          COALESCE(SUM(quantity) FILTER (WHERE "createdAt" < ${r.end} AND direction = 'OUT' AND type = 'TRANSFER'), 0)::int AS "transferredOut"
+        FROM "StockLedger" WHERE "tenantId" = ${t}::uuid AND "facilityId" = ${f}::uuid AND "createdAt" >= ${r.start} GROUP BY 1
+      )
+      SELECT m.id AS "medicineId", trim(m."brandName" || ' ' || COALESCE(m.strength, '')) AS medicine,
+        (COALESCE(bal.qty, 0) - COALESCE(mv.after, 0) - COALESCE(mv."totalIn", 0) + COALESCE(mv."totalOut", 0))::int AS opening,
+        COALESCE(mv.purchased, 0) AS purchased, COALESCE(mv."patientReturns", 0) AS "patientReturns", COALESCE(mv."adjustedIn", 0) AS "adjustedIn",
+        COALESCE(mv."transferredIn", 0) AS "transferredIn", COALESCE(mv.sold, 0) AS sold, COALESCE(mv."returnedToSupplier", 0) AS "returnedToSupplier",
+        COALESCE(mv.damaged, 0) AS damaged, COALESCE(mv."adjustedOut", 0) AS "adjustedOut", COALESCE(mv."transferredOut", 0) AS "transferredOut",
+        COALESCE(mv."totalIn", 0) AS "totalIn", COALESCE(mv."totalOut", 0) AS "totalOut",
+        (COALESCE(bal.qty, 0) - COALESCE(mv.after, 0))::int AS closing
+      FROM "Medicine" m LEFT JOIN bal ON bal."medicineId" = m.id LEFT JOIN mv ON mv."medicineId" = m.id
+      WHERE m."tenantId" = ${t}::uuid AND (bal."medicineId" IS NOT NULL OR mv."medicineId" IS NOT NULL) ORDER BY medicine`;
+    const moved = rows.filter((x) => x.opening !== 0 || x.closing !== 0 || x.totalIn !== 0 || x.totalOut !== 0);
+    return { from: r.from, to: r.to, medicines: moved.length, rows: moved };
+  }
+
+  /**
+   * Stock per medicine. `quantity` is the main store (what the pharmacy counter sells from); `inLocations` is what ward stores and other locations hold
+   * (docs/stock-transfers.md); `total` is both. The value columns are at purchase price.
+   */
   async currentStock(ctx: RequestContext) {
-    const rows = await this.prisma.$queryRaw<{ medicineId: string; medicine: string; genericName: string; quantity: number; batches: number; reorderLevel: number; value: string }[]>`
+    const rows = await this.prisma.$queryRaw<{ medicineId: string; medicine: string; genericName: string; quantity: number; inLocations: number; total: number; batches: number; reorderLevel: number; value: string; locationValue: string }[]>`
+      WITH loc AS (
+        SELECT lb."medicineId", SUM(lb.quantity)::int AS qty, SUM(lb.quantity * b."purchasePrice")::numeric(14,2) AS value
+        FROM "StockLocationBalance" lb JOIN "MedicineBatch" b ON b.id = lb."batchId" AND b."tenantId" = lb."tenantId"
+        WHERE lb."tenantId" = ${ctx.tenantId}::uuid AND lb."facilityId" = ${ctx.facilityId}::uuid GROUP BY 1
+      )
       SELECT m.id AS "medicineId", trim(m."brandName" || ' ' || COALESCE(m.strength, '')) AS medicine, m."genericName" AS "genericName",
-        COALESCE(SUM(sb.quantity), 0)::int AS quantity, COUNT(sb."batchId") FILTER (WHERE sb.quantity > 0)::int AS batches, m."reorderLevel" AS "reorderLevel",
-        COALESCE(SUM(sb.quantity * b."purchasePrice"), 0)::numeric(14,2)::text AS value
+        COALESCE(SUM(sb.quantity), 0)::int AS quantity, COALESCE(MAX(loc.qty), 0)::int AS "inLocations", (COALESCE(SUM(sb.quantity), 0) + COALESCE(MAX(loc.qty), 0))::int AS total,
+        COUNT(sb."batchId") FILTER (WHERE sb.quantity > 0)::int AS batches, m."reorderLevel" AS "reorderLevel",
+        COALESCE(SUM(sb.quantity * b."purchasePrice"), 0)::numeric(14,2)::text AS value, COALESCE(MAX(loc.value), 0)::numeric(14,2)::text AS "locationValue"
       FROM "Medicine" m LEFT JOIN "StockBalance" sb ON sb."medicineId" = m.id AND sb."tenantId" = m."tenantId" AND sb."facilityId" = ${ctx.facilityId}::uuid
       LEFT JOIN "MedicineBatch" b ON b.id = sb."batchId" AND b."tenantId" = sb."tenantId"
+      LEFT JOIN loc ON loc."medicineId" = m.id
       WHERE m."tenantId" = ${ctx.tenantId}::uuid AND m.status = 'ACTIVE' GROUP BY m.id ORDER BY medicine`;
-    return { rows, totalValue: fmt(rows.reduce((n, x) => n + Math.round(Number(x.value) * 100), 0) / 100) };
+    return { rows, totalValue: fmt(rows.reduce((n, x) => n.plus(x.value).plus(x.locationValue), new Decimal(0))) };
   }
 
+  /** Medicines at or below their reorder level in the main store (the counter's stock), with what the locations hold shown beside it. */
   async lowStock(ctx: RequestContext) {
     const { rows } = await this.currentStock(ctx);
-    return { rows: rows.filter((x) => x.reorderLevel > 0 && x.quantity <= x.reorderLevel).map((x) => ({ medicineId: x.medicineId, medicine: x.medicine, quantity: x.quantity, reorderLevel: x.reorderLevel })) };
+    return { rows: rows.filter((x) => x.reorderLevel > 0 && x.quantity <= x.reorderLevel).map((x) => ({ medicineId: x.medicineId, medicine: x.medicine, quantity: x.quantity, inLocations: x.inLocations, total: x.total, reorderLevel: x.reorderLevel })) };
   }
 
-  /** Batches holding stock that are expired or expire within the window (expired first). */
+  /** Batches holding stock that are expired or expire within the window (expired first), in the main store and in every location (the `place` column). */
   async nearExpiry(ctx: RequestContext, q: z.infer<typeof expirySchema>) {
     const f = await this.prisma.facility.findFirstOrThrow({ where: { id: ctx.facilityId, tenantId: ctx.tenantId }, select: { timezone: true } });
     const today = localDateStr(new Date(), f.timezone);
     const cutoff = new Date(dateOnly(today).getTime() + q.withinDays * 86_400_000);
-    const rows = await this.prisma.$queryRaw<{ batchId: string; medicine: string; batchNo: string; expiryDate: Date; quantity: number; value: string; expired: boolean }[]>`
-      SELECT b.id AS "batchId", trim(m."brandName" || ' ' || COALESCE(m.strength, '')) AS medicine, b."batchNo" AS "batchNo", b."expiryDate" AS "expiryDate", sb.quantity AS quantity,
-        (sb.quantity * b."purchasePrice")::numeric(14,2)::text AS value, b."expiryDate" < ${dateOnly(today)}::date AS expired
-      FROM "StockBalance" sb JOIN "MedicineBatch" b ON b.id = sb."batchId" AND b."tenantId" = sb."tenantId" JOIN "Medicine" m ON m.id = b."medicineId" AND m."tenantId" = b."tenantId"
-      WHERE sb."tenantId" = ${ctx.tenantId}::uuid AND sb."facilityId" = ${ctx.facilityId}::uuid AND sb.quantity > 0 AND b."expiryDate" <= ${cutoff}::date ORDER BY b."expiryDate", medicine`;
+    const rows = await this.prisma.$queryRaw<{ batchId: string; place: string; medicine: string; batchNo: string; expiryDate: Date; quantity: number; value: string; expired: boolean }[]>`
+      SELECT * FROM (
+        SELECT b.id AS "batchId", 'Main store' AS place, trim(m."brandName" || ' ' || COALESCE(m.strength, '')) AS medicine, b."batchNo" AS "batchNo", b."expiryDate" AS "expiryDate", sb.quantity AS quantity,
+          (sb.quantity * b."purchasePrice")::numeric(14,2)::text AS value, b."expiryDate" < ${dateOnly(today)}::date AS expired
+        FROM "StockBalance" sb JOIN "MedicineBatch" b ON b.id = sb."batchId" AND b."tenantId" = sb."tenantId" JOIN "Medicine" m ON m.id = b."medicineId" AND m."tenantId" = b."tenantId"
+        WHERE sb."tenantId" = ${ctx.tenantId}::uuid AND sb."facilityId" = ${ctx.facilityId}::uuid AND sb.quantity > 0 AND b."expiryDate" <= ${cutoff}::date
+        UNION ALL
+        SELECT b.id, l.name, trim(m."brandName" || ' ' || COALESCE(m.strength, '')), b."batchNo", b."expiryDate", lb.quantity,
+          (lb.quantity * b."purchasePrice")::numeric(14,2)::text, b."expiryDate" < ${dateOnly(today)}::date
+        FROM "StockLocationBalance" lb JOIN "StockLocation" l ON l.id = lb."locationId" AND l."tenantId" = lb."tenantId"
+        JOIN "MedicineBatch" b ON b.id = lb."batchId" AND b."tenantId" = lb."tenantId" JOIN "Medicine" m ON m.id = b."medicineId" AND m."tenantId" = b."tenantId"
+        WHERE lb."tenantId" = ${ctx.tenantId}::uuid AND lb."facilityId" = ${ctx.facilityId}::uuid AND lb.quantity > 0 AND b."expiryDate" <= ${cutoff}::date
+      ) x ORDER BY x."expiryDate", x.medicine, x.place`;
     return { asOf: today, withinDays: q.withinDays, rows: rows.map((x) => ({ ...x, expiryDate: x.expiryDate.toISOString().slice(0, 10) })) };
+  }
+
+  // ───── bookings and earnings (docs/earnings-and-reports.md) ─────
+
+  /**
+   * One row per appointment in the range, with the money collected for it: what was received (less refunds) on the visit's OPD bill, which includes any booking
+   * fee that was set against it, plus a cancellation charge kept when it was cancelled. Money is counted when received, so a bill still unpaid adds nothing yet.
+   */
+  private async bookingRows(ctx: RequestContext, r: Range, practitionerId: string | null) {
+    return this.prisma.$queryRaw<{ id: string; practitionerId: string; day: string; source: string; status: string; collected: string }[]>`
+      SELECT a.id, a."practitionerId", to_char((a."startAt" AT TIME ZONE ${r.tz})::date, 'YYYY-MM-DD') AS day, a.source::text AS source, a.status::text AS status,
+        (COALESCE((SELECT SUM(i."paidTotal" - i."refundedTotal") FROM "Invoice" i
+                    WHERE i."tenantId" = a."tenantId" AND i."encounterId" = a."encounterId" AND i.kind = 'OPD' AND i.status <> 'DRAFT'), 0)
+         + COALESCE((SELECT SUM(i."paidTotal" - i."refundedTotal") FROM "Invoice" i
+                    WHERE i."tenantId" = a."tenantId" AND i.status <> 'DRAFT'
+                      AND i.id IN (SELECT l."invoiceId" FROM "InvoiceLine" l WHERE l."tenantId" = a."tenantId" AND l."sourceType" = 'APPOINTMENT_CANCELLATION' AND l."sourceId" = a.id)), 0))::numeric(14,2)::text AS collected
+      FROM "Appointment" a
+      WHERE a."tenantId" = ${ctx.tenantId}::uuid AND a."facilityId" = ${ctx.facilityId}::uuid AND a."startAt" >= ${r.start} AND a."startAt" < ${r.end}
+        AND (${practitionerId}::uuid IS NULL OR a."practitionerId" = ${practitionerId}::uuid) ${visitScopeSql(ctx, "a")}
+      LIMIT 60000`;
+  }
+
+  /** Counts and money for a set of appointment rows, with the doctor/hospital split worked out visit by visit under the rule in force that day. */
+  private tally(rows: { practitionerId: string; day: string; source: string; status: string; collected: string }[], rules: ShareRule[]) {
+    const t = { booked: 0, walkIns: 0, cancelled: 0, noShow: 0, consulted: 0, bookedAndConsulted: 0, stillOpen: 0, collected: new Decimal(0), doctorShare: new Decimal(0) };
+    for (const a of rows) {
+      if (a.source === "SCHEDULED") t.booked++; else t.walkIns++;
+      if (a.status === "CANCELLED") t.cancelled++;
+      else if (a.status === "NO_SHOW") t.noShow++;
+      else if (a.status === "COMPLETED") { t.consulted++; if (a.source === "SCHEDULED") t.bookedAndConsulted++; }
+      else t.stillOpen++;
+      // Money counts for visits that happened and for cancellation charges; anything else (for example a fee still held) is not earned yet.
+      const kind: EarningKind | null = a.status === "COMPLETED" ? "CONSULTED" : a.status === "CANCELLED" ? "CANCELLATION_CHARGE" : null;
+      if (!kind) continue;
+      const amount = new Decimal(a.collected);
+      t.collected = t.collected.plus(amount);
+      t.doctorShare = t.doctorShare.plus(doctorShare(pickRule(rules, a.practitionerId, a.day), amount, kind));
+    }
+    return t;
+  }
+
+  private describeRule(rule: ShareRule | null): string {
+    if (!rule) return "No share set: the hospital keeps everything collected";
+    const pct = new Decimal(rule.percent?.toString() ?? 0).toFixed(2).replace(/\.00$/, "");
+    const fixed = fmt(rule.fixedAmount?.toString() ?? 0);
+    return rule.mode === "PERCENT" ? `${pct}% of the amount collected` : rule.mode === "FIXED" ? `${fixed} for each consulted visit` : `${fixed} for each consulted visit plus ${pct}% of the amount collected`;
+  }
+
+  /** Organisation view: every doctor of the facility side by side, with the hospital's and the doctors' shares. For REPORT_READ and REPORT_FINANCE. */
+  async bookingsByDoctor(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
+    const r = await this.range(ctx, q);
+    const [rows, rules, doctors] = await Promise.all([
+      this.bookingRows(ctx, r, null), this.earnings.rulesFor(this.prisma, ctx),
+      this.prisma.practitioner.findMany({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, displayName: true, department: { select: { name: true } } }, orderBy: { displayName: "asc" } }),
+    ]);
+    const out = (x: ReturnType<ReportsService["tally"]>) => ({
+      booked: x.booked, walkIns: x.walkIns, cancelled: x.cancelled, noShow: x.noShow, consulted: x.consulted, bookedAndConsulted: x.bookedAndConsulted, stillOpen: x.stillOpen,
+      collected: fmt(x.collected), hospitalShare: fmt(x.collected.minus(x.doctorShare)), doctorShare: fmt(x.doctorShare),
+    });
+    const perDoctor = doctors.map((d) => ({ practitionerId: d.id, doctor: d.displayName, department: d.department?.name ?? null, shareRule: this.describeRule(pickRule(rules, d.id, r.to)), ...out(this.tally(rows.filter((a) => a.practitionerId === d.id), rules)) }))
+      .filter((d) => d.booked + d.walkIns > 0);
+    const days = [...new Set(rows.map((a) => a.day))].sort().map((d) => ({ day: d, ...out(this.tally(rows.filter((a) => a.day === d), rules)) }));
+    return { from: r.from, to: r.to, basis: "Bookings by appointment date. Collected = money received for the visit's OPD bill (including a booking fee set against it) plus cancellation charges kept.", doctors: perDoctor, days, totals: out(this.tally(rows, rules)) };
+  }
+
+  /** The doctor's own view: only their own bookings, and their share. Never another doctor's numbers, and no hospital share. */
+  async myBookings(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
+    const me = await this.prisma.practitioner.findFirst({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, userId: ctx.userId, status: "ACTIVE" }, select: { id: true, displayName: true, department: { select: { name: true } } },
+    });
+    if (!me) throw new DomainError("FORBIDDEN", "This report is for doctors. Your login is not linked to a doctor record at this facility.", 403);
+    const r = await this.range(ctx, q);
+    const [rows, rules] = await Promise.all([this.bookingRows(ctx, r, me.id), this.earnings.rulesFor(this.prisma, ctx)]);
+    const out = (x: ReturnType<ReportsService["tally"]>) => ({
+      booked: x.booked, walkIns: x.walkIns, cancelled: x.cancelled, noShow: x.noShow, consulted: x.consulted, bookedAndConsulted: x.bookedAndConsulted, stillOpen: x.stillOpen,
+      collectedForMyVisits: fmt(x.collected), myShare: fmt(x.doctorShare),
+    });
+    const days = [...new Set(rows.map((a) => a.day))].sort().map((d) => ({ day: d, ...out(this.tally(rows.filter((a) => a.day === d), rules)) }));
+    return {
+      from: r.from, to: r.to, doctor: me.displayName, department: me.department?.name ?? null, myShareRule: this.describeRule(pickRule(rules, me.id, r.to)),
+      basis: "Your bookings by appointment date. My share is your part of the money received for your consulted visits.", days, totals: out(this.tally(rows, rules)),
+    };
   }
 }

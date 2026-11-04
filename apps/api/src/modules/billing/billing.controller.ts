@@ -4,7 +4,7 @@ import { AnyAuthenticated, Ctx, id, paginate, parse, RequirePermissions } from "
 import { parseIdempotencyKey } from "../../common/idempotency.service";
 import type { RequestContext } from "../../common/request-context";
 import { CatalogService, createServiceSchema, listServicesSchema, updateServiceSchema } from "./catalog.service";
-import { cancelInvoiceSchema, createInvoiceSchema, InvoicesService, listInvoicesSchema, updateInvoiceSchema } from "./invoices.service";
+import { cancelInvoiceSchema, createInvoiceSchema, discountInvoiceSchema, InvoicesService, listInvoicesSchema, updateInvoiceSchema } from "./invoices.service";
 import { creditNoteSchema, payInvoiceSchema, PaymentsService, refundSchema } from "./payments.service";
 import { closeShiftSchema, listShiftsSchema, openShiftSchema, ShiftsService } from "./shifts.service";
 
@@ -65,6 +65,13 @@ export class BillingController {
   @Put("invoices/:id")
   async updateInvoice(@Ctx() ctx: RequestContext, @Param("id") invoiceId: string, @Body() body: unknown) {
     return { data: await this.invoices.update(ctx, id(invoiceId), parse(updateInvoiceSchema, body)) };
+  }
+
+  @RequirePermissions("INVOICE_DISCOUNT")
+  @Post("invoices/:id/discount")
+  @HttpCode(200)
+  async discount(@Ctx() ctx: RequestContext, @Param("id") invoiceId: string, @Body() body: unknown) {
+    return { data: await this.invoices.applyDiscount(ctx, id(invoiceId), parse(discountInvoiceSchema, body)) };
   }
 
   @RequirePermissions("INVOICE_ISSUE")

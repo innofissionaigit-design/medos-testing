@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import type { INestApplication } from "@nestjs/common";
+import { PrismaClient } from "@medos/database";
 import { SYSTEM_ROLES } from "@medos/shared";
 import request from "supertest";
 
@@ -12,12 +13,20 @@ if (!new URL(url).pathname.replace("/", "").endsWith("_test")) {
   throw new Error("Refusing to run tests against a database whose name does not end with _test");
 }
 process.env["NODE_ENV"] = "test";
-process.env["DATABASE_URL"] = url;
+// The app under test may use the REAL restricted login (docs/rls.md) while the harness keeps its own owner connection.
+const appUrl = process.env["TEST_APP_DATABASE_URL"];
+if (appUrl && !new URL(appUrl).pathname.replace("/", "").endsWith("_test")) {
+  throw new Error("Refusing to run tests against a database whose name does not end with _test");
+}
+process.env["DATABASE_URL"] = appUrl ?? url;
 process.env["JWT_ACCESS_SECRET"] ??= "test-access-secret-0123456789abcdef-test";
-process.env["SCRYPT_LOG_N"] ??= "10";
+process.env["ARGON2_MEMORY_KIB"] ??= "1024";
+process.env["ARGON2_PASSES"] ??= "1";
+process.env["SECRETS_ENCRYPTION_KEY"] ??= Buffer.alloc(32, 7).toString("base64");
 
 import { createApp } from "../bootstrap";
-import { PrismaService } from "../common/prisma.service";
+import { AuditService } from "../common/audit.service";
+import type { PrismaService } from "../common/prisma.service";
 import { TenantsService } from "../modules/tenants/tenants.service";
 import { PasswordService } from "../modules/auth/password.service";
 
@@ -34,7 +43,8 @@ export interface TestTenant {
 
 export interface TestApp {
   app: INestApplication;
-  prisma: PrismaService;
+  /** The test's own OWNER connection: sees every hospital, independent of the app under test (which may run as the restricted role). */
+  prisma: PrismaClient;
   http: () => ReturnType<typeof request>;
   api: (method: "get" | "post" | "put" | "patch" | "delete", path: string, token?: string) => request.Test;
   close: () => Promise<void>;
@@ -49,9 +59,16 @@ export async function startApp(opts: { rateLimit?: boolean } = {}): Promise<Test
   process.env["STORAGE_DIR"] ??= mkdtempSync(join(tmpdir(), "medos-test-files-"));
   const app = await createApp();
   await app.init();
-  const prisma = app.get(PrismaService);
-  const tenants = app.get(TenantsService);
+  const prisma = new PrismaClient({ datasourceUrl: url, transactionOptions: { maxWait: 15_000, timeout: 30_000 } });
+  // Open the pool's connections up front, as the application does at startup: a burst of simultaneous queries on a cold pool can make the local
+  // Windows database refuse connections for a moment (Prisma P1001), which would fail concurrency tests for reasons unrelated to what they test.
+  await Promise.allSettled(Array.from({ length: 16 }, () => prisma.$queryRaw`SELECT pg_sleep(0.1)`));
+  // Rate-limit counters are shared through the database, so a previous test app's counters would otherwise throttle this one.
+  await prisma.$executeRaw`DELETE FROM "RateLimitBucket"`;
   const passwords = app.get(PasswordService);
+  // Provisioning is a platform-operator action done with the OWNER login (the CLI does the same), never through the API's restricted one.
+  const ownerDb = prisma as unknown as PrismaService;
+  const tenants = new TenantsService(ownerDb, passwords, new AuditService(ownerDb));
   const server = app.getHttpServer();
 
   const api: TestApp["api"] = (method, path, token) => {
@@ -102,7 +119,7 @@ export async function startApp(opts: { rateLimit?: boolean } = {}): Promise<Test
   return {
     app, prisma, api, login, makeTenant, makeUser,
     http: () => request(server),
-    close: async () => { await app.close(); },
+    close: async () => { await app.close(); await prisma.$disconnect(); },
   };
 }
 

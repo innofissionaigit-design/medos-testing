@@ -41,7 +41,7 @@ export default function LoginPage() {
               <ErrorNote error={error} />
             </div>
           ) : (
-            <form onSubmit={handleSubmit((v) => submit(v))} className="space-y-3" noValidate>
+            <form method="post" action="/login" onSubmit={handleSubmit((v) => submit(v))} className="space-y-3" noValidate>
               <Field label="Hospital code" error={errors.tenantCode?.message}><Input autoFocus autoComplete="organization" {...register("tenantCode")} /></Field>
               <Field label="Username or email" error={errors.identifier?.message}><Input autoComplete="username" {...register("identifier")} /></Field>
               <Field label="Password" error={errors.password?.message}><Input type="password" autoComplete="current-password" {...register("password")} /></Field>

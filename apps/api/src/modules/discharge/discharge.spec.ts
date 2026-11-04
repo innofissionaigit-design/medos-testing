@@ -135,7 +135,63 @@ describe("discharge workflow, final bill and discharge summary", () => {
   });
 
   // ───────────────────────── step rules ─────────────────────────
+  it("the final bill carries each service's SAC/HSN code as it was when billed (G6); charges without a code stay without one", async () => {
+    const coded = (await t.api("post", "/services", w.tenant.admin.token).send({ code: code("SC"), name: "Dressing change", category: "PROCEDURE", price: "200", taxPercent: 0, sacCode: "999316" })).body.data.id as string;
+    const plain = await svc(w, "General care", "300");
+    const { adm } = await admit(w, "500");
+    for (const serviceId of [coded, plain]) assert.equal((await t.api("post", `/admissions/${adm.id}/charges`, w.cashier.token).send({ type: "SERVICE", serviceId, quantity: 1 })).status, 201);
+    assert.equal((await t.api("patch", `/services/${coded}`, w.tenant.admin.token).send({ sacCode: "999399" })).status, 200, "master changed after the charge was posted but before billing");
+    await clearAll(w, adm.id);
+    await sign(w, adm.id);
+    const fb = await finalInvoice(w, adm.id);
+    assert.equal(fb.status, 200, JSON.stringify(fb.body));
+    const inv = (await t.api("get", `/invoices/${fb.body.data.invoice.id}`, w.cashier.token)).body.data as { lines: { description: string; hsnSac: string | null }[] };
+    assert.equal(inv.lines.find((l) => l.description === "Dressing change")!.hsnSac, "999399", "the code in force when the final bill is raised");
+    assert.equal(inv.lines.find((l) => l.description === "General care")!.hsnSac, null);
+    assert.ok(inv.lines.some((l) => l.description.startsWith("Bed ")), "bed charges are on the bill without a code");
+  });
+
   describe("clearance steps", () => {
+    it("the pharmacy step clears itself when the pharmacy dispenses everything prescribed; until then it stays pending and can still be cleared by hand", async () => {
+      const x = await world("dis-pharm-auto");
+      const stepOf = async (admId: string) => (await status(x, admId)).steps.find((s: { step: string }) => s.step === "PHARMACY");
+
+      // Nothing prescribed: after the doctor's fitness decision there is nothing to dispense, so it clears itself.
+      const none = await admit(x);
+      assert.equal((await stepOf(none.adm.id)).status, "PENDING", "waits for the doctor's fitness decision");
+      assert.equal((await clear(x, none.adm.id, "MEDICALLY_FIT", x.doc.token)).status, 200);
+      const auto = await stepOf(none.adm.id);
+      assert.equal(auto.status, "CLEARED");
+      assert.equal(auto.note, "Nothing to dispense");
+
+      // A signed prescription for 4 units: pending, with a reason, until the pharmacy dispenses all 4.
+      const { adm, patient } = await admit(x);
+      const med = (await t.api("post", "/medicines", x.pharm.token).send({ brandName: `Ceft${uniqueWord(5)}`, genericName: `Ceftri${uniqueWord(5)}`, strength: "1 g", dosageForm: "INJECTION" })).body.data as { id: string; genericName: string };
+      const ymd = new Date(Date.now() + 365 * 86_400_000).toISOString().slice(0, 10);
+      assert.equal((await t.api("post", "/pharmacy/batches", x.pharm.token).set("Idempotency-Key", key()).send({ medicineId: med.id, batchNo: "AUTO1", expiryDate: ymd, mrp: "100", purchasePrice: "60", sellingPrice: "95", quantity: 20 })).status, 201);
+      await t.api("put", `/encounters/${adm.encounterId}/prescription`, x.doc.token).send({ items: [{ medicineId: med.id, genericName: med.genericName, strength: "1 g", dosage: "1 vial", route: "IV", frequency: "OD", quantity: 4 }] });
+      const order = (await t.api("post", `/encounters/${adm.encounterId}/prescription/sign`, x.doc.token).send({})).body.data as { id: string; items: { id: string }[] };
+      assert.equal((await clear(x, adm.id, "MEDICALLY_FIT", x.doc.token)).status, 200);
+      const pending = await stepOf(adm.id);
+      assert.equal(pending.status, "PENDING");
+      assert.match(pending.blockers[0], /not yet fully dispensed/);
+
+      const dispense = (qty: number) => t.api("post", "/pharmacy/dispenses", x.pharm.token).set("Idempotency-Key", key())
+        .send({ patientId: patient.id, medicationOrderId: order.id, items: [{ medicationOrderItemId: order.items[0]!.id, medicineId: med.id, quantity: qty }] });
+      assert.equal((await dispense(3)).status, 201);
+      assert.equal((await stepOf(adm.id)).status, "PENDING", "partly dispensed is still pending");
+      assert.equal((await dispense(1)).status, 201);
+      const done = await stepOf(adm.id);
+      assert.equal(done.status, "CLEARED", "fully dispensed: cleared without anyone clicking");
+      assert.equal(done.note, "All prescribed medicines dispensed");
+      assert.deepEqual(done.blockers, []);
+
+      // Clearing by hand stays possible for a facility that wants it, and a hand-made clearance is never overwritten.
+      assert.equal((await clear(x, adm.id, "PHARMACY", x.pharm.token)).status, 200);
+      assert.equal((await stepOf(adm.id)).status, "CLEARED");
+      assert.equal((await t.api("get", `/admissions/${adm.id}/discharge`, x.nurse.token)).status, 200, "the ward sees the same result");
+    });
+
     it("everything waits for the doctor's medical-fitness decision; each step needs its own role", async () => {
       const { adm } = await admit(w);
       for (const [step, u] of [["NURSING", w.nurse], ["CHARGES_REVIEWED", w.cashier], ["PHARMACY", w.pharm]] as const) {
@@ -265,6 +321,19 @@ describe("discharge workflow, final bill and discharge summary", () => {
       assert.equal(r.status, 200);
       assert.equal(r.body.data.invoice, null);
       assert.equal((await complete(x, adm.id)).status, 200);
+    });
+
+    it("only billing staff and administrators raise the final bill; Reception, nurses, pharmacists and doctors are refused and nothing is billed", async () => {
+      const x = await world("dis-fbr");
+      const { adm } = await admit(x, "500.00");
+      await clearAll(x, adm.id);
+      for (const [who, tok] of [["reception", x.rec.token], ["nurse", x.nurse.token], ["pharmacist", x.pharm.token], ["doctor", x.doc.token]] as const) {
+        assert.equal((await finalInvoice(x, adm.id, tok)).status, 403, `${who} cannot raise the final bill`);
+      }
+      assert.equal(await t.prisma.invoice.count({ where: { tenantId: x.tenant.tenantId, kind: "IPD" } }), 0, "refused attempts billed nothing");
+      const r = await finalInvoice(x, adm.id, x.tenant.admin.token);
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      assert.equal(await t.prisma.invoice.count({ where: { tenantId: x.tenant.tenantId, kind: "IPD" } }), 1);
     });
 
     it("no new charges, bed days or counter-charged medicines once the final bill is issued", async () => {

@@ -1,13 +1,54 @@
-# Local / staging stack: PostgreSQL, one-shot migrations, API.  Copy .env.example to .env and set real secrets first.
-#   docker compose up -d --build
-# Production should use managed PostgreSQL (set DATABASE_URL and drop the "db" service); see docs/deployment.md.
+# MedOS stack: PostgreSQL, one-shot migrations, API, web app and an optional HTTPS reverse proxy.
+#
+#   cp .env.example .env                                  # then set real secrets
+#   docker compose up -d --build --wait                   # local use: http://localhost:3000
+#   docker compose --profile proxy up -d --build --wait   # public use: HTTPS on SITE_ADDRESS through Caddy (docs/deployment.md)
+#
+# Only the web app (or the proxy) should be reachable from outside; the API and database listen on this machine only.
+# Production should use managed PostgreSQL (set DATABASE_URL, drop "db" and "migrate"'s dependency on it).
+# Secrets from files instead of .env: add  -f docker-compose.secrets.yml  (docs/deployment.md).
+# Staging and production on one host need separate checkouts or `-p <name>`: volumes and networks are named after the project.
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "5" }   # rotated; ship stdout to your log platform (docs/deployment.md)
+
+# Everything the API reads (apps/api/src/common/config.ts). A setting left empty counts as not set.
+x-api-environment: &api-environment
+  NODE_ENV: production
+  APP_ENV: ${APP_ENV:-local}                    # staging / production switch on the startup safety checks
+  PORT: 4000
+  DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD:-}@db:5432/${POSTGRES_DB:-medos}
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+  # The web container reaches the API over the compose network; only it may report the browser's address.
+  TRUST_PROXY: ${TRUST_PROXY:-uniquelocal}
+  DB_TENANT_CONTEXT: ${DB_TENANT_CONTEXT:-off}  # docs/rls.md
+  STORAGE_DRIVER: ${STORAGE_DRIVER:-local}      # local = the medos-files volume; s3 = S3-compatible store (docs/storage.md)
+  S3_BUCKET: ${S3_BUCKET:-}
+  S3_REGION: ${S3_REGION:-}
+  S3_ENDPOINT: ${S3_ENDPOINT:-}
+  S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-false}
+  S3_PREFIX: ${S3_PREFIX:-}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+  S3_SSE: ${S3_SSE:-}
+  S3_KMS_KEY_ID: ${S3_KMS_KEY_ID:-}
+  CLAMAV_HOST: ${CLAMAV_HOST:-}                 # set to scan every upload with a ClamAV daemon
+  CLAMAV_PORT: ${CLAMAV_PORT:-3310}
+  REMINDER_PROVIDER: ${REMINDER_PROVIDER:-log}  # docs/follow-ups.md
+
+x-hardening: &hardening
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+
 services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}   # empty is refused by the image: set it in .env or use docker-compose.secrets.yml
       POSTGRES_DB: ${POSTGRES_DB:-medos}
     volumes:
       - medos-pgdata:/var/lib/postgresql/data
@@ -16,6 +57,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    logging: *logging
     ports:
       - "127.0.0.1:5432:5432"
 
@@ -23,24 +65,33 @@ services:
     build: { context: ., dockerfile: docker/api.Dockerfile }
     command: ["pnpm", "--filter", "@medos/database", "migrate"]
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-medos}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD:-}@db:5432/${POSTGRES_DB:-medos}
     depends_on:
       db: { condition: service_healthy }
     restart: "no"
+    logging: *logging
+    <<: *hardening
 
   api:
     build: { context: ., dockerfile: docker/api.Dockerfile }
     restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      PORT: 4000
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-medos}
-      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?set JWT_ACCESS_SECRET (32+ chars) in .env}
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+    environment: *api-environment
+    volumes:
+      - medos-files:/data/files
     depends_on:
       migrate: { condition: service_completed_successfully }
+    healthcheck:
+      # Ready, not merely alive: the database must answer.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 40s
+    stop_grace_period: 30s
+    logging: *logging
+    <<: *hardening
     ports:
-      - "4000:4000"
+      - "127.0.0.1:4000:4000"
 
   web:
     build: { context: ., dockerfile: docker/web.Dockerfile }
@@ -48,9 +99,37 @@ services:
     environment:
       API_URL: http://api:4000/api/v1
     depends_on:
-      api: { condition: service_started }
+      api: { condition: service_healthy }
+    stop_grace_period: 20s
+    logging: *logging
+    <<: *hardening
     ports:
-      - "3000:3000"
+      # 127.0.0.1 = this machine only. Set WEB_BIND=0.0.0.0 to open it on the network without the proxy (not for production).
+      - "${WEB_BIND:-127.0.0.1}:3000:3000"
+
+  # HTTPS in front of the web app (profile "proxy"). Caddy obtains and renews certificates for SITE_ADDRESS by itself and
+  # overwrites X-Forwarded-For with the real client address, which the login rate limit relies on.
+  proxy:
+    profiles: ["proxy"]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}  # the public host name, e.g. hospital.example.org (DNS must point at this machine)
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web: { condition: service_healthy }
+    security_opt: ["no-new-privileges:true"]
+    logging: *logging
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
 
 volumes:
   medos-pgdata:
+  medos-files:
+  caddy-data:
+  caddy-config:

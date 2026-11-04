@@ -26,7 +26,13 @@ try {
   $env:PGOPTIONS = '-c client_min_messages=warning'
   if ($tamper -notmatch 'APPEND_ONLY_OK') { throw "Append-only trigger is missing after restore: $tamper" }
 
-  Write-Host "RESTORE VERIFIED: $($a.Count) checks identical; integrity triggers intact." -ForegroundColor Green
+  # Row-level security must survive a restore: the same policies, and the restricted login able to read again (restore.ps1 re-grants).
+  $rlsSql = Join-Path $PSScriptRoot 'sql/rls-state.sql'
+  $ra = (& "$pg\psql.exe" -h $HostName -p $Port -U $User -d $Source -tA -f $rlsSql) -join ''
+  $rb = (& "$pg\psql.exe" -h $HostName -p $Port -U $User -d $scratch -tA -f $rlsSql) -join ''
+  if ($ra -ne $rb) { throw "Row-level security state differs after restore: source '$ra', restored '$rb'" }
+
+  Write-Host "RESTORE VERIFIED: $($a.Count) checks identical; integrity triggers intact; row-level security state identical ($ra)." -ForegroundColor Green
   $a | ForEach-Object { Write-Host "  $_" }
 } finally {
   Drop-Scratch

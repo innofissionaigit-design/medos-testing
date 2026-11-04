@@ -26,6 +26,8 @@ export const updateUserSchema = z.object({
 
 export const setRolesSchema = z.object({ roleIds: uuids }).strict();
 export const setFacilitiesSchema = z.object({ facilityIds: uuids }).strict();
+/** Departments a user belongs to. Empty means not limited by department (docs/data-access.md). */
+export const setDepartmentsSchema = z.object({ departmentIds: z.array(z.string().uuid()).max(50) }).strict();
 export const resetPasswordSchema = z.object({ password: passwordPolicy }).strict();
 export const changePasswordSchema = z.object({ currentPassword: z.string().min(1).max(256), newPassword: passwordPolicy }).strict();
 export const listUsersSchema = z.object({
@@ -45,11 +47,12 @@ const USER_SELECT = {
   id: true, username: true, email: true, fullName: true, status: true, createdAt: true,
   roles: { select: { role: { select: { id: true, name: true } } } },
   facilities: { select: { facility: { select: { id: true, name: true, code: true } } } },
+  departments: { select: { department: { select: { id: true, name: true, code: true } } } },
 } as const;
 
-function shape(u: { roles: { role: { id: string; name: string } }[]; facilities: { facility: { id: string; name: string; code: string } }[] } & Record<string, unknown>) {
-  const { roles, facilities, ...rest } = u;
-  return { ...rest, roles: roles.map((r) => r.role), facilities: facilities.map((f) => f.facility) };
+function shape(u: { roles: { role: { id: string; name: string } }[]; facilities: { facility: { id: string; name: string; code: string } }[]; departments: { department: { id: string; name: string; code: string } }[] } & Record<string, unknown>) {
+  const { roles, facilities, departments, ...rest } = u;
+  return { ...rest, roles: roles.map((r) => r.role), facilities: facilities.map((f) => f.facility), departments: departments.map((d) => d.department) };
 }
 
 @Injectable()
@@ -79,6 +82,7 @@ export class UsersService {
   async list(ctx: RequestContext, q: z.infer<typeof listUsersSchema>) {
     const where = {
       tenantId: ctx.tenantId,
+      isService: false, // API clients have a hidden user; they are managed under Integrations, not here
       ...(q.status ? { status: q.status } : {}),
       ...(q.q ? { OR: [{ fullName: { contains: q.q, mode: "insensitive" as const } }, { username: { contains: q.q.toLowerCase() } }] } : {}),
     };
@@ -145,6 +149,25 @@ export class UsersService {
       await this.audit.record(tx, actorOf(ctx), {
         action: "USER_FACILITIES_CHANGED", entityType: "User", entityId: id,
         metadata: { before: user.facilities.map((f) => f.facilityId), after: facilityIds },
+      });
+      return shape(await tx.user.findFirstOrThrow({ where: { id, tenantId: ctx.tenantId }, select: USER_SELECT }));
+    });
+  }
+
+  /** Which departments a user belongs to. A user with departments sees only their data; a doctor is limited to their own patients regardless (docs/data-access.md). */
+  async setDepartments(ctx: RequestContext, id: string, input: z.infer<typeof setDepartmentsSchema>) {
+    if (id === ctx.userId) throw new DomainError("SELF_MODIFICATION_FORBIDDEN", "You cannot change your own department access", 409);
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findFirst({ where: { id, tenantId: ctx.tenantId }, select: { departments: { select: { departmentId: true } } } });
+      if (!user) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      const departmentIds = [...new Set(input.departmentIds)];
+      const found = await tx.department.count({ where: { tenantId: ctx.tenantId, id: { in: departmentIds }, status: "ACTIVE" } });
+      if (found !== departmentIds.length) throw new DomainError("VALIDATION_FAILED", "One or more departments do not exist or are inactive", 400);
+      await tx.userDepartment.deleteMany({ where: { tenantId: ctx.tenantId, userId: id } });
+      if (departmentIds.length) await tx.userDepartment.createMany({ data: departmentIds.map((departmentId) => ({ tenantId: ctx.tenantId, userId: id, departmentId })) });
+      await this.audit.record(tx, actorOf(ctx), {
+        action: "USER_DEPARTMENTS_CHANGED", entityType: "User", entityId: id,
+        metadata: { before: user.departments.map((d) => d.departmentId), after: departmentIds },
       });
       return shape(await tx.user.findFirstOrThrow({ where: { id, tenantId: ctx.tenantId }, select: USER_SELECT }));
     });

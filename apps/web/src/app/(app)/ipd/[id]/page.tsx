@@ -8,6 +8,7 @@ import { CancelAdmission, DoseReasonModal, TasksCard, VitalsCard, WaiveButton } 
 import { todayIn, useAvailableBeds } from "@/components/pickers";
 import { Badge, Button, Card, ConfirmButton, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Tabs, Td, Textarea } from "@/components/ui";
 import { blankItem, RxRows, toPayload, type RxItem } from "@/components/rx-editor";
+import { WardStoreCard } from "@/components/ward-store";
 import { api, ApiError, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 
@@ -17,7 +18,8 @@ interface Admission {
   bedHistory: { id: string; bedCode: string; ward: string; room: string; assignedAt: string; releasedAt: string | null; reason: string | null; dailyRate: string }[];
 }
 interface Charge { id: string; type: string; description: string; quantity: string; unitPrice: string; taxPercent: string; status: string; chargedAt: string }
-interface Note { id: string; note: string; createdAt: string; authorName?: string | null; status?: string }
+interface Note { id: string; note: string; createdAt: string; authorName?: string | null; status?: string; errorReason?: string | null; addenda?: Note[] }
+interface IoRow { id: string; direction: string; category: string; amount: string; recordedAt: string; status: string; errorReason: string | null }
 interface Mar { id: string; scheduledAt: string; status: string; unscheduled: boolean; overdue: boolean; drug: string; strength: string | null; dosage: string; route: string; frequency: string }
 interface Step { step: string; required: boolean; status: string; blockers: string[]; automatic: boolean; note?: string | null }
 interface Discharge { steps: Step[]; canComplete: boolean; blockers: string[]; finalInvoice: { id: string } | null; summaryStatus: string | null }
@@ -157,13 +159,30 @@ function Nursing({ adm }: { adm: Admission }) {
   const [note, setNote] = useState("");
   const [reasonFor, setReasonFor] = useState<{ id: string; status: "MISSED" | "REFUSED" | "HELD" } | null>(null);
   const [io, setIo] = useState({ direction: "INTAKE", category: "ORAL", amount: "" });
-  const notes = useQuery({ queryKey: ["notes", adm.id], queryFn: () => api.get<Note[]>(`/admissions/${adm.id}/notes`) });
+  // One inline action at a time: an addendum to a note, or a reason for marking a note / I-O entry as entered in error.
+  const [act, setAct] = useState<{ kind: "addendum" | "note-error" | "io-error"; id: string; text: string } | null>(null);
+  const notes = useQuery({ queryKey: ["notes", adm.id], queryFn: () => api.get<Note[]>(`/admissions/${adm.id}/notes`, { includeErrors: "true" }) });
+  const ioRows = useQuery({ queryKey: ["io-rows", adm.id], queryFn: () => api.get<IoRow[]>(`/admissions/${adm.id}/intake-output`) });
+  const doAct = useMutation({
+    mutationFn: (a: NonNullable<typeof act>) => a.kind === "addendum" ? api.post(`/nursing-notes/${a.id}/addendum`, { note: a.text.trim() })
+      : a.kind === "note-error" ? api.post(`/nursing-notes/${a.id}/enter-in-error`, { reason: a.text.trim() })
+      : api.post(`/intake-output/${a.id}/enter-in-error`, { reason: a.text.trim() }),
+    onSuccess: async () => { setAct(null); await qc.invalidateQueries({ queryKey: ["notes", adm.id] }); await qc.invalidateQueries({ queryKey: ["io", adm.id] }); await qc.invalidateQueries({ queryKey: ["io-rows", adm.id] }); },
+  });
+  const actForm = (id: string, kind: "addendum" | "note-error" | "io-error") => act?.id === id && act.kind === kind && (
+    <form className="mt-2 flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); doAct.mutate(act); }}>
+      <Input autoFocus className="min-w-0 flex-1" aria-label={kind === "addendum" ? "Addendum" : "Reason"} placeholder={kind === "addendum" ? "Addendum (the original note stays as written)" : "Why is this entry wrong?"} value={act.text} onChange={(e) => setAct({ ...act, text: e.target.value })} />
+      <Button type="submit" variant={kind === "addendum" ? "primary" : "danger"} loading={doAct.isPending} disabled={act.text.trim().length < 3}>{kind === "addendum" ? "Add addendum" : "Mark entered in error"}</Button>
+      <Button variant="ghost" onClick={() => setAct(null)}>Cancel</Button>
+      <div className="w-full"><ErrorNote error={doAct.error} /></div>
+    </form>
+  );
   const mar = useQuery({ queryKey: ["mar", adm.id], queryFn: () => api.get<Mar[]>(`/admissions/${adm.id}/mar`) });
   const totals = useQuery({ queryKey: ["io", adm.id], queryFn: () => api.get<{ daily: { intake: string; output: string; balance: string } }>(`/admissions/${adm.id}/intake-output/totals`, { date: todayIn(me.facility?.timezone ?? me.tenant.timezone) }) });
   const addNote = useMutation({ mutationFn: () => api.post(`/admissions/${adm.id}/notes`, { note }), onSuccess: () => { setNote(""); void qc.invalidateQueries({ queryKey: ["notes", adm.id] }); } });
   const gen = useMutation({ mutationFn: () => api.post(`/admissions/${adm.id}/mar/generate`, { hours: 24 }), onSuccess: () => qc.invalidateQueries({ queryKey: ["mar", adm.id] }) });
   const give = useMutation({ mutationFn: ({ id, status, remarks }: { id: string; status: string; remarks?: string }) => api.post(`/mar/${id}/administer`, { status, ...(remarks ? { remarks } : {}) }), onSuccess: async () => { setReasonFor(null); await qc.invalidateQueries({ queryKey: ["mar", adm.id] }); } });
-  const addIo = useMutation({ mutationFn: () => api.post(`/admissions/${adm.id}/intake-output`, { direction: io.direction, category: io.category, amount: Number(io.amount) }), onSuccess: () => { setIo({ ...io, amount: "" }); void qc.invalidateQueries({ queryKey: ["io", adm.id] }); } });
+  const addIo = useMutation({ mutationFn: () => api.post(`/admissions/${adm.id}/intake-output`, { direction: io.direction, category: io.category, amount: Number(io.amount) }), onSuccess: () => { setIo({ ...io, amount: "" }); void qc.invalidateQueries({ queryKey: ["io", adm.id] }); void qc.invalidateQueries({ queryKey: ["io-rows", adm.id] }); } });
   const canDoc = open && can("NURSING_DOCUMENT");
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -182,7 +201,28 @@ function Nursing({ adm }: { adm: Admission }) {
         <TasksCard admissionId={adm.id} open={open} />
         <Card title="Nursing notes">
           {canDoc && <form className="mb-3 space-y-2" onSubmit={(e) => { e.preventDefault(); if (note.trim().length >= 3) addNote.mutate(); }}><Textarea aria-label="Note" placeholder="Write a nursing note…" value={note} onChange={(e) => setNote(e.target.value)} /><div className="flex items-center gap-2"><Button type="submit" loading={addNote.isPending} disabled={note.trim().length < 3}>Add note</Button><ErrorNote error={addNote.error} /></div></form>}
-          <ul className="space-y-2">{notes.data?.map((n) => <li key={n.id} className="rounded border border-slate-100 p-2 text-sm"><div className="text-xs text-slate-500">{dateTime(n.createdAt)}{n.authorName ? ` · ${n.authorName}` : ""}</div>{n.note}</li>)}{notes.data?.length === 0 && <li className="text-sm text-slate-500">No notes yet.</li>}</ul>
+          <ul className="space-y-2">
+            {notes.data?.map((n) => {
+              const wrong = n.status === "ENTERED_IN_ERROR";
+              return (
+                <li key={n.id} className="rounded border border-slate-100 p-2 text-sm">
+                  <div className="text-xs text-slate-500">{dateTime(n.createdAt)}{n.authorName ? ` · ${n.authorName}` : ""}{wrong ? ` · entered in error: ${n.errorReason ?? ""}` : ""}</div>
+                  <div className={wrong ? "text-slate-400 line-through" : ""}>{n.note}</div>
+                  {n.addenda?.map((a) => (
+                    <div key={a.id} className="mt-1 border-l-2 border-brand-100 pl-2"><div className="text-xs text-slate-500">Addendum · {dateTime(a.createdAt)}{a.authorName ? ` · ${a.authorName}` : ""}</div>{a.note}</div>
+                  ))}
+                  {canDoc && !wrong && !act && (
+                    <div className="mt-1 flex gap-3 text-xs">
+                      <button className="text-brand-700 hover:underline" onClick={() => setAct({ kind: "addendum", id: n.id, text: "" })}>add addendum</button>
+                      <button className="text-slate-500 hover:text-red-700" onClick={() => setAct({ kind: "note-error", id: n.id, text: "" })}>entered in error</button>
+                    </div>
+                  )}
+                  {actForm(n.id, "addendum")}{actForm(n.id, "note-error")}
+                </li>
+              );
+            })}
+            {notes.data?.length === 0 && <li className="text-sm text-slate-500">No notes yet.</li>}
+          </ul>
         </Card>
         <Card title="Intake and output (today)">
           <p className="mb-2 text-sm">Intake <b>{totals.data?.daily.intake ?? 0}</b> ml · Output <b>{totals.data?.daily.output ?? 0}</b> ml · Balance <b>{totals.data?.daily.balance ?? 0}</b> ml</p>
@@ -195,6 +235,20 @@ function Nursing({ adm }: { adm: Admission }) {
               <div className="col-span-4"><ErrorNote error={addIo.error} /></div>
             </form>
           )}
+          {/* Every entry stays on record; a wrong one is struck through with its reason and left out of the totals. */}
+          <Table head={["When", "Entry", "ml", ""]} {...(ioRows.data?.length === 0 ? { empty: "No entries yet." } : {})}>
+            {ioRows.data?.slice(0, 30).map((r) => {
+              const wrong = r.status === "ENTERED_IN_ERROR";
+              return (
+                <tr key={r.id} className={wrong ? "text-slate-400" : ""}>
+                  <Td>{dateTime(r.recordedAt)}</Td>
+                  <Td><span className={wrong ? "line-through" : ""}>{r.direction === "INTAKE" ? "Intake" : "Output"} · {r.category.toLowerCase().replace("_", " ")}</span>{wrong && <div className="text-xs">entered in error: {r.errorReason}</div>}{actForm(r.id, "io-error")}</Td>
+                  <Td><span className={wrong ? "line-through" : ""}>{r.amount}</span></Td>
+                  <Td>{canDoc && !wrong && !act && <button className="text-xs text-slate-500 hover:text-red-700" onClick={() => setAct({ kind: "io-error", id: r.id, text: "" })}>entered in error</button>}</Td>
+                </tr>
+              );
+            })}
+          </Table>
         </Card>
       </div>
     </div>
@@ -205,7 +259,8 @@ function DischargePanel({ adm, refresh }: { adm: Admission; refresh: () => void 
   const { can, money } = useMe();
   const qc = useQueryClient();
   const open = adm.status === "ADMITTED";
-  const st = useQuery({ queryKey: ["discharge", adm.id], queryFn: () => api.get<Discharge>(`/admissions/${adm.id}/discharge`) });
+  // Pharmacy and billing clear themselves from work done on other screens, so keep the checklist fresh while it is open.
+  const st = useQuery({ queryKey: ["discharge", adm.id], queryFn: () => api.get<Discharge>(`/admissions/${adm.id}/discharge`), refetchInterval: open ? 10_000 : false });
   const sum = useQuery({ queryKey: ["summary", adm.id], queryFn: () => api.get<SummaryDoc>(`/admissions/${adm.id}/discharge-summary`), enabled: can("CONSULTATION_READ") });
   const [content, setContent] = useState<SummaryContent>({});
   const [loaded, setLoaded] = useState(false);
@@ -234,16 +289,17 @@ function DischargePanel({ adm, refresh }: { adm: Admission; refresh: () => void 
       <Card title="Discharge checklist">
         {d?.steps.map((s) => (
           <div key={s.step} className="flex items-start justify-between gap-3 border-b border-slate-100 py-2 last:border-0">
-            <div><div className="text-sm font-medium">{s.step.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase())} {!s.required && <span className="text-xs text-slate-400">(optional)</span>}</div>{s.blockers.map((b) => <div key={b} className="text-xs text-amber-700">⚠ {b}</div>)}</div>
+            <div><div className="text-sm font-medium">{s.step.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase())} {!s.required && <span className="text-xs text-slate-400">(optional)</span>}</div>{s.blockers.map((b) => <div key={b} className="text-xs text-amber-700">⚠ {b}</div>)}{s.status === "CLEARED" && s.note && <div className="text-xs text-slate-500">{s.note}</div>}</div>
             <div className="flex items-center gap-2"><StatusBadge value={s.status} />{open && s.status === "PENDING" && !s.automatic && can(stepPerm[s.step] ?? "ADMISSION_DISCHARGE") && <Button variant="secondary" loading={clear.isPending} onClick={() => clear.mutate(s.step)}>Clear</Button>}{open && s.status === "PENDING" && !s.automatic && s.step !== "MEDICALLY_FIT" && can("ADMISSION_DISCHARGE") && <WaiveButton admissionId={adm.id} step={s.step} onDone={reload} />}</div>
           </div>
         ))}
         <ErrorNote error={clear.error} />
         {open && (
           <div className="mt-4 space-y-3 border-t border-slate-100 pt-3">
-            {!d?.finalInvoice ? (can("INVOICE_CREATE") && can("INVOICE_ISSUE") ? <Button variant="secondary" loading={finalBill.isPending} onClick={() => finalBill.mutate()}>Generate final bill</Button> : null) : <Link className="text-sm text-brand-700 hover:underline" href={`/billing/${d.finalInvoice.id}`}>Open final bill</Link>}
+            {!d?.finalInvoice ? (can("IPD_FINAL_BILL") ? <Button variant="secondary" loading={finalBill.isPending} onClick={() => finalBill.mutate()}>Generate final bill</Button> : null) : <Link className="text-sm text-brand-700 hover:underline" href={`/billing/${d.finalInvoice.id}`}>Open final bill</Link>}
             <ErrorNote error={finalBill.error} />
             {d && !d.canComplete && d.blockers.length > 0 && <Notice tone="warn">Before discharge: {d.blockers.join("; ")}.</Notice>}
+            {d?.canComplete && !can("ADMISSION_DISCHARGE") && <Notice tone="success">Everything is cleared and paid. The patient is still admitted, and the bed stays occupied, until a doctor presses “Discharge patient”. Ask the doctor to open this screen.</Notice>}
             {can("ADMISSION_DISCHARGE") && (
               <div className="flex flex-wrap items-center gap-2">
                 <Select aria-label="Discharge type" className="w-44" value={dtype} onChange={(e) => setDtype(e.target.value)}>{["ROUTINE", "LAMA", "REFERRED", "ABSCONDED", "DEATH"].map((t) => <option key={t}>{t}</option>)}</Select>
@@ -291,13 +347,16 @@ export default function AdmissionPage() {
     <Gate anyOf={["ADMISSION_READ"]} feature="IPD_ENABLED">
       <PageHeader
         title={a.patientName} subtitle={`${a.admissionNumber} · MRN ${a.mrn ?? "—"} · admitted ${dateTime(a.admittedAt)} · ${a.lengthOfStayDays} day(s) · ${a.consultantName}${a.bed ? ` · ${a.bed.ward} ${a.bed.code}` : ""}`}
-        actions={<><StatusBadge value={a.status} /><Link href={`/patients/${a.patientId}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Patient record</Link></>}
+        actions={<><StatusBadge value={a.status} /><Link href={`/patients/${a.patientId}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Patient record</Link>
+          {a.status !== "CANCELLED" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`admission-forms/${a.id}`)} target="_blank" rel="noreferrer">Print admission form</a>}
+          {a.status !== "CANCELLED" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`admission-forms/${a.id}`)}?format=pdf&download=1`}>PDF</a>}
+          {a.status !== "CANCELLED" && <><a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`admission-forms/${a.id}`)}?lang=bn`} target="_blank" rel="noreferrer">বাংলা</a><a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`admission-forms/${a.id}`)}?lang=hi`} target="_blank" rel="noreferrer">हिन्दी</a></>}</>}
       />
       {a.reason && <div className="mb-3"><KV label="Reason for admission">{a.reason}</KV></div>}
       <Tabs tabs={[{ id: "overview", label: "Beds and charges" }, { id: "orders", label: "Medication orders" }, { id: "nursing", label: "Nursing and medication" }, { id: "discharge", label: "Discharge" }]} value={tab} onChange={setTab} />
       {tab === "overview" && <Overview adm={a} refresh={refresh} />}
       {tab === "orders" && <Orders adm={a} />}
-      {tab === "nursing" && <Nursing adm={a} />}
+      {tab === "nursing" && <><Nursing adm={a} /><WardStoreCard admissionId={a.id} open={a.status === "ADMITTED"} /></>}
       {tab === "discharge" && <DischargePanel adm={a} refresh={refresh} />}
     </Gate>
   );

@@ -5,8 +5,12 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { assertEncounterVisible, visitScope } from "../../common/data-scope";
+import { chartPatientIds } from "../patients/patient-links";
 import { currentAge } from "../patients/patient.domain";
 import { orderItemSchema, PrescriptionsService, type OrderView } from "../prescriptions/prescriptions.service";
+import { TestOrdersService } from "../test-orders/test-orders.service";
+import { PrescriptionDeliveryService } from "../prescriptions/prescription-delivery.service";
 import { EncountersService } from "../encounters/encounters.service";
 import { AllergiesService } from "./allergies.service";
 import { ClinicianService } from "./clinician.service";
@@ -22,6 +26,16 @@ export const consultationContentSchema = z.object({
   pastHistory: section.optional(),
   examination: section.optional(),
   advice: section.optional(),
+  /** Tests the doctor asks the patient to get done (docs/prescriptions.md). */
+  investigationsAdvised: z.array(z.string().trim().min(2).max(120)).max(20).optional(),
+  /** Radiology and imaging (X-ray, ultrasound, CT, MRI and so on). */
+  otherTestsAdvised: z.array(z.string().trim().min(2).max(120)).max(20).optional(),
+  /** Cardiology investigations (ECG, echo, stress test and so on). */
+  cardiologyAdvised: z.array(z.string().trim().min(2).max(120)).max(20).optional(),
+  /** Other diagnostic procedures (endoscopy, biopsy, spirometry and so on). */
+  proceduresAdvised: z.array(z.string().trim().min(2).max(120)).max(20).optional(),
+  dietAdvice: section.optional(),
+  referral: z.string().trim().max(500).optional(),
   followUp: z.object({ afterDays: z.number().int().min(1).max(365).optional(), date: isoDay.optional(), notes: z.string().trim().max(500).optional() }).strict().optional(),
 }).strict();
 export type ConsultationContent = z.infer<typeof consultationContentSchema>;
@@ -60,6 +74,8 @@ export class ConsultationsService {
     private readonly clinicians: ClinicianService,
     private readonly prescriptions: PrescriptionsService,
     private readonly allergies: AllergiesService,
+    private readonly testOrders: TestOrdersService,
+    private readonly deliveries: PrescriptionDeliveryService,
   ) {}
 
   // ───── draft ─────
@@ -125,17 +141,17 @@ export class ConsultationsService {
   }
 
   async diagnosesForEncounter(ctx: RequestContext, encounterId: string, includeRemoved: boolean) {
-    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true } });
+    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [visitScope(ctx)] }, select: { id: true } });
     if (!enc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     return this.prisma.diagnosis.findMany({ where: { tenantId: ctx.tenantId, encounterId, ...(includeRemoved ? {} : { status: "ACTIVE" }) }, select: DIAGNOSIS_VIEW, orderBy: { recordedAt: "asc" } });
   }
 
   /** Longitudinal history: diagnoses across the patient's visits, newest first. */
   async diagnosesForPatient(ctx: RequestContext, patientId: string) {
-    const patient = await this.prisma.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
-    if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+    const ids = await chartPatientIds(this.prisma, ctx.tenantId, patientId);
+    if (!ids) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
     const rows = await this.prisma.diagnosis.findMany({
-      where: { tenantId: ctx.tenantId, patientId, status: "ACTIVE" }, orderBy: { recordedAt: "desc" }, take: 200,
+      where: { tenantId: ctx.tenantId, patientId: { in: ids }, status: "ACTIVE" }, orderBy: { recordedAt: "desc" }, take: 200,
       select: { ...DIAGNOSIS_VIEW, encounter: { select: { encounterNumber: true, startedAt: true, type: true } } },
     });
     return rows.map(({ encounter, ...d }) => ({ ...d, encounterNumber: encounter.encounterNumber, visitDate: encounter.startedAt, visitType: encounter.type }));
@@ -144,7 +160,7 @@ export class ConsultationsService {
   // ───── read ─────
 
   async get(ctx: RequestContext, encounterId: string) {
-    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, patientId: true } });
+    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [visitScope(ctx)] }, select: { id: true, patientId: true } });
     if (!enc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const doc = await this.prisma.clinicalDocument.findFirst({
       where: { tenantId: ctx.tenantId, encounterId, kind: "CONSULTATION" },
@@ -174,6 +190,7 @@ export class ConsultationsService {
 
   /** The original (and every later) version stays recoverable exactly as it was signed. */
   async getVersion(ctx: RequestContext, encounterId: string, version: number) {
+    await assertEncounterVisible(this.prisma, ctx, encounterId);
     const doc = await this.prisma.clinicalDocument.findFirst({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, encounterId, kind: "CONSULTATION" }, select: { id: true } });
     if (!doc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const v = await this.prisma.clinicalDocumentVersion.findFirst({ where: { tenantId: ctx.tenantId, documentId: doc.id, version } });
@@ -195,11 +212,18 @@ export class ConsultationsService {
       if (doc.version !== input.version) throw new DomainError("STALE_VERSION", "The consultation changed since you opened it. Review and sign again.", 409, { currentVersion: doc.version });
 
       const content = doc.draft as ConsultationContent;
-      if (!content.chiefComplaint?.trim()) throw new DomainError("VALIDATION_FAILED", "Record the chief complaint before signing", 400, [{ path: "chiefComplaint", message: "Required to sign" }]);
-      const diagnosisCount = await tx.diagnosis.count({ where: { tenantId: ctx.tenantId, encounterId, status: "ACTIVE" } });
-      if (diagnosisCount === 0) throw new DomainError("VALIDATION_FAILED", "Record at least one diagnosis before signing", 400, [{ path: "diagnoses", message: "Required to sign" }]);
+      // With the doctor's handwritten prescription uploaded (and not sent back by the pharmacy), the doctor may sign straight away: the prescription is the handwritten
+      // picture. Without one, the complaint and a diagnosis are required before signing.
+      const handwritten = await tx.prescriptionScan.count({ where: { tenantId: ctx.tenantId, encounterId, OR: [{ pharmacyOutcome: null }, { pharmacyOutcome: "DISPENSED" }] } });
+      if (handwritten === 0) {
+        if (!content.chiefComplaint?.trim()) throw new DomainError("VALIDATION_FAILED", "Record the chief complaint before signing", 400, [{ path: "chiefComplaint", message: "Required to sign" }]);
+        const diagnosisCount = await tx.diagnosis.count({ where: { tenantId: ctx.tenantId, encounterId, status: "ACTIVE" } });
+        if (diagnosisCount === 0) throw new DomainError("VALIDATION_FAILED", "Record at least one diagnosis before signing", 400, [{ path: "diagnoses", message: "Required to sign" }]);
+      }
 
       await this.prescriptions.signDraft(tx, ctx, encounterId, input.acknowledgeAllergyWarnings === true);
+      // The tests the doctor advised go to the Cashier to be billed, in the same transaction as the signature.
+      await this.testOrders.syncFromConsultation(tx, ctx, { id: encounterId, patientId: enc.patientId }, content, 1);
       const snapshot = await this.buildSnapshot(tx, ctx, encounterId);
       await tx.clinicalDocumentVersion.create({ data: { tenantId: ctx.tenantId, documentId: doc.id, version: 1, kind: "SIGNED", content: content as Prisma.InputJsonObject, snapshot: snapshot as unknown as Prisma.InputJsonObject, authorId: ctx.userId } });
       const res = await tx.clinicalDocument.updateMany({
@@ -208,6 +232,7 @@ export class ConsultationsService {
       });
       if (res.count !== 1) throw new DomainError("STALE_VERSION", "The consultation was changed by someone else", 409);
       await this.audit.record(tx, actorOf(ctx), { action: "CONSULTATION_SIGNED", entityType: "ClinicalDocument", entityId: doc.id, metadata: { encounterId, version: 1 } });
+      await this.deliveries.queueAuto(tx, ctx, encounterId);
       return { id: doc.id, status: "SIGNED" as const, currentVersion: 1 };
     });
   }
@@ -232,6 +257,7 @@ export class ConsultationsService {
         await tx.diagnosis.createMany({ data: input.diagnoses.map((d) => ({ tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: enc.patientId, encounterId, text: d.text, code: d.code ?? null, type: d.type, recordedById: ctx.userId })) });
       }
       if (input.prescription) await this.prescriptions.amend(tx, ctx, encounterId, enc.patientId, input.prescription.items, next, input.acknowledgeAllergyWarnings === true);
+      await this.testOrders.syncFromConsultation(tx, ctx, { id: encounterId, patientId: enc.patientId }, input.content, next);
 
       const snapshot = await this.buildSnapshot(tx, ctx, encounterId);
       await tx.clinicalDocumentVersion.create({
@@ -252,8 +278,8 @@ export class ConsultationsService {
   /** Everything the doctor needs on one screen: header, allergies, vitals, draft state and recent visits. */
   async workspace(ctx: RequestContext, encounterId: string) {
     const enc = await this.prisma.encounter.findFirst({
-      where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId },
-      include: { patient: { include: { identifiers: { where: { type: "MRN" }, select: { value: true } } } }, practitioner: { select: { displayName: true } }, department: { select: { name: true } } },
+      where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [visitScope(ctx)] },
+      include: { patient: { include: { identifiers: { where: { type: "MRN" }, select: { value: true } } } }, practitioner: { select: { displayName: true, specialty: true, registrationNo: true } }, department: { select: { name: true } } },
     });
     if (!enc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const p = enc.patient;
@@ -272,7 +298,7 @@ export class ConsultationsService {
         patientId: p.id, mrn: p.identifiers[0]?.value ?? null, name: [p.firstName, p.lastName].filter(Boolean).join(" "),
         gender: p.gender, age: currentAge(p), bloodGroup: p.bloodGroup, mobile: p.mobile,
         encounterId: enc.id, encounterNumber: enc.encounterNumber, visitStatus: enc.status, startedAt: enc.startedAt,
-        practitionerName: enc.practitioner?.displayName ?? null, departmentName: enc.department?.name ?? null,
+        practitionerId: enc.practitionerId, practitionerName: enc.practitioner?.displayName ?? null, practitionerSpecialty: enc.practitioner?.specialty ?? null, practitionerRegistrationNo: enc.practitioner?.registrationNo ?? null, departmentName: enc.department?.name ?? null,
       },
       allergies, latestVitals, previousVisits: previous, consultation,
     };
@@ -280,7 +306,7 @@ export class ConsultationsService {
 
   private async previousVisits(ctx: RequestContext, patientId: string, excludeEncounterId: string) {
     const encounters = await this.prisma.encounter.findMany({
-      where: { tenantId: ctx.tenantId, patientId, id: { not: excludeEncounterId }, status: "COMPLETED" },
+      where: { tenantId: ctx.tenantId, patientId: { in: (await chartPatientIds(this.prisma, ctx.tenantId, patientId)) ?? [patientId] }, id: { not: excludeEncounterId }, status: "COMPLETED" },
       orderBy: { startedAt: "desc" }, take: 5,
       select: { id: true, encounterNumber: true, type: true, startedAt: true, practitioner: { select: { displayName: true } } },
     });
@@ -311,9 +337,9 @@ export class ConsultationsService {
   private async buildSnapshot(tx: Db, ctx: RequestContext, encounterId: string): Promise<Snapshot> {
     const diagnoses = await tx.diagnosis.findMany({ where: { tenantId: ctx.tenantId, encounterId, status: "ACTIVE" }, orderBy: { recordedAt: "asc" }, select: { text: true, code: true, type: true } });
     const orders: OrderView[] = await tx.medicationOrder.findMany({
-      where: { tenantId: ctx.tenantId, encounterId, status: "SIGNED" }, orderBy: { signedAt: "asc" },
-      select: { id: true, orderNumber: true, status: true, encounterId: true, patientId: true, orderedById: true, signedById: true, signedAt: true, supersededAtVersion: true, createdAt: true,
-        items: { orderBy: { lineNo: "asc" }, select: { id: true, lineNo: true, medicineId: true, genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true, frequencyText: true, durationDays: true, quantity: true, instructions: true, status: true, dispensedQuantity: true, stopReason: true } } },
+      where: { tenantId: ctx.tenantId, encounterId, status: "SIGNED", source: "DIGITAL" }, orderBy: { signedAt: "asc" },
+      select: { id: true, orderNumber: true, status: true, source: true, encounterId: true, patientId: true, orderedById: true, signedById: true, signedAt: true, supersededAtVersion: true, createdAt: true,
+        items: { orderBy: { lineNo: "asc" }, select: { id: true, lineNo: true, medicineId: true, genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true, frequencyText: true, foodRelation: true, durationDays: true, quantity: true, instructions: true, status: true, dispensedQuantity: true, stopReason: true } } },
     });
     return {
       diagnoses,

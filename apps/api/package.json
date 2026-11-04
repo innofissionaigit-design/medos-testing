@@ -10,25 +10,29 @@
     "test": "node --test --test-concurrency=1 \"dist-test/**/*.spec.js\"",
     "start": "node dist/main.js",
     "provision": "node dist/cli/provision.js",
-    "seed": "node dist/cli/seed.js"
+    "seed": "node dist/cli/seed.js",
+    "backup": "node dist/cli/db-backup.js",
+    "load": "node scripts/prepare-test-db.mjs && tsc -p tsconfig.json && node dist-test/load/load-test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "3.1152.0",
     "@medos/database": "workspace:*",
     "@medos/shared": "workspace:*",
-    "@nestjs/common": "^10.4.8",
-    "@nestjs/core": "^10.4.8",
-    "@nestjs/platform-express": "^10.4.8",
-    "express": "^4.21.2",
+    "@nestjs/common": "^11.2.8",
+    "@nestjs/core": "^11.2.8",
+    "@nestjs/platform-express": "^11.2.8",
+    "@node-rs/argon2": "2.2.2",
+    "express": "^5.2.1",
     "helmet": "^8.0.0",
     "jsonwebtoken": "^9.0.2",
     "pdfkit": "^0.20.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
-    "zod": "^3.23.8"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@nestjs/testing": "^10.4.8",
-    "@types/express": "^4.17.21",
+    "@nestjs/testing": "^11.2.8",
+    "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.9.0",
     "@types/pdfkit": "^0.17.6",

@@ -1,7 +1,94 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as jwt from "jsonwebtoken";
+import { randomBytes, scrypt } from "node:crypto";
+import { tenantScope } from "../../common/tenant-scope";
 import { PASSWORD, startApp, type TestApp, type TestTenant } from "../../test/harness";
+import { AuthService } from "./auth.service";
+
+/** A password hash in the format used before Argon2id. */
+const legacyHash = (password: string): Promise<string> => new Promise((resolve, reject) => {
+  const N = 1024;
+  const salt = randomBytes(16);
+  scrypt(password.normalize("NFKC"), salt, 32, { N, r: 8, p: 1, maxmem: 256 * N * 8 }, (e, key) => (e ? reject(e) : resolve(["scrypt", N, 8, 1, salt.toString("base64"), key.toString("base64")].join("$"))));
+});
+
+describe("password hash upgrade at sign-in", () => {
+  let t: TestApp;
+  let tenant: TestTenant;
+  before(async () => { t = await startApp(); tenant = await t.makeTenant("hashup"); });
+  after(async () => { await t.close(); });
+
+  const hashOf = async (id: string) => (await t.prisma.user.findFirstOrThrow({ where: { id, tenantId: tenant.tenantId } })).passwordHash;
+  const upgradeEvents = (id: string) => t.prisma.auditEvent.findMany({ where: { tenantId: tenant.tenantId, action: "PASSWORD_HASH_UPGRADED", entityId: id } });
+
+  it("an account with an old-format hash signs in, and its hash is replaced with Argon2id", async () => {
+    const u = await t.makeUser(tenant, ["RECEPTIONIST"]);
+    const old = await legacyHash(PASSWORD);
+    await t.prisma.user.update({ where: { tenantId_id: { tenantId: tenant.tenantId, id: u.id } }, data: { passwordHash: old } });
+
+    const first = await t.login(tenant.code, u.username);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const upgraded = await hashOf(u.id);
+    assert.notEqual(upgraded, old);
+    assert.match(upgraded, /^\$argon2id\$/);
+    assert.ok(!upgraded.includes(PASSWORD));
+
+    assert.equal((await t.login(tenant.code, u.username)).status, 200, "the new hash works");
+    assert.equal(await hashOf(u.id), upgraded, "and is not replaced again");
+    const events = await upgradeEvents(u.id);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.actorUserId, u.id);
+    assert.deepEqual(events[0]!.metadata, { from: "scrypt", to: "argon2id" });
+  });
+
+  it("a wrong password is refused and leaves the old hash untouched", async () => {
+    const u = await t.makeUser(tenant, ["RECEPTIONIST"]);
+    const old = await legacyHash(PASSWORD);
+    await t.prisma.user.update({ where: { tenantId_id: { tenantId: tenant.tenantId, id: u.id } }, data: { passwordHash: old } });
+    const bad = await t.login(tenant.code, u.username, "Not-The-Password-1");
+    assert.equal(bad.status, 401);
+    assert.equal(await hashOf(u.id), old);
+    assert.equal((await upgradeEvents(u.id)).length, 0);
+  });
+
+  it("an inactive account is refused and not upgraded", async () => {
+    const u = await t.makeUser(tenant, ["RECEPTIONIST"]);
+    const old = await legacyHash(PASSWORD);
+    await t.prisma.user.update({ where: { tenantId_id: { tenantId: tenant.tenantId, id: u.id } }, data: { passwordHash: old, status: "INACTIVE" } });
+    assert.equal((await t.login(tenant.code, u.username)).status, 401);
+    assert.equal(await hashOf(u.id), old);
+  });
+
+  it("an account whose Argon2id hash is weaker than the current setting is strengthened", async () => {
+    const u = await t.makeUser(tenant, ["RECEPTIONIST"]);
+    const original = await hashOf(u.id);
+    const { hash } = await import("@node-rs/argon2");
+    const weak = await hash(PASSWORD, { algorithm: 2, memoryCost: 8, timeCost: 1, parallelism: 1 }); // 2 = Argon2id
+    assert.notEqual(weak, original);
+    await t.prisma.user.update({ where: { tenantId_id: { tenantId: tenant.tenantId, id: u.id } }, data: { passwordHash: weak } });
+    assert.equal((await t.login(tenant.code, u.username)).status, 200);
+    const now = await hashOf(u.id);
+    assert.notEqual(now, weak);
+    assert.match(now, /\$m=1024,t=1,p=1\$/, "rebuilt with the configured cost");
+    assert.deepEqual((await upgradeEvents(u.id))[0]!.metadata, { from: "argon2id-weaker", to: "argon2id" });
+  });
+
+  it("a password changed while the sign-in was in progress is never overwritten by the old password's hash", async () => {
+    const u = await t.makeUser(tenant, ["RECEPTIONIST"]);
+    const old = await legacyHash(PASSWORD);
+    await t.prisma.user.update({ where: { tenantId_id: { tenantId: tenant.tenantId, id: u.id } }, data: { passwordHash: old } });
+    // The sign-in read `old`; before it could write its upgrade, the user changed their password.
+    const changed = await t.app.get(AuthService)["passwords"].hash("Brand-New-Password-7");
+    await t.prisma.user.update({ where: { tenantId_id: { tenantId: tenant.tenantId, id: u.id } }, data: { passwordHash: changed } });
+    const auth = t.app.get(AuthService) as unknown as { upgradeHash: (a: unknown, id: string, tid: string, current: string, pw: string) => Promise<void> };
+    await tenantScope.run(tenant.tenantId, () => auth.upgradeHash({ tenantId: tenant.tenantId, userId: u.id, requestId: undefined }, u.id, tenant.tenantId, old, PASSWORD));
+    assert.equal(await hashOf(u.id), changed, "the newer password stands");
+    assert.equal((await upgradeEvents(u.id)).length, 0);
+    assert.equal((await t.login(tenant.code, u.username, "Brand-New-Password-7")).status, 200);
+    assert.equal((await t.login(tenant.code, u.username, PASSWORD)).status, 401);
+  });
+});
 
 describe("authentication", () => {
   let t: TestApp;
@@ -28,7 +115,7 @@ describe("authentication", () => {
 
   it("stores only a hash of the password and refresh token", async () => {
     const u = await t.prisma.user.findFirstOrThrow({ where: { tenantId: tenant.tenantId, username: "admin" } });
-    assert.match(u.passwordHash, /^scrypt\$/);
+    assert.match(u.passwordHash, /^\$argon2id\$v=19\$m=\d+,t=\d+,p=1\$/);
     assert.ok(!u.passwordHash.includes(PASSWORD));
     const login = await t.login(tenant.code, "admin", PASSWORD, tenant.facilityId);
     const rt = login.body.data.tokens.refreshToken as string;
@@ -201,5 +288,55 @@ describe("authentication rate limiting", () => {
     }
     assert.equal(last, 429);
     assert.equal(code, "RATE_LIMITED");
+  });
+
+  it("counts login attempts per client address forwarded by the trusted web server", async () => {
+    const attempt = (ip: string) => t.http().post("/api/v1/auth/login").set("X-Forwarded-For", ip).send({ tenantCode: "whatever-tenant", identifier: "someone", password: "Whatever-123" });
+    let last = 0;
+    for (let i = 0; i < 14 && last !== 429; i++) last = (await attempt("203.0.113.10")).status;
+    assert.equal(last, 429, "one client is still throttled");
+    assert.equal((await attempt("203.0.113.11")).status, 401, "a different client keeps its own allowance");
+  });
+
+  it("counts refreshes and logouts per session, so users sharing the web server are never throttled together", async () => {
+    for (let i = 0; i < 35; i++) {
+      const refreshToken = `not-a-real-token-${String(i).padStart(8, "0")}`;
+      assert.equal((await t.http().post("/api/v1/auth/refresh").send({ refreshToken })).status, 401, `refresh for session ${i + 1}`);
+      assert.equal((await t.http().post("/api/v1/auth/logout").send({ refreshToken })).status, 204, `logout for session ${i + 1}`);
+    }
+    let last = 0;
+    for (let i = 0; i < 34 && last !== 429; i++) last = (await t.http().post("/api/v1/auth/refresh").send({ refreshToken: "one-session-hammering-refresh" })).status;
+    assert.equal(last, 429, "a single session hammering refresh is still throttled");
+  });
+});
+
+describe("authentication rate limiting when no proxy is trusted", () => {
+  let t: TestApp;
+  before(async () => { process.env["TRUST_PROXY"] = "false"; t = await startApp({ rateLimit: true }); });
+  after(async () => { await t.close(); delete process.env["TRUST_PROXY"]; });
+
+  it("ignores X-Forwarded-For from an untrusted peer, so a client cannot forge fresh addresses", async () => {
+    let last = 0;
+    for (let i = 0; i < 14 && last !== 429; i++) {
+      last = (await t.http().post("/api/v1/auth/login").set("X-Forwarded-For", `198.51.100.${i}`).send({ tenantCode: "whatever-tenant", identifier: "someone", password: "Whatever-123" })).status;
+    }
+    assert.equal(last, 429);
+  });
+});
+
+describe("password change rate limiting", () => {
+  let t: TestApp;
+  let tenant: TestTenant;
+  before(async () => { t = await startApp({ rateLimit: true }); tenant = await t.makeTenant("pwrl"); });
+  after(async () => { await t.close(); });
+
+  it("counts password-change attempts per session, not per address", async () => {
+    const a = await t.makeUser(tenant, []);
+    const b = await t.makeUser(tenant, []);
+    const change = (token: string) => t.api("post", "/users/me/password", token).send({ currentPassword: "Wrong-Password-1", newPassword: "Another-Pass-456" });
+    let last = 0;
+    for (let i = 0; i < 14 && last !== 429; i++) last = (await change(a.token)).status;
+    assert.equal(last, 429, "one session is still throttled");
+    assert.equal((await change(b.token)).status, 400, "another user's session keeps its own allowance");
   });
 });

@@ -156,11 +156,78 @@ describe("operational reports", () => {
     assert.equal((await data("collections", b.admin.token)).totals.received, "0.00");
     assert.equal((await data("ipd/current-admissions", b.admin.token)).total, 0);
     assert.equal((await data("outstanding-invoices", b.admin.token)).total, 0);
-    assert.equal((await rep("opd/daily", rec.token)).status, 403, "receptionist has no report access");
+    assert.equal((await rep("collections", rec.token)).status, 403, "receptionist has no finance report access");
     assert.equal((await rep("pharmacy/stock", cashier.token)).status, 403);
     assert.equal((await t.api("get", "/reports/opd/daily")).status, 401);
     assert.equal((await t.api("put", "/settings/PHARMACY_ENABLED", b.admin.token).send({ value: false })).status, 200);
     assert.equal((await rep("pharmacy/stock", b.admin.token)).status, 403);
     assert.equal((await rep("opd/daily", b.admin.token)).status, 200, "non-module reports stay available");
+  });
+
+  it("stock movement: opening, units in and out by type, and closing reconcile to the ledger", async () => {
+    const med = (await t.api("post", "/medicines", pharm.token).send({ brandName: `Brand${uniqueWord(6)}`, genericName: `Gen${uniqueWord(6)}`, strength: "250 mg", dosageForm: "TABLET", gstPercent: 12, reorderLevel: 0 })).body.data as { id: string };
+    const opening = await t.api("post", "/pharmacy/batches", pharm.token).set("Idempotency-Key", key()).send({ medicineId: med.id, batchNo: code("BN"), expiryDate: ymd(365), mrp: "10.00", purchasePrice: "6.00", sellingPrice: "9.50", quantity: 20 });
+    assert.equal(opening.status, 201, JSON.stringify(opening.body));
+    const p = await registerPatient(t, rec.token);
+    const sale = await t.api("post", "/pharmacy/dispenses", pharm.token).set("Idempotency-Key", key()).send({ patientId: p.id, items: [{ medicineId: med.id, quantity: 5 }] });
+    assert.equal(sale.status, 201, JSON.stringify(sale.body));
+
+    const today = await data("pharmacy/stock-movement", pharm.token);
+    const row = today.rows.find((r: { medicineId: string }) => r.medicineId === med.id);
+    assert.deepEqual(
+      [row.opening, row.adjustedIn, row.purchased, row.sold, row.totalIn, row.totalOut, row.closing],
+      [0, 20, 0, 5, 20, 5, 15],
+      "opening stock is recorded as an adjustment in; the dispense as a sale",
+    );
+    const balance = await t.prisma.stockBalance.aggregate({ where: { tenantId: a.tenantId, medicineId: med.id }, _sum: { quantity: true } });
+    assert.equal(row.closing, balance._sum.quantity, "closing equals the current stock balance");
+
+    const later = await data("pharmacy/stock-movement", pharm.token, { from: ymd(2), to: ymd(2) });
+    const quiet = later.rows.find((r: { medicineId: string }) => r.medicineId === med.id);
+    assert.deepEqual([quiet.opening, quiet.totalIn, quiet.totalOut, quiet.closing], [15, 0, 0, 15], "everything before the range is the opening balance");
+  });
+
+  it("each role sees only the reports its job needs, and the API refuses the rest", async () => {
+    const nurse = await t.makeUser(a, ["NURSE"]);
+    const manager = await t.makeUser(a, ["MANAGER"]);
+    const areas: Record<string, string[]> = {
+      OPD: ["opd/daily", "opd/by-doctor", "opd/by-department"],
+      FINANCE: ["collections", "cashier-shifts", "outstanding-invoices"],
+      IPD: ["ipd/current-admissions", "ipd/bed-occupancy"],
+      PHARMACY: ["pharmacy/sales", "pharmacy/stock-movement"],
+    };
+    const allowed: [string, string, string[]][] = [
+      ["ADMINISTRATOR", a.admin.token, ["OPD", "FINANCE", "IPD", "PHARMACY"]],
+      ["MANAGER", manager.token, ["OPD", "FINANCE", "IPD", "PHARMACY"]],
+      ["RECEPTIONIST", rec.token, ["OPD", "IPD"]],
+      ["DOCTOR", d1.token, ["OPD", "IPD"]],
+      ["NURSE", nurse.token, ["IPD"]],
+      ["CASHIER", cashier.token, ["FINANCE"]],
+      ["PHARMACIST", pharm.token, ["PHARMACY"]],
+    ];
+    for (const [role, tok, ok] of allowed) {
+      for (const [area, paths] of Object.entries(areas)) {
+        for (const path of paths) {
+          const r = await rep(path, tok);
+          assert.equal(r.status, ok.includes(area) ? 200 : 403, `${role} -> ${path}`);
+          if (r.status === 403) assert.equal(r.body.error.code, "FORBIDDEN");
+        }
+      }
+    }
+  });
+
+  it("a cashier sees only their own shifts; managers see every cashier's", async () => {
+    const c1 = await t.makeUser(a, ["CASHIER"]);
+    const c2 = await t.makeUser(a, ["CASHIER"]);
+    const manager = await t.makeUser(a, ["MANAGER"]);
+    for (const c of [c1, c2]) assert.equal((await t.api("post", "/shifts/open", c.token).send({ openingCash: "50" })).status, 201);
+    const own = await data("cashier-shifts", c1.token);
+    assert.equal(own.scope, "Your shifts only");
+    assert.ok(own.rows.length >= 1);
+    assert.ok(own.rows.every((r: { cashier: string }) => r.cashier === `Synthetic ${c1.username}`), "no other cashier's shift is visible");
+    const all = await data("cashier-shifts", manager.token);
+    assert.equal(all.scope, "All cashiers");
+    const names = new Set(all.rows.map((r: { cashier: string }) => r.cashier));
+    assert.ok(names.has(`Synthetic ${c1.username}`) && names.has(`Synthetic ${c2.username}`));
   });
 });

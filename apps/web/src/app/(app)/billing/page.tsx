@@ -5,6 +5,7 @@ import { Suspense, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Gate } from "@/components/gate";
 import { PatientPicker, type PickedPatient } from "@/components/pickers";
+import { CashierPrescriptions } from "@/components/cashier-prescriptions";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useMe } from "@/lib/me";
@@ -14,9 +15,10 @@ interface Service { id: string; code: string; name: string; price: string; taxPe
 interface Shift { id: string; openedAt: string; openingCash: string; expectedCash?: string; cashReceived?: string; cashRefunded?: string; receiptsTotal?: string }
 type Line = { serviceId?: string; description: string; unitPrice: string; taxPercent: string; quantity: string };
 
-function NewBill({ initialPatient, onClose }: { initialPatient: PickedPatient | null; onClose: () => void }) {
+/** `fromPatient`: opened from a patient's page, so the bill page offers the way back (and the OPD visit) afterwards. */
+function NewBill({ initialPatient, fromPatient, onClose }: { initialPatient: PickedPatient | null; fromPatient: boolean; onClose: () => void }) {
   const router = useRouter();
-  const { money } = useMe();
+  const { money, can } = useMe();
   const [patient, setPatient] = useState<PickedPatient | null>(initialPatient);
   const [lines, setLines] = useState<Line[]>([]);
   const [q, setQ] = useState("");
@@ -26,7 +28,8 @@ function NewBill({ initialPatient, onClose }: { initialPatient: PickedPatient | 
       patientId: patient!.id,
       lines: lines.map((l) => (l.serviceId ? { serviceId: l.serviceId, quantity: l.quantity } : { description: l.description, unitPrice: l.unitPrice, taxPercent: l.taxPercent || "0", quantity: l.quantity })),
     }),
-    onSuccess: (inv) => router.push(`/billing/${inv.id}`),
+    // From a patient's page (Reception): the bill is issued straight away, so the payment can be taken on the next screen.
+    onSuccess: async (inv) => { if (fromPatient && can("INVOICE_ISSUE")) await api.post(`/invoices/${inv.id}/issue`).catch(() => undefined); router.push(fromPatient ? `/billing/${inv.id}?from=patient` : `/billing/${inv.id}`); },
   });
   const matches = (services.data?.data ?? []).filter((s) => !q || `${s.code} ${s.name}`.toLowerCase().includes(q.toLowerCase())).slice(0, 8);
   const total = lines.reduce((n, l) => n + Number(l.unitPrice || 0) * Number(l.quantity || 0) * (1 + Number(l.taxPercent || 0) / 100), 0);
@@ -65,12 +68,21 @@ function NewBill({ initialPatient, onClose }: { initialPatient: PickedPatient | 
 function ShiftCard() {
   const { money, dateTime, can } = useMe();
   const qc = useQueryClient();
-  const cur = useQuery({ queryKey: ["shift"], queryFn: () => api.get<Shift | null>("/shifts/current") });
+  const cur = useQuery({ queryKey: ["shift"], queryFn: () => api.get<Shift | null>("/shifts/current"), enabled: can("CASHIER_SHIFT_MANAGE") });
   const [cash, setCash] = useState("");
   const [closing, setClosing] = useState(false);
+  const [notes, setNotes] = useState("");
+  // The result of the shift just closed, so the cashier sees expected vs counted after the card resets.
+  const [closed, setClosed] = useState<{ expectedCash: string; actualCash: string; difference: string } | null>(null);
   const refresh = () => qc.invalidateQueries({ queryKey: ["shift"] });
-  const open = useMutation({ mutationFn: () => api.post("/shifts/open", { openingCash: cash || "0" }), onSuccess: () => { setCash(""); void refresh(); } });
-  const close = useMutation({ mutationFn: () => api.post(`/shifts/${cur.data!.id}/close`, { actualCash: cash || "0" }), onSuccess: () => { setCash(""); setClosing(false); void refresh(); } });
+  const open = useMutation({ mutationFn: () => api.post("/shifts/open", { openingCash: cash || "0" }), onSuccess: () => { setCash(""); setClosed(null); void refresh(); } });
+  const close = useMutation({
+    mutationFn: () => api.post<{ expectedCash: string; actualCash: string; difference: string }>(`/shifts/${cur.data!.id}/close`, { actualCash: cash || "0", ...(notes.trim() ? { notes: notes.trim() } : {}) }),
+    onSuccess: (r) => { setClosed(r); setCash(""); setNotes(""); setClosing(false); void refresh(); },
+  });
+  const expected = Number(cur.data?.expectedCash ?? 0);
+  const counted = cash.trim() === "" ? null : Number(cash);
+  const differs = counted !== null && Math.round(counted * 100) !== Math.round(expected * 100);
   if (!can("CASHIER_SHIFT_MANAGE")) return null;
   return (
     <Card title="My cash shift">
@@ -78,13 +90,18 @@ function ShiftCard() {
         <div className="space-y-2 text-sm">
           <div>Open since {dateTime(cur.data.openedAt)} · opening cash {money(cur.data.openingCash)}{cur.data.expectedCash ? ` · expected in drawer ${money(cur.data.expectedCash)}` : ""}</div>
           {closing ? (
-            <div className="flex items-end gap-2"><Field label="Cash counted in drawer"><Input autoFocus inputMode="decimal" value={cash} onChange={(e) => setCash(e.target.value)} /></Field><Button loading={close.isPending} onClick={() => close.mutate()}>Close shift</Button><Button variant="ghost" onClick={() => setClosing(false)}>Back</Button></div>
+            <div className="space-y-2">
+              <div className="flex items-end gap-2"><Field label="Cash counted in drawer"><Input autoFocus inputMode="decimal" value={cash} onChange={(e) => setCash(e.target.value)} /></Field><Button loading={close.isPending} disabled={counted === null || (differs && notes.trim().length < 5)} onClick={() => close.mutate()}>Close shift</Button><Button variant="ghost" onClick={() => setClosing(false)}>Back</Button></div>
+              {counted !== null && <div className={differs ? "text-amber-800" : "text-green-700"}>Expected {money(expected.toFixed(2))} · counted {money(counted.toFixed(2))}{differs ? ` · difference ${money((counted - expected).toFixed(2))}` : " · matches"}</div>}
+              {differs && <Field label="Explain the difference" hint="Required when the counted cash does not match (at least 5 characters)"><Input value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>}
+            </div>
           ) : <Button variant="secondary" onClick={() => setClosing(true)}>Close shift…</Button>}
           <ErrorNote error={close.error} />
         </div>
       ) : (
         <div className="space-y-2">
-          <Notice tone="warn">Open a shift before taking cash payments.</Notice>
+          {closed && <Notice tone={Number(closed.difference) === 0 ? "success" : "warn"}>{`Shift closed. Expected ${money(closed.expectedCash)}, counted ${money(closed.actualCash)}, difference ${money(closed.difference)}.`}</Notice>}
+          <Notice tone="info">No cash shift is open. One opens by itself with the first cash payment; open one here if you start with cash in the drawer.</Notice>
           <div className="flex items-end gap-2"><Field label="Opening cash"><Input inputMode="decimal" value={cash} onChange={(e) => setCash(e.target.value)} placeholder="0.00" /></Field><Button loading={open.isPending} onClick={() => open.mutate()}>Open shift</Button></div>
           <ErrorNote error={open.error} />
         </div>
@@ -93,22 +110,58 @@ function ShiftCard() {
   );
 }
 
+interface Unbilled { admissionId: string; admissionNumber: string; patientName: string; mrn: string | null; charges: number; pendingTotal: string; items: { id: string; description: string; quantity: string; lineTotal: string }[] }
+
+/** What admitted patients owe so far. These become a bill when the patient is discharged; this card is the cashier's early view. */
+function UnbilledCard() {
+  const { money } = useMe();
+  const q = useQuery({ queryKey: ["unbilled-charges"], queryFn: () => api.get<Unbilled[]>("/charges/unbilled"), refetchInterval: 60_000 });
+  const [open, setOpen] = useState<string | null>(null);
+  if (q.isLoading) return <Card title="Admitted patients: charges not yet billed"><Spinner /></Card>;
+  return (
+    <Card title="Admitted patients: charges not yet billed">
+      <Table head={["Patient", "Admission", "Charges", "Amount so far", ""]} {...(q.data?.length === 0 ? { empty: "No unbilled charges for admitted patients." } : {})}>
+        {q.data?.flatMap((g) => [
+          <tr key={g.admissionId} className="hover:bg-slate-50">
+            <Td>{g.patientName}<div className="text-xs text-slate-500">{g.mrn}</div></Td><Td>{g.admissionNumber}</Td><Td>{g.charges}</Td><Td>{money(g.pendingTotal)}</Td>
+            <Td><button className="text-sm text-brand-700 hover:underline" onClick={() => setOpen(open === g.admissionId ? null : g.admissionId)}>{open === g.admissionId ? "Hide" : "Details"}</button>{" · "}<Link className="text-sm text-brand-700 hover:underline" href={`/ipd/${g.admissionId}`}>Open admission</Link></Td>
+          </tr>,
+          ...(open === g.admissionId ? g.items.map((x) => <tr key={x.id} className="bg-slate-50 text-sm text-slate-600"><Td>{x.description}</Td><Td></Td><Td>{x.quantity}</Td><Td>{money(x.lineTotal)}</Td><Td></Td></tr>) : []),
+        ])}
+      </Table>
+    </Card>
+  );
+}
+
 function BillingInner() {
   const { can, money, date } = useMe();
+  const router = useRouter();
   const params = useSearchParams();
   const [adding, setAdding] = useState(!!params.get("patient"));
   const [status, setStatus] = useState("");
   const [qNum, setQNum] = useState("");
+  const [kind, setKind] = useState("");
   const pre = params.get("patient");
+  // The pharmacy only bills; every payment is collected here, so waiting pharmacy bills are surfaced for the cashier.
+  const waiting = useQuery({ queryKey: ["pharmacy-waiting"], queryFn: () => api.page<InvoiceRow>("/invoices", { kind: "PHARMACY", outstanding: "true", pageSize: 1 }), refetchInterval: 30_000, enabled: can("PAYMENT_CREATE") });
   const preP = useQuery({ queryKey: ["pre-patient", pre], queryFn: () => api.get<{ id: string; mrn: string | null; firstName: string; lastName: string | null }>(`/patients/${pre}`), enabled: !!pre });
-  const list = useQuery({ queryKey: ["invoices", status, qNum], queryFn: () => api.page<InvoiceRow>("/invoices", { ...(status === "OUTSTANDING" ? { outstanding: "true" } : status ? { status } : {}), ...(qNum ? { q: qNum } : {}), pageSize: 50 }) });
+  const list = useQuery({ queryKey: ["invoices", status, qNum, kind], queryFn: () => api.page<InvoiceRow>("/invoices", { ...(status === "OUTSTANDING" ? { outstanding: "true" } : status ? { status } : {}), ...(kind ? { kind } : {}), ...(qNum ? { q: qNum } : {}), pageSize: 50 }), refetchInterval: 15_000 });
+  const waitingCount = waiting.data?.meta.total ?? 0;
   return (
     <Gate anyOf={["INVOICE_READ"]}>
       <PageHeader title="Billing" subtitle="Bills, payments and your cash shift" actions={can("INVOICE_CREATE") ? <Button onClick={() => setAdding(true)}>New bill</Button> : undefined} />
+      {waitingCount > 0 && (
+        <div className="mb-3"><Notice tone="warn">
+          {waitingCount} pharmacy {waitingCount === 1 ? "bill is" : "bills are"} waiting for payment. The pharmacy does not take payment; collect it here.{" "}
+          <button className="font-medium underline" onClick={() => { setKind("PHARMACY"); setStatus("OUTSTANDING"); }}>Show them</button>
+        </Notice></div>
+      )}
+      {can("TEST_BILL") && <div className="mb-4"><CashierPrescriptions /></div>}
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2">
           <Card title="Bills" actions={<>
             <Input placeholder="Bill number" aria-label="Bill number" className="w-36" value={qNum} onChange={(e) => setQNum(e.target.value)} />
+            <Select aria-label="Bill type" className="w-36" value={kind} onChange={(e) => setKind(e.target.value)}><option value="">All types</option><option value="OPD">OPD</option><option value="REGISTRATION">Registration</option><option value="PHARMACY">Pharmacy</option><option value="IPD">Admission</option><option value="OTHER">Other</option></Select>
             <Select aria-label="Status" className="w-40" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All</option><option value="OUTSTANDING">Outstanding</option><option value="DRAFT">Draft</option><option value="PAID">Paid</option><option value="CANCELLED">Cancelled</option></Select>
           </>}>
             {list.isLoading ? <Spinner /> : (
@@ -122,10 +175,18 @@ function BillingInner() {
               </Table>
             )}
           </Card>
+          <div className="mt-4"><UnbilledCard /></div>
         </div>
         <ShiftCard />
       </div>
-      {adding && <NewBill initialPatient={preP.data ? { id: preP.data.id, mrn: preP.data.mrn, name: [preP.data.firstName, preP.data.lastName].filter(Boolean).join(" ") } : null} onClose={() => setAdding(false)} />}
+      {/* Opened from a patient's page: wait for that patient, so the form never opens empty and has to be searched again. */}
+      {adding && (!pre || preP.data || preP.isError) && (
+        <NewBill
+          initialPatient={preP.data ? { id: preP.data.id, mrn: preP.data.mrn, name: [preP.data.firstName, preP.data.lastName].filter(Boolean).join(" ") } : null}
+          fromPatient={!!preP.data}
+          onClose={() => (preP.data ? router.push(`/patients/${preP.data.id}`) : setAdding(false))}
+        />
+      )}
     </Gate>
   );
 }

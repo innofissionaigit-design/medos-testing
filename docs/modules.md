@@ -18,6 +18,8 @@ Per-module purpose, entities, workflow and state rules, permissions and audit ev
 |---|---|---|---|
 | Patients | One canonical patient; MRN as identifier; trigram duplicate detection (never auto-merge); optimistic `version` on update; override needs `DUPLICATE_OVERRIDE` and is audited | PATIENT_READ/CREATE/UPDATE, DUPLICATE_OVERRIDE | PATIENT_CREATED, PATIENT_UPDATED, PATIENT_DUPLICATE_OVERRIDDEN |
 | Appointments | Practitioner schedules, slot availability; exclusion constraints prevent double booking; walk-in; overbooking needs APPOINTMENT_OVERBOOK | APPOINTMENT_* | APPOINTMENT_CREATED/RESCHEDULED/CANCELLED/CHECKED_IN/NO_SHOW |
+| Privacy | Append-only patient consent records (privacy notice acknowledged, appointment reminders) with history; reminders honour withdrawal and the `REMINDERS_REQUIRE_CONSENT` setting; log of patients' data requests (access, correction, erasure, grievance) with a closed-state outcome and no deletion. Records and tracks only: nothing erases or corrects data, and no legal compliance is claimed. See `docs/privacy.md` | PATIENT_READ, PATIENT_UPDATE, PRIVACY_MANAGE | CONSENT_GRANTED, CONSENT_WITHDRAWN, DATA_REQUEST_CREATED, DATA_REQUEST_UPDATED |
+| Follow-ups | FOLLOW_UP appointments linked to the ordering consultation (same patient, never re-pointed), booked by the treating doctor; SMS reminders planned per facility setting, replaced on reschedule, cancelled on cancel/no-show/check-in; provider interface (log-only by default). See `docs/follow-ups.md` | FOLLOWUP_SCHEDULE, APPOINTMENT_* | FOLLOW_UP_SCHEDULED, APPOINTMENT_* |
 | OPD queue | Token per day per doctor; `call-next` uses `SKIP LOCKED`; completion blocked while the consultation is a draft; priority/emergency | QUEUE_READ/MANAGE | QUEUE_CALL, QUEUE_START… , QUEUE_PRIORITY_CHANGED |
 | Encounters, vitals | Every clinical record references an encounter; vitals are append-only with enter-in-error | VITALS_READ/CREATE | ENCOUNTER_OPENED, VITALS_RECORDED, VITALS_ENTERED_IN_ERROR |
 
@@ -46,13 +48,13 @@ Per-module purpose, entities, workflow and state rules, permissions and audit ev
 ## Documents
 | Module | Rules | Permissions | Audit events |
 |---|---|---|---|
-| Patient files | Photo (one active) and scanned documents; PNG/JPEG/PDF only, content-checked, ≤ 5 MB; bytes on disk (S3 later), metadata in PostgreSQL; removal hides the file but keeps it and its history; the database forbids edits and deletes | PATIENT_READ (view), PATIENT_UPDATE (upload, remove) | PATIENT_FILE_UPLOADED, PATIENT_FILE_VIEWED (documents), PATIENT_FILE_REMOVED |
+| Patient files | Photo (one active) and scanned documents; PNG/JPEG/PDF only, content-checked, ≤ 5 MB, virus-scanned when a ClamAV daemon is configured; bytes on disk (S3 later), metadata in PostgreSQL; removal hides the file but keeps it and its history; the database forbids edits and deletes | PATIENT_READ (view), PATIENT_UPDATE (upload, remove) | PATIENT_FILE_UPLOADED, PATIENT_FILE_VIEWED (documents), PATIENT_FILE_REMOVED, PATIENT_FILE_REJECTED (virus found) |
 
 ## Read side
 | Module | Notes |
 |---|---|
 | Print | Server-rendered, fully escaped HTML or PDF (`?format=pdf`) for invoice, receipt, prescription, discharge summary and patient label, from one document model; locked-down CSP; reprints are stamped "DUPLICATE COPY"; every print is audited (`DOCUMENT_PRINTED`, with its format). |
-| Reports | 13 bounded operational reports (date ranges ≤ 93 days, facility-scoped, `REPORT_READ`). |
+| Reports | 14 bounded operational reports (date ranges ≤ 93 days, facility-scoped). `REPORT_READ` opens every report (Administrator, Manager); each area has its own permission: `REPORT_OPD` (OPD daily / by doctor / by department — Receptionist, Doctor), `REPORT_FINANCE` (collections with payment modes, outstanding invoices, cashier shifts — Cashier, who sees only their own shifts), `REPORT_IPD` (current admissions, admissions/discharges, bed occupancy — Receptionist, Doctor, Nurse), `REPORT_PHARMACY` (sales, stock movement, current / low / near-expiry stock — Pharmacist). Stock movement reads the stock ledger: opening, units in and out by type, closing. |
 | Audit viewer | Read-only list with filters; the table is append-only at the database level. |
 
 ## Known limitations

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { admissionScope } from "../../common/data-scope";
 import { ClinicianService } from "../clinical/clinician.service";
 
 const line = (max: number) => z.string().trim().min(1).max(max);
@@ -45,7 +46,7 @@ export class SummaryService {
 
   /** The working document plus a scaffold of facts already in the record (never auto-signed). */
   async get(ctx: RequestContext, admissionId: string) {
-    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, include: { patient: { include: { identifiers: { where: { type: "MRN" } } } }, consultant: { select: { displayName: true } }, department: { select: { name: true } } } });
+    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] }, include: { patient: { include: { identifiers: { where: { type: "MRN" } } } }, consultant: { select: { displayName: true } }, department: { select: { name: true } } } });
     if (!adm) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const doc = await this.prisma.clinicalDocument.findFirst({
       where: { tenantId: ctx.tenantId, encounterId: adm.encounterId, kind: "DISCHARGE_SUMMARY" },

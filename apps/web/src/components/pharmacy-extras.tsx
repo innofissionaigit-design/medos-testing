@@ -246,3 +246,110 @@ export function SalesTab() {
     </Card>
   );
 }
+
+// ───────────────────────── medicine master ─────────────────────────
+
+const FORMS = ["TABLET", "CAPSULE", "SYRUP", "INJECTION", "OINTMENT", "DROPS", "INHALER", "SACHET", "OTHER"] as const;
+interface Medicine { id: string; brandName: string; genericName: string; strength: string | null; dosageForm: string; manufacturer: string | null; hsnCode: string | null; gstPercent: string; reorderLevel: number; status: string }
+type MedForm = { brandName: string; genericName: string; strength: string; dosageForm: string; manufacturer: string; hsnCode: string; gstPercent: string; reorderLevel: string };
+const emptyMed: MedForm = { brandName: "", genericName: "", strength: "", dosageForm: "TABLET", manufacturer: "", hsnCode: "", gstPercent: "", reorderLevel: "" };
+
+function MedicineModal({ medicine, onClose }: { medicine: Medicine | null; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [f, setF] = useState<MedForm>(() => (medicine
+    ? { brandName: medicine.brandName, genericName: medicine.genericName, strength: medicine.strength ?? "", dosageForm: medicine.dosageForm, manufacturer: medicine.manufacturer ?? "", hsnCode: medicine.hsnCode ?? "", gstPercent: medicine.gstPercent, reorderLevel: String(medicine.reorderLevel) }
+    : emptyMed));
+  const set = (k: keyof MedForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => setF({ ...f, [k]: e.target.value });
+  const save = useMutation({
+    mutationFn: () => {
+      // Blank optional fields are left out when adding and cleared when editing.
+      const opt = (v: string) => (v.trim() ? v.trim() : medicine ? null : undefined);
+      const body = {
+        brandName: f.brandName.trim(), genericName: f.genericName.trim(), dosageForm: f.dosageForm,
+        strength: opt(f.strength), manufacturer: opt(f.manufacturer), hsnCode: opt(f.hsnCode),
+        ...(f.gstPercent.trim() ? { gstPercent: f.gstPercent.trim() } : {}),
+        ...(f.reorderLevel.trim() ? { reorderLevel: Number(f.reorderLevel) } : {}),
+      };
+      const clean = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined));
+      return medicine ? api.patch(`/medicines/${medicine.id}`, clean) : api.post("/medicines", clean);
+    },
+    onSuccess: async () => { await qc.invalidateQueries({ queryKey: ["medicine-master"] }); await qc.invalidateQueries({ queryKey: ["pharmacy-stock"] }); onClose(); },
+  });
+  return (
+    <Modal title={medicine ? `Edit medicine — ${medicine.brandName}` : "Add a medicine"} onClose={onClose}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Brand name"><Input value={f.brandName} onChange={set("brandName")} /></Field>
+        <Field label="Generic name"><Input value={f.genericName} onChange={set("genericName")} /></Field>
+        <Field label="Strength" hint="e.g. 500 mg"><Input value={f.strength} onChange={set("strength")} /></Field>
+        <Field label="Form"><Select value={f.dosageForm} onChange={set("dosageForm")}>{FORMS.map((x) => <option key={x} value={x}>{x.toLowerCase()}</option>)}</Select></Field>
+        <Field label="Manufacturer"><Input value={f.manufacturer} onChange={set("manufacturer")} /></Field>
+        <Field label="HSN code" hint="4-8 digits"><Input inputMode="numeric" value={f.hsnCode} onChange={set("hsnCode")} /></Field>
+        <Field label="GST %"><Input inputMode="decimal" value={f.gstPercent} onChange={set("gstPercent")} /></Field>
+        <Field label="Reorder level" hint="Flagged as low stock below this"><Input inputMode="numeric" value={f.reorderLevel} onChange={set("reorderLevel")} /></Field>
+        <div className="col-span-2"><ErrorNote error={save.error} /></div>
+        <div className="col-span-2 flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={f.brandName.trim().length < 2 || f.genericName.trim().length < 2} loading={save.isPending} onClick={() => save.mutate()}>{medicine ? "Save changes" : "Add medicine"}</Button></div>
+      </div>
+    </Modal>
+  );
+}
+
+export function MedicinesTab() {
+  const { can } = useMe();
+  const qc = useQueryClient();
+  const [q, setQ] = useState("");
+  const [inactive, setInactive] = useState(false);
+  const [editing, setEditing] = useState<Medicine | "new" | null>(null);
+  const term = useDebounced(q.trim(), 250);
+  const list = useQuery({ queryKey: ["medicine-master", term, inactive], queryFn: () => api.page<Medicine>("/medicines", { ...(term.length >= 2 ? { q: term } : {}), includeInactive: inactive ? "true" : "false", pageSize: 100 }) });
+  const toggle = useMutation({ mutationFn: (m: Medicine) => api.patch(`/medicines/${m.id}`, { status: m.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["medicine-master"] }) });
+  const masters = can("PHARMACY_MASTERS");
+  return (
+    <Card title="Medicines" actions={<>
+      <Input placeholder="Search medicine" aria-label="Search medicines" className="w-48" value={q} onChange={(e) => setQ(e.target.value)} />
+      <label className="flex items-center gap-1 text-sm"><input type="checkbox" checked={inactive} onChange={(e) => setInactive(e.target.checked)} /> Show inactive</label>
+      {masters && <Button onClick={() => setEditing("new")}>Add medicine</Button>}
+    </>}>
+      {list.isLoading ? <Spinner /> : (
+        <Table head={["Medicine", "Form", "GST %", "Reorder at", "Status", ""]} {...(list.data?.data.length === 0 ? { empty: "No medicines found." } : {})}>
+          {list.data?.data.map((m) => (
+            <tr key={m.id}>
+              <Td><span className="font-medium">{m.brandName}</span> <span className="text-slate-500">{m.strength}</span><div className="text-xs text-slate-500">{m.genericName}{m.manufacturer ? ` · ${m.manufacturer}` : ""}</div></Td>
+              <Td>{m.dosageForm.toLowerCase()}</Td><Td>{m.gstPercent}</Td><Td>{m.reorderLevel}</Td>
+              <Td><Badge tone={m.status === "ACTIVE" ? "green" : "gray"}>{m.status.toLowerCase()}</Badge></Td>
+              <Td>{masters && <div className="flex justify-end gap-1"><Button variant="ghost" onClick={() => setEditing(m)}>Edit</Button><Button variant="ghost" onClick={() => toggle.mutate(m)}>{m.status === "ACTIVE" ? "Deactivate" : "Activate"}</Button></div>}</Td>
+            </tr>
+          ))}
+        </Table>
+      )}
+      <ErrorNote error={toggle.error} />
+      {editing && <MedicineModal medicine={editing === "new" ? null : editing} onClose={() => setEditing(null)} />}
+    </Card>
+  );
+}
+
+// ───────────────────────── batch stock history (ledger) ─────────────────────────
+
+interface LedgerRow { seq: string; type: string; direction: "IN" | "OUT"; quantity: number; balanceAfter: number; reason: string | null; createdAt: string }
+interface Ledger { batch: { batchNo: string }; reconciliation: { balance: number; ledgerNet: number; reconciles: boolean }; items: LedgerRow[] }
+const MOVEMENT: Record<string, string> = { PURCHASE: "Purchase", SALE: "Sale", PATIENT_RETURN: "Patient return", PURCHASE_RETURN: "Return to supplier", ADJUSTMENT: "Adjustment", DAMAGE: "Damaged / expired", TRANSFER: "Transfer" };
+
+export function LedgerModal({ batch, onClose }: { batch: { id: string; label: string }; onClose: () => void }) {
+  const { dateTime } = useMe();
+  const led = useQuery({ queryKey: ["batch-ledger", batch.id], queryFn: () => api.get<Ledger>(`/pharmacy/batches/${batch.id}/ledger`, { pageSize: 200 }) });
+  const r = led.data?.reconciliation;
+  return (
+    <Modal title={`Stock history — ${batch.label}`} onClose={onClose} wide>
+      {led.isLoading ? <Spinner /> : led.error ? <ErrorNote error={led.error} /> : led.data && r && (
+        <div className="space-y-3">
+          <Notice tone={r.reconciles ? "success" : "error"}>{r.reconciles ? `On hand ${r.balance}, which matches the history below.` : `On hand ${r.balance} does not match the history (${r.ledgerNet}). Report this to the administrator.`}</Notice>
+          <Table head={["When", "Movement", "In", "Out", "Balance", "Reason"]} {...(led.data.items.length === 0 ? { empty: "No movements yet." } : {})}>
+            {led.data.items.map((row) => (
+              <tr key={row.seq}><Td>{dateTime(row.createdAt)}</Td><Td>{MOVEMENT[row.type] ?? row.type}<div className="text-xs text-slate-500">{row.type}</div></Td>
+                <Td>{row.direction === "IN" ? row.quantity : ""}</Td><Td>{row.direction === "OUT" ? row.quantity : ""}</Td><Td>{row.balanceAfter}</Td><Td>{row.reason ?? "—"}</Td></tr>
+            ))}
+          </Table>
+        </div>
+      )}
+    </Modal>
+  );
+}

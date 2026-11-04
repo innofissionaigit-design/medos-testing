@@ -5,7 +5,7 @@ import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 
-export type SequenceType = "MRN" | "OPD_VISIT" | "ADMISSION" | "INVOICE" | "RECEIPT" | "PRESCRIPTION" | "CREDIT_NOTE" | "REFUND" | "PURCHASE" | "PURCHASE_RETURN" | "PHARMACY_RECEIPT";
+export type SequenceType = "MRN" | "OPD_VISIT" | "ADMISSION" | "INVOICE" | "RECEIPT" | "PRESCRIPTION" | "CREDIT_NOTE" | "REFUND" | "PURCHASE" | "PURCHASE_RETURN" | "PHARMACY_RECEIPT" | "STOCK_TRANSFER" | "DOCTOR_PAYOUT" | "LAB_ACCESSION" | "RAD_ACCESSION" | "CLAIM" | "EMPLOYEE";
 export type ResetPolicy = "NEVER" | "YEARLY";
 
 export interface SequenceDefault { type: SequenceType; pattern: string; padding: number; resetPolicy: ResetPolicy }
@@ -22,6 +22,12 @@ export const DEFAULT_SEQUENCES: readonly SequenceDefault[] = [
   { type: "PURCHASE", pattern: "PUR-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
   { type: "PURCHASE_RETURN", pattern: "PRN-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
   { type: "PHARMACY_RECEIPT", pattern: "PH-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "STOCK_TRANSFER", pattern: "TRF-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "DOCTOR_PAYOUT", pattern: "DPV-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "LAB_ACCESSION", pattern: "LAB-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "RAD_ACCESSION", pattern: "RAD-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "CLAIM", pattern: "CLM-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "EMPLOYEE", pattern: "EMP-{SEQ}", padding: 4, resetPolicy: "NEVER" },
 ];
 
 const TYPES = DEFAULT_SEQUENCES.map((d) => d.type) as [SequenceType, ...SequenceType[]];

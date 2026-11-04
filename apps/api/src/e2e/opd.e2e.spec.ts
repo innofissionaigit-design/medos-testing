@@ -98,14 +98,15 @@ describe("OPD end-to-end certification", () => {
     const order = pq.find((o) => o.patientId === patient.id);
     assert.ok(order, "pharmacy sees the signed prescription");
 
-    ok(await t.api("post", "/shifts/open", pharm.token).send({ openingCash: "0" }), 201, "pharmacy shift");
-    // 13. Medicine dispensed (FEFO batch) with payment → 14. pharmacy receipt
+    // 13. Medicine dispensed (FEFO batch): the pharmacy only bills → 14. the cashier collects and the receipt is produced
     const item = order.items[0]!;
     const dis = ok(await t.api("post", "/pharmacy/dispenses", pharm.token).set("Idempotency-Key", key()).send({
-      patientId: patient.id, medicationOrderId: order.id, items: [{ medicationOrderItemId: item.id, medicineId: item.medicineId, quantity: 9 }], payments: [{ method: "CASH", amount: "22.50" }],
+      patientId: patient.id, medicationOrderId: order.id, items: [{ medicationOrderItemId: item.id, medicineId: item.medicineId, quantity: 9 }],
     }), 201, "dispense");
-    assert.equal(dis.body.data.receipt.total, "22.50");
-    assert.ok(dis.body.data.receipt.receiptNumber);
+    assert.equal(dis.body.data.dispense.invoice.status, "ISSUED", "pharmacy bills but takes no payment");
+    const pharmPay = ok(await t.api("post", `/invoices/${dis.body.data.dispense.invoiceId}/payments`, cashier.token).set("Idempotency-Key", key()).send({ payments: [{ method: "CASH", amount: "22.50" }] }), 201, "cashier collects the pharmacy bill");
+    assert.equal(pharmPay.body.data.receipt.total, "22.50");
+    assert.ok(pharmPay.body.data.receipt.receiptNumber);
     assert.equal((await t.api("get", "/pharmacy/queue", pharm.token)).body.data.some((o: { id: string }) => o.id === order.id), false, "fully dispensed prescription leaves the queue");
 
     // ── what must now be true everywhere ──

@@ -5,11 +5,13 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { visitScope } from "../../common/data-scope";
 import { AllergiesService, findAllergyMatches, type AllergyWarning } from "../clinical/allergies.service";
 import { ClinicianService } from "../clinical/clinician.service";
 import { EncountersService } from "../encounters/encounters.service";
 import { NumberingService } from "../numbering/numbering.service";
 
+export const FOOD_RELATIONS = ["BEFORE_FOOD", "AFTER_FOOD", "WITH_FOOD", "EMPTY_STOMACH", "ANY_TIME"] as const;
 const optText = (max: number) => z.string().trim().min(1).max(max).optional();
 
 export const orderItemSchema = z.object({
@@ -21,6 +23,7 @@ export const orderItemSchema = z.object({
   route: z.enum(["ORAL", "IV", "IM", "SC", "TOPICAL", "OTHER"]),
   frequency: z.enum(["OD", "BD", "TDS", "QID", "HS", "SOS", "STAT", "OTHER"]),
   frequencyText: optText(60),
+  foodRelation: z.enum(FOOD_RELATIONS).optional(),
   durationDays: z.number().int().min(1).max(365).optional(),
   quantity: z.number().int().min(1).max(100_000).optional(),
   instructions: optText(200),
@@ -34,13 +37,13 @@ export const signPrescriptionSchema = z.object({ acknowledgeAllergyWarnings: z.b
 export const stopItemSchema = z.object({ reason: z.string().trim().min(3).max(240) }).strict();
 
 const ORDER_VIEW = {
-  id: true, orderNumber: true, status: true, encounterId: true, patientId: true, orderedById: true, signedById: true, signedAt: true,
+  id: true, orderNumber: true, status: true, source: true, encounterId: true, patientId: true, orderedById: true, signedById: true, signedAt: true,
   supersededAtVersion: true, createdAt: true,
   items: {
     orderBy: { lineNo: "asc" as const },
     select: {
       id: true, lineNo: true, medicineId: true, genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true,
-      frequencyText: true, durationDays: true, quantity: true, instructions: true, status: true, dispensedQuantity: true, stopReason: true,
+      frequencyText: true, foodRelation: true, durationDays: true, quantity: true, instructions: true, status: true, dispensedQuantity: true, stopReason: true,
     },
   },
 } satisfies Prisma.MedicationOrderSelect;
@@ -49,7 +52,7 @@ export type OrderView = Prisma.MedicationOrderGetPayload<{ select: typeof ORDER_
 const toItemData = (tenantId: string, orderId: string, items: OrderItemInput[]): Prisma.MedicationOrderItemCreateManyInput[] =>
   items.map((it, i) => ({
     tenantId, orderId, lineNo: i + 1, medicineId: it.medicineId ?? null, genericName: it.genericName, brandName: it.brandName ?? null, strength: it.strength ?? null,
-    dosage: it.dosage, route: it.route, frequency: it.frequency, frequencyText: it.frequencyText ?? null,
+    dosage: it.dosage, route: it.route, frequency: it.frequency, frequencyText: it.frequencyText ?? null, foodRelation: it.foodRelation ?? null,
     durationDays: it.durationDays ?? null, quantity: it.quantity ?? null, instructions: it.instructions ?? null,
   }));
 
@@ -72,7 +75,7 @@ export class PrescriptionsService {
       await this.assertOpenForPrescribing(tx, ctx, enc.type, encounterId);
       await this.assertMedicines(tx, ctx, input.items);
 
-      let draft = await tx.medicationOrder.findFirst({ where: { tenantId: ctx.tenantId, encounterId, status: "DRAFT" } });
+      let draft = await tx.medicationOrder.findFirst({ where: { tenantId: ctx.tenantId, encounterId, status: "DRAFT", source: "DIGITAL" } });
       if (draft && draft.orderedById !== ctx.userId) throw new DomainError("FORBIDDEN", "This draft prescription belongs to another doctor", 403);
       if (!draft) {
         draft = await tx.medicationOrder.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: enc.patientId, encounterId, orderedById: ctx.userId } });
@@ -87,7 +90,7 @@ export class PrescriptionsService {
   }
 
   async listForEncounter(ctx: RequestContext, encounterId: string) {
-    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, patientId: true } });
+    const enc = await this.prisma.encounter.findFirst({ where: { id: encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [visitScope(ctx)] }, select: { id: true, patientId: true } });
     if (!enc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const orders = await this.prisma.medicationOrder.findMany({
       where: { tenantId: ctx.tenantId, encounterId, status: { not: "CANCELLED" } }, select: ORDER_VIEW, orderBy: { createdAt: "desc" },
@@ -111,7 +114,7 @@ export class PrescriptionsService {
 
   /** Signs the encounter's draft order inside the caller's transaction. Returns null when there is no draft. */
   async signDraft(tx: Db, ctx: RequestContext, encounterId: string, acknowledge: boolean): Promise<OrderView | null> {
-    const draft = await tx.medicationOrder.findFirst({ where: { tenantId: ctx.tenantId, encounterId, status: "DRAFT" }, include: { items: true } });
+    const draft = await tx.medicationOrder.findFirst({ where: { tenantId: ctx.tenantId, encounterId, status: "DRAFT", source: "DIGITAL" }, include: { items: true } });
     if (!draft) return null;
     if (!ctx.permissions.has("PRESCRIPTION_SIGN")) throw new DomainError("FORBIDDEN", "You do not have permission to sign prescriptions", 403);
     if (draft.items.length === 0) throw new DomainError("INVALID_STATE", "The draft prescription has no medicines", 409);
@@ -137,7 +140,7 @@ export class PrescriptionsService {
    * Refuses if any medicine was already dispensed, so pharmacy records can never be contradicted.
    */
   async amend(tx: Db, ctx: RequestContext, encounterId: string, patientId: string, items: OrderItemInput[], atVersion: number, acknowledge: boolean): Promise<OrderView> {
-    const current = await tx.medicationOrder.findMany({ where: { tenantId: ctx.tenantId, encounterId, status: "SIGNED" }, include: { items: true } });
+    const current = await tx.medicationOrder.findMany({ where: { tenantId: ctx.tenantId, encounterId, status: "SIGNED", source: "DIGITAL" }, include: { items: true } });
     if (current.some((o) => o.items.some((i) => i.dispensedQuantity > 0))) {
       throw new DomainError("INVALID_STATE", "Some medicines were already dispensed. Stop those items instead of replacing the prescription.", 409);
     }
@@ -145,7 +148,7 @@ export class PrescriptionsService {
     const warnings = await this.warningsFor(tx, ctx, patientId, items.flatMap((i) => [i.genericName, ...(i.brandName ? [i.brandName] : [])]));
     if (warnings.length > 0 && !acknowledge) throw new DomainError("ALLERGY_CONFLICT", "A prescribed medicine matches a recorded allergy. Review it, then confirm to continue.", 409, { allergyWarnings: warnings });
 
-    await tx.medicationOrder.updateMany({ where: { tenantId: ctx.tenantId, encounterId, status: "DRAFT" }, data: { status: "CANCELLED" } });
+    await tx.medicationOrder.updateMany({ where: { tenantId: ctx.tenantId, encounterId, status: "DRAFT", source: "DIGITAL" }, data: { status: "CANCELLED" } });
     for (const o of current) {
       await tx.medicationOrder.updateMany({ where: { id: o.id, tenantId: ctx.tenantId, status: "SIGNED" }, data: { status: "SUPERSEDED", supersededAtVersion: atVersion } });
       await this.audit.record(tx, actorOf(ctx), { action: "PRESCRIPTION_SUPERSEDED", entityType: "MedicationOrder", entityId: o.id, metadata: { orderNumber: o.orderNumber, byVersion: atVersion } });
@@ -155,6 +158,26 @@ export class PrescriptionsService {
     const orderNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "PRESCRIPTION");
     await tx.medicationOrder.updateMany({ where: { id: created.id, tenantId: ctx.tenantId, status: "DRAFT" }, data: { status: "SIGNED", orderNumber, signedAt: new Date(), signedById: ctx.userId } });
     await this.audit.record(tx, actorOf(ctx), { action: "PRESCRIPTION_SIGNED", entityType: "MedicationOrder", entityId: created.id, metadata: { orderNumber, encounterId, amendment: atVersion } });
+    if (warnings.length > 0) await this.audit.record(tx, actorOf(ctx), { action: "PRESCRIPTION_ALLERGY_ACKNOWLEDGED", entityType: "MedicationOrder", entityId: created.id, metadata: { allergies: warnings.map((w) => w.allergen) } });
+    return tx.medicationOrder.findFirstOrThrow({ where: { id: created.id, tenantId: ctx.tenantId }, select: ORDER_VIEW });
+  }
+
+  /**
+   * The doctor's approval of a handwritten prescription: creates and signs a prescription (source HANDWRITTEN) in the caller's transaction, so the
+   * pharmacy sees it. The visit's own digital prescription is not touched. The caller has already checked the doctor's permission and that the lines are theirs.
+   */
+  async createApprovedFromScan(tx: Db, ctx: RequestContext, scan: { encounterId: string; patientId: string; id: string }, items: OrderItemInput[], acknowledge: boolean): Promise<OrderView> {
+    await this.assertMedicines(tx, ctx, items);
+    const warnings = await this.warningsFor(tx, ctx, scan.patientId, items.flatMap((i) => [i.genericName, ...(i.brandName ? [i.brandName] : [])]));
+    if (warnings.length > 0 && !acknowledge) throw new DomainError("ALLERGY_CONFLICT", "A prescribed medicine matches a recorded allergy. Review it, then confirm to continue.", 409, { allergyWarnings: warnings });
+    const created = await tx.medicationOrder.create({
+      data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: scan.patientId, encounterId: scan.encounterId, orderedById: ctx.userId, source: "HANDWRITTEN", notes: "From a handwritten prescription" },
+    });
+    await tx.medicationOrderItem.createMany({ data: toItemData(ctx.tenantId, created.id, items) });
+    const orderNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "PRESCRIPTION");
+    const res = await tx.medicationOrder.updateMany({ where: { id: created.id, tenantId: ctx.tenantId, status: "DRAFT" }, data: { status: "SIGNED", orderNumber, signedAt: new Date(), signedById: ctx.userId } });
+    if (res.count !== 1) throw new DomainError("INVALID_STATE", "The prescription was changed by someone else", 409);
+    await this.audit.record(tx, actorOf(ctx), { action: "PRESCRIPTION_SIGNED", entityType: "MedicationOrder", entityId: created.id, metadata: { orderNumber, encounterId: scan.encounterId, items: items.length, source: "HANDWRITTEN", scanId: scan.id } });
     if (warnings.length > 0) await this.audit.record(tx, actorOf(ctx), { action: "PRESCRIPTION_ALLERGY_ACKNOWLEDGED", entityType: "MedicationOrder", entityId: created.id, metadata: { allergies: warnings.map((w) => w.allergen) } });
     return tx.medicationOrder.findFirstOrThrow({ where: { id: created.id, tenantId: ctx.tenantId }, select: ORDER_VIEW });
   }

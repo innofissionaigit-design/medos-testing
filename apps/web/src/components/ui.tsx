@@ -94,9 +94,10 @@ export function Badge({ tone = "gray", children }: { tone?: keyof typeof TONES; 
 }
 
 const STATUS_TONE: Record<string, keyof typeof TONES> = {
+  SCHEDULED: "blue", SENT: "green", FAILED: "red",
   PAID: "green", COMPLETED: "green", SIGNED: "green", GIVEN: "green", CLEARED: "green", AVAILABLE: "green", ACTIVE: "blue", ADMITTED: "blue", OCCUPIED: "blue", IN_CONSULTATION: "blue", ISSUED: "blue",
   PARTIALLY_PAID: "amber", WAITING: "amber", CALLED: "amber", DUE: "amber", PENDING: "amber", DRAFT: "gray", CLEANING: "amber", RESERVED: "purple",
-  CANCELLED: "red", MISSED: "red", REFUNDED: "red", MAINTENANCE: "red", BLOCKED: "red", NO_SHOW: "red",
+  CANCELLED: "red", MISSED: "red", REFUNDED: "red", MAINTENANCE: "red", BLOCKED: "red", NO_SHOW: "red", AT_PHARMACY: "amber", DISPENSED: "green", REJECTED: "red",
 };
 export const StatusBadge = ({ value }: { value: string }) => <Badge tone={STATUS_TONE[value] ?? "gray"}>{value.replace(/_/g, " ").toLowerCase()}</Badge>;
 

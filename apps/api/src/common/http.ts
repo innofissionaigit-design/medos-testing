@@ -5,6 +5,7 @@ import type { AuthedRequest, RequestContext } from "./request-context";
 
 export const IS_PUBLIC = "isPublic";
 export const REQUIRED_PERMISSIONS = "requiredPermissions";
+export const REQUIRED_ANY_PERMISSIONS = "requiredAnyPermissions";
 export const RATE_LIMIT = "rateLimit";
 export const ANY_AUTHENTICATED = "anyAuthenticated";
 
@@ -12,9 +13,16 @@ export const ANY_AUTHENTICATED = "anyAuthenticated";
 export const Public = () => SetMetadata(IS_PUBLIC, true);
 /** Caller must hold ALL listed permissions. Routes without this still require authentication. */
 export const RequirePermissions = (...p: Permission[]) => SetMetadata(REQUIRED_PERMISSIONS, p);
+/** Caller must hold AT LEAST ONE listed permission, e.g. the all-reports permission or the report's own area. */
+export const RequireAnyPermission = (...p: Permission[]) => SetMetadata(REQUIRED_ANY_PERMISSIONS, p);
 /** Explicitly marks a route as needing authentication only (no specific permission). Audited by a test. */
 export const AnyAuthenticated = () => SetMetadata(ANY_AUTHENTICATED, true);
-export interface RateLimitOptions { limit: number; windowMs: number }
+/**
+ * `by` chooses whose allowance a request counts against: "ip" (default) is the client address Express derives through the
+ * proxies listed in TRUST_PROXY; "refreshToken" and "session" count per refresh token / access token, because the web
+ * server relays every user's traffic from one address.
+ */
+export interface RateLimitOptions { limit: number; windowMs: number; by?: "ip" | "refreshToken" | "session" }
 export const RateLimit = (o: RateLimitOptions) => SetMetadata(RATE_LIMIT, o);
 
 export const Ctx = createParamDecorator((_d: unknown, ec: ExecutionContext): RequestContext => {

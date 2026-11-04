@@ -117,6 +117,21 @@ describe("patient registration, search and duplicate detection", () => {
     assert.equal((await t.api("get", "/patients", rec.token).query({ q: "%" + "_".repeat(2) })).status, 200, "LIKE wildcards are treated literally");
   });
 
+  it("an exact MRN search never also returns patients whose mobile merely contains the MRN's digits", async () => {
+    const c = await t.makeTenant("pat-c");
+    // A letters-only facility code leaves the MRN's digits as just the zero-padded sequence, e.g. "000001".
+    await t.prisma.facility.updateMany({ where: { id: c.facilityId, tenantId: c.tenantId }, data: { code: uniqueWord(6).toUpperCase() } });
+    const crec = await t.makeUser(c, ["RECEPTIONIST"]);
+    const target = await registerPatient(t, crec.token);
+    const digits = target.mrn.replace(/\D/g, "");
+    await registerPatient(t, crec.token, { mobile: `9${digits.padStart(9, "0")}` });
+    const r = await t.api("get", "/patients", crec.token).query({ q: target.mrn });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.data.map((p: { id: string }) => p.id), [target.id]);
+    const byMobile = await t.api("get", "/patients", crec.token).query({ q: digits });
+    assert.ok(byMobile.body.data.length >= 1, "a digits-only query still searches mobile numbers");
+  });
+
   it("is isolated across tenants: search, read and update never cross the boundary (IDOR)", async () => {
     const bRec = await t.makeUser(b, ["RECEPTIONIST"]);
     const victim = await registerPatient(t, bRec.token, { firstName: "Isolated", lastName: uniqueWord(8) });

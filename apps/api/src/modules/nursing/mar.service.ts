@@ -5,6 +5,7 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { admissionScope } from "../../common/data-scope";
 import { localDateStr, zonedToUtc } from "../../common/time";
 
 /** Default administration times (minutes after local midnight) for scheduled frequencies. SOS/OTHER are given as needed. */
@@ -40,7 +41,7 @@ const OVERDUE_AFTER_MIN = 30;
 
 const VIEW = {
   id: true, scheduledAt: true, status: true, unscheduled: true, administeredAt: true, administeredById: true, remarks: true, admissionId: true, medicationOrderItemId: true,
-  item: { select: { genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true, frequencyText: true, instructions: true, status: true, order: { select: { orderNumber: true } } } },
+  item: { select: { genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true, frequencyText: true, foodRelation: true, instructions: true, status: true, order: { select: { orderNumber: true } } } },
 } satisfies Prisma.MedicationAdministrationSelect;
 type Row = Prisma.MedicationAdministrationGetPayload<{ select: typeof VIEW }>;
 
@@ -152,7 +153,7 @@ export class MarService {
   }
 
   async list(ctx: RequestContext, admissionId: string, q: z.infer<typeof marListSchema>) {
-    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true } });
+    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] }, select: { id: true } });
     if (!adm) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const now = Date.now();
     const rows = await this.prisma.medicationAdministration.findMany({

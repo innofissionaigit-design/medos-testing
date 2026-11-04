@@ -7,7 +7,7 @@ import { PrismaService } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { percent } from "../billing/money.schema";
 
-const FORMS = ["TABLET", "CAPSULE", "SYRUP", "INJECTION", "OINTMENT", "DROPS", "INHALER", "SACHET", "OTHER"] as const;
+export const FORMS = ["TABLET", "CAPSULE", "SYRUP", "INJECTION", "OINTMENT", "DROPS", "INHALER", "SACHET", "OTHER"] as const;
 const name = z.string().trim().min(2).max(120);
 
 export const identityKey = (brand: string, generic: string, strength: string | null | undefined, form: string): string =>
@@ -52,7 +52,8 @@ export class MedicinesService {
     const showInactive = q.includeInactive && ctx.permissions.has("PHARMACY_MASTERS");
     const where: Prisma.MedicineWhereInput = {
       tenantId: ctx.tenantId, ...(showInactive ? {} : { status: "ACTIVE" }),
-      ...(q.q ? { OR: [{ brandName: { contains: q.q, mode: "insensitive" } }, { genericName: { contains: q.q, mode: "insensitive" } }] } : {}),
+      // Every word must match the brand, generic name or strength, so "Cefixime 200 mg" finds Cefixime-Rx 200 mg.
+      ...(q.q ? { AND: q.q.split(/\s+/).filter(Boolean).slice(0, 6).map((w) => ({ OR: [{ brandName: { contains: w, mode: "insensitive" as const } }, { genericName: { contains: w, mode: "insensitive" as const } }, { strength: { contains: w, mode: "insensitive" as const } }] })) } : {}),
     };
     const [rows, total] = await Promise.all([
       this.prisma.medicine.findMany({ where, select: VIEW, orderBy: [{ brandName: "asc" }, { strength: "asc" }], skip: (q.page - 1) * q.pageSize, take: q.pageSize }),

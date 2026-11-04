@@ -23,6 +23,9 @@ describe("pharmacy: masters, stock ledger, procurement, dispensing", () => {
     t.api("post", "/pharmacy/batches", tok).set("Idempotency-Key", key()).send({ medicineId, batchNo, expiryDate: ymd(365), mrp: "10.00", purchasePrice: "6.00", sellingPrice: "9.50", quantity: qty, ...o });
   const stockOf = async (batchId: string) => (await t.prisma.stockBalance.findFirstOrThrow({ where: { batchId } })).quantity;
   const dispense = (body: Record<string, unknown>, tok = pharm.token, k = key()) => t.api("post", "/pharmacy/dispenses", tok).set("Idempotency-Key", k).send(body);
+  /** The pharmacy only bills; the cashier collects. */
+  const collect = (invoiceId: string, amount: string, method = "UPI", reference: string | undefined = "UPI-PH-0001") =>
+    t.api("post", `/invoices/${invoiceId}/payments`, cashier.token).set("Idempotency-Key", key()).send({ payments: [{ method, amount, ...(method === "CASH" ? {} : { reference }) }] });
   const assertReconciled = async (batchId: string) => {
     const r = await t.api("get", `/pharmacy/batches/${batchId}/ledger`, pharm.token);
     assert.equal(r.status, 200);
@@ -30,6 +33,7 @@ describe("pharmacy: masters, stock ledger, procurement, dispensing", () => {
     assert.ok(r.body.data.reconciliation.balance >= 0);
   };
 
+  let cashier: { id: string; token: string };
   before(async () => {
     t = await startApp();
     a = await t.makeTenant("ph-a");
@@ -37,6 +41,8 @@ describe("pharmacy: masters, stock ledger, procurement, dispensing", () => {
     rec = await t.makeUser(a, ["RECEPTIONIST"]);
     pharm = await t.makeUser(a, ["PHARMACIST"]);
     nurse = await t.makeUser(a, ["NURSE"]);
+    cashier = await t.makeUser(a, ["CASHIER"]);
+    assert.equal((await t.api("post", "/shifts/open", cashier.token).send({ openingCash: "0" })).status, 201);
   });
   after(async () => { await t.close(); });
 
@@ -54,6 +60,12 @@ describe("pharmacy: masters, stock ledger, procurement, dispensing", () => {
       assert.equal(found.status, 200);
       assert.ok(found.body.data.some((x: { id: string }) => x.id === m.body.data.id));
       assert.equal(found.body.data[0].purchasePrice, undefined, "no stock or cost data leaks to prescribers");
+      // Each word may match brand, generic name or strength, in any order.
+      const ids = async (q: string) => ((await t.api("get", "/medicines", doc.token).query({ q })).body.data as { id: string; strength: string }[]).filter((x) => x.id === m.body.data.id || x.strength === "500 mg");
+      const withStrength = await ids(`${brand} 650 mg`);
+      assert.deepEqual(withStrength.map((x) => x.id), [m.body.data.id], "name plus strength finds exactly that product");
+      assert.deepEqual((await ids(`650 mg ${brand.toLowerCase()}`)).map((x) => x.id), [m.body.data.id], "word order and case do not matter");
+      assert.equal((await t.api("get", "/medicines", doc.token).query({ q: `${brand} 999 mg` })).body.data.length, 0, "a strength that does not exist finds nothing");
     });
 
     it("validates medicine input and enforces permissions and tenant isolation", async () => {
@@ -385,31 +397,39 @@ describe("pharmacy: masters, stock ledger, procurement, dispensing", () => {
       assert.equal(await t.prisma.dispense.count({ where: { patientId: patient.id } }), 0);
     });
 
-    it("bills the pharmacy sale exactly (qty x selling price, never above MRP) and can take payment with a receipt", async () => {
+    it("bills the pharmacy sale exactly (qty x selling price, never above MRP) and is collected only by the cashier", async () => {
       const m = await mkMedicine({ gstPercent: 12 });
       await opening(m.id, "BILL1", 50, { mrp: "10.00", sellingPrice: "9.35" });
       const patient = await registerPatient(t, rec.token);
-      const r = await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 7 }], payments: [{ method: "UPI", amount: "65.45", reference: "UPI-PH-0001" }] });
+      const r = await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 7 }] });
       assert.equal(r.status, 201, JSON.stringify(r.body));
       const d = r.body.data.dispense;
       assert.match(d.dispenseNumber, /^PH-\d{4}-\d{6}$/);
       assert.equal(d.total, "65.45");
       assert.equal(d.taxTotal, "7.01", "GST component included in the MRP-inclusive price: 65.45 x 12/112");
       assert.equal(d.subtotal, "58.44");
-      assert.equal(d.invoice.status, "PAID");
+      assert.equal(d.invoice.status, "ISSUED", "the bill is issued and waits for the cashier");
+      assert.equal(d.invoice.paidTotal, "0.00");
       assert.match(d.invoice.invoiceNumber, /^INV-/);
-      assert.match(r.body.data.receipt.receiptNumber, /^RCT-/);
+      assert.equal(r.body.data.receipt, undefined, "the pharmacy never produces a receipt");
+      // The pharmacy cannot take payment in any way.
+      assert.equal((await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 1 }], payments: [{ method: "UPI", amount: "9.35", reference: "UPI-PH-0002" }] })).status, 400, "payments are not accepted when dispensing");
+      assert.equal((await t.api("post", `/invoices/${d.invoiceId}/payments`, pharm.token).set("Idempotency-Key", key()).send({ payments: [{ method: "UPI", amount: "65.45", reference: "UPI-PH-0003" }] })).status, 403, "the pharmacist holds no payment permission");
+      assert.equal((await t.api("post", "/shifts/open", pharm.token).send({ openingCash: "0" })).status, 403, "nor a cash shift");
+      assert.equal((await t.api("post", "/invoices", pharm.token).send({ patientId: patient.id, kind: "OPD", lines: [{ description: "x", unitPrice: "1", taxPercent: 0, quantity: 1 }] })).status, 403, "nor hand-made bills");
+      const pending = await t.api("get", "/invoices?kind=PHARMACY&outstanding=true", cashier.token);
+      assert.ok((pending.body.data as { id: string }[]).some((x) => x.id === d.invoiceId), "the cashier sees it in the pharmacy bills to collect");
+      const paid = await collect(d.invoiceId, "65.45");
+      assert.equal(paid.status, 201, JSON.stringify(paid.body));
+      assert.match(paid.body.data.receipt.receiptNumber, /^RCT-/);
+      assert.equal((await t.api("get", `/invoices/${d.invoiceId}`, cashier.token)).body.data.status, "PAID");
       const inv = await t.prisma.invoice.findFirstOrThrow({ where: { id: d.invoiceId }, include: { lines: true } });
       assert.equal(inv.kind, "PHARMACY");
       assert.equal(inv.lines[0]?.sourceType, "DISPENSE");
       assert.equal(inv.total.toFixed(2), "65.45");
-      const over = await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 1 }], payments: [{ method: "CASH", amount: "9.35" }] });
-      assert.equal(over.status, 409, "cash needs the pharmacist's open shift");
-      assert.equal(over.body.error.code, "SHIFT_NOT_OPEN");
-      assert.equal(await stockOf((await t.prisma.medicineBatch.findFirstOrThrow({ where: { medicineId: m.id } })).id), 43, "the failed sale rolled back, including its stock movement");
+      assert.equal(await stockOf((await t.prisma.medicineBatch.findFirstOrThrow({ where: { medicineId: m.id } })).id), 43, "the refused request took no stock");
       const unpaid = await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 1 }] });
       assert.equal(unpaid.body.data.dispense.invoice.status, "ISSUED");
-      assert.equal(unpaid.body.data.receipt, null);
     });
 
     it("double-submit with one key dispenses once; a repeated request with a new key is a new sale", async () => {
@@ -623,7 +643,8 @@ describe("pharmacy: masters, stock ledger, procurement, dispensing", () => {
       const m = await mkMedicine();
       const batch = (await opening(m.id, "PR1", 20, { mrp: "10.00", sellingPrice: "10.00" })).body.data;
       const patient = await registerPatient(t, rec.token);
-      const sale = (await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 5 }], payments: [{ method: "UPI", amount: "50.00", reference: "UPI-RET-001" }] })).body.data.dispense;
+      const sale = (await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 5 }] })).body.data.dispense;
+      assert.equal((await collect(sale.invoiceId, "50.00", "UPI", "UPI-RET-001")).status, 201);
       const itemId = sale.items[0].id as string;
       const ret = (n: number, k = key()) => t.api("post", `/pharmacy/dispenses/${sale.id}/returns`, pharm.token).set("Idempotency-Key", k).send({ reason: "Patient stopped treatment", items: [{ dispenseItemId: itemId, quantity: n }] });
       const r1 = await ret(2);

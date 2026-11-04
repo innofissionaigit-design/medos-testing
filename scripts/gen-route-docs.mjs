@@ -27,7 +27,8 @@ for (const C of CONTROLLERS) {
     const sub = String(Reflect.getMetadata("path", h) ?? "");
     const path = `/api/v1/${[base, sub].filter(Boolean).join("/")}`.replace(/\/+/g, "/");
     const perms = Reflect.getMetadata(http.REQUIRED_PERMISSIONS, h);
-    const access = Reflect.getMetadata(http.IS_PUBLIC, h) ? "public" : Reflect.getMetadata(http.ANY_AUTHENTICATED, h) ? "any signed-in user (checked in service)" : (perms ?? []).join(" + ");
+    const anyOf = Reflect.getMetadata(http.REQUIRED_ANY_PERMISSIONS, h);
+    const access = Reflect.getMetadata(http.IS_PUBLIC, h) ? "public" : Reflect.getMetadata(http.ANY_AUTHENTICATED, h) ? "any signed-in user (checked in service)" : [(perms ?? []).join(" + "), anyOf?.length ? `any of ${anyOf.join(" / ")}` : ""].filter(Boolean).join(" + ");
     rows.push({ group: C.name.replace(/Controller$/, ""), method: METHODS[m], path, access, feature: Reflect.getMetadata("requiredFeature", h) ?? classFeature ?? "" });
   }
 }

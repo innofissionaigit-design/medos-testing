@@ -6,7 +6,9 @@ import { AuditService, actorOf } from "../../common/audit.service";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { patientScope } from "../../common/data-scope";
 import { NumberingService } from "../numbering/numbering.service";
+import { RegistrationFeeService, registrationSettlementSchema, type RegistrationMode } from "./registration-fee.service";
 import {
   compareSeverity, currentAge, normalizeMobile, normalizeName, scoreDuplicate,
   type DuplicateReason, type DuplicateSeverity,
@@ -65,6 +67,8 @@ export const createPatientSchema = z.object({
   ...demographics,
   ...Object.fromEntries(optionalFields.map((k) => [k, demographics[k].optional()])) as { [K in (typeof optionalFields)[number]]: z.ZodOptional<(typeof demographics)[K]> },
   duplicateOverride: z.object({ confirmedDistinct: z.literal(true), reason: z.string().trim().max(240).optional() }).strict().optional(),
+  /** The registration fee: paid (cash, UPI or card) or exempted. Needed when a registration fee is set up (docs/registration-fee.md). */
+  registration: registrationSettlementSchema.optional(),
 }).strict().superRefine((v, c) => ageRule(v, c, true));
 
 export const updatePatientSchema = z.object({
@@ -99,13 +103,22 @@ export const searchPatientsSchema = z.object({
 
 // ───────────────────────── views ─────────────────────────
 
-const PATIENT_INCLUDE = { identifiers: { where: { type: "MRN" as const }, select: { value: true } } } satisfies Prisma.PatientInclude;
+const MRN_ONLY = { where: { type: "MRN" as const }, select: { value: true } };
+const PATIENT_INCLUDE = {
+  identifiers: MRN_ONLY,
+  mergedInto: { select: { id: true, identifiers: MRN_ONLY } },
+  mergedFrom: { select: { id: true, mergedAt: true, identifiers: MRN_ONLY }, orderBy: { mergedAt: "asc" as const } },
+} satisfies Prisma.PatientInclude;
 type PatientRow = Prisma.PatientGetPayload<{ include: typeof PATIENT_INCLUDE }>;
 
 const isoDay = (d: Date | null): string | null => (d ? d.toISOString().slice(0, 10) : null);
 
 export function toPatientView(p: PatientRow) {
   return {
+    /** Set on a duplicate that was merged: the real patient to use instead. */
+    mergedInto: p.mergedInto ? { id: p.mergedInto.id, mrn: p.mergedInto.identifiers[0]?.value ?? null } : null,
+    /** Set on the real patient: the duplicate records linked to it, whose history this chart also shows. */
+    mergedFrom: p.mergedFrom.map((m) => ({ id: m.id, mrn: m.identifiers[0]?.value ?? null, mergedAt: m.mergedAt })),
     id: p.id, mrn: p.identifiers[0]?.value ?? null,
     firstName: p.firstName, lastName: p.lastName, gender: p.gender,
     dateOfBirth: isoDay(p.dateOfBirth), age: currentAge(p),
@@ -133,16 +146,22 @@ export class PatientsService {
     private readonly audit: AuditService,
     private readonly numbering: NumberingService,
     private readonly idempotency: IdempotencyService,
+    private readonly registrationFee: RegistrationFeeService,
   ) {}
 
   async search(ctx: RequestContext, q: z.infer<typeof searchPatientsSchema>) {
     const text = q.q.trim();
     const digits = text.replace(/\D/g, "");
     const normalized = normalizeName(text);
-    const or: Prisma.PatientWhereInput[] = [{ identifiers: { some: { tenantId: ctx.tenantId, value: { contains: text, mode: "insensitive" } } } }];
-    if (digits.length >= 3) or.push({ mobile: { contains: digits } });
+    const idMatch: Prisma.PatientIdentifierWhereInput = { tenantId: ctx.tenantId, value: { contains: text, mode: "insensitive" } };
+    // A merged duplicate is not offered; searching its old number finds the real patient instead.
+    const or: Prisma.PatientWhereInput[] = [{ identifiers: { some: idMatch } }, { mergedFrom: { some: { identifiers: { some: idMatch } } } }];
+    // Only a letter-free query is read as a phone number: an MRN such as "DEMO-000992" must not also match
+    // unrelated patients whose mobile happens to contain its digits.
+    if (digits.length >= 3 && !/\p{L}/u.test(text)) or.push({ mobile: { contains: digits } });
+    if (digits.length >= 6 && !/\p{L}/u.test(text)) or.push({ abhaLinks: { some: { tenantId: ctx.tenantId, removedAt: null, abhaNumber: { contains: digits } } } });
     if (/\p{L}/u.test(text) && normalized.length >= 2) or.push({ searchName: { contains: normalized } });
-    const where: Prisma.PatientWhereInput = { tenantId: ctx.tenantId, OR: or };
+    const where: Prisma.PatientWhereInput = { tenantId: ctx.tenantId, mergedIntoId: null, OR: or, AND: [patientScope(ctx)] };
     const [rows, total] = await Promise.all([
       this.prisma.patient.findMany({ where, include: PATIENT_INCLUDE, orderBy: [{ createdAt: "desc" }], skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
       this.prisma.patient.count({ where }),
@@ -151,7 +170,7 @@ export class PatientsService {
   }
 
   async get(ctx: RequestContext, id: string): Promise<PatientView> {
-    const p = await this.prisma.patient.findFirst({ where: { id, tenantId: ctx.tenantId }, include: PATIENT_INCLUDE });
+    const p = await this.prisma.patient.findFirst({ where: { id, tenantId: ctx.tenantId, AND: [patientScope(ctx)] }, include: PATIENT_INCLUDE });
     if (!p) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
     return toPatientView(p);
   }
@@ -200,8 +219,9 @@ export class PatientsService {
     return this.findDuplicates(this.prisma, ctx, probe);
   }
 
-  async create(ctx: RequestContext, input: z.infer<typeof createPatientSchema>, idempotencyKey: string | undefined) {
-    const { duplicateOverride, ...fields } = input;
+  /** `extras.legacyId` is the patient's number in the hospital's previous system (data migration); it is saved as a LEGACY identifier in the same transaction. */
+  async create(ctx: RequestContext, input: z.infer<typeof createPatientSchema>, idempotencyKey: string | undefined, extras: { legacyId?: string; /** COLLECT (default): the fee is settled in this same step. PENDING: left for the front desk. NONE: no fee (data migration). */ registration?: RegistrationMode } = {}) {
+    const { duplicateOverride, registration, ...fields } = input;
     const { result, replayed } = await this.idempotency.run(ctx.tenantId, "PATIENT_CREATE", idempotencyKey, input, async (tx) => {
       const candidates = await this.findDuplicates(tx, ctx, {
         firstName: fields.firstName, lastName: fields.lastName, gender: fields.gender,
@@ -231,8 +251,11 @@ export class PatientsService {
         },
       });
       await tx.patientIdentifier.create({ data: { tenantId: ctx.tenantId, patientId: created.id, type: "MRN", value: mrn } });
-      await this.audit.record(tx, actorOf(ctx), { action: "PATIENT_CREATED", entityType: "Patient", entityId: created.id, metadata: { mrn } });
-      const view = toPatientView({ ...created, identifiers: [{ value: mrn }] });
+      if (extras.legacyId) await tx.patientIdentifier.create({ data: { tenantId: ctx.tenantId, patientId: created.id, type: "LEGACY", value: extras.legacyId } });
+      await this.audit.record(tx, actorOf(ctx), { action: "PATIENT_CREATED", entityType: "Patient", entityId: created.id, metadata: { mrn, ...(extras.legacyId ? { legacyId: extras.legacyId } : {}) } });
+      // The fee is settled in this same transaction: if it cannot be (no payment given, wrong amount, no open shift for cash), the patient and the Patient ID are not created.
+      const fee = await this.registrationFee.onRegister(tx, ctx, created.id, extras.registration ?? "COLLECT", registration);
+      const view = { ...toPatientView({ ...created, identifiers: [{ value: mrn }], mergedInto: null, mergedFrom: [] }), registration: fee };
       if (candidates.length > 0 && duplicateOverride) {
         await this.audit.record(tx, actorOf(ctx), {
           action: "PATIENT_DUPLICATE_OVERRIDDEN", entityType: "Patient", entityId: created.id,
@@ -249,6 +272,7 @@ export class PatientsService {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.patient.findFirst({ where: { id, tenantId: ctx.tenantId } });
       if (!existing) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+      if (existing.mergedIntoId) throw new DomainError("PATIENT_MERGED", "This patient record was merged into another. Update the real patient instead.", 409, { mergedIntoId: existing.mergedIntoId });
 
       const data: Prisma.PatientUncheckedUpdateManyInput = {};
       const diff: Record<string, [unknown, unknown]> = {};

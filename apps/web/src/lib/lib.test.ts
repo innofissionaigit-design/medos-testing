@@ -41,6 +41,13 @@ test("role decides order, not access (CLAUDE.md §24)", () => {
   assert.equal(visibleNav(perms, ALL_ON, ["RECEPTIONIST"]).map((n) => n.href).slice(0, 4).join(), "/dashboard,/patients,/appointments,/queue");
 });
 
+test("the Reports menu appears for any report permission, all-reports or one area", () => {
+  for (const p of ["REPORT_READ", "REPORT_OPD", "REPORT_FINANCE", "REPORT_IPD", "REPORT_PHARMACY"]) {
+    assert.ok(visibleNav(set(p), ALL_ON, []).some((n) => n.href === "/reports"), p);
+  }
+  assert.ok(!visibleNav(set("INVOICE_READ", "PATIENT_READ"), ALL_ON, []).some((n) => n.href === "/reports"), "no report permission, no Reports menu");
+});
+
 test("a user with no permissions still gets a landing page", () => {
   assert.deepEqual(visibleNav(set(), ALL_ON, []).map((n) => n.href), ["/dashboard"]);
 });

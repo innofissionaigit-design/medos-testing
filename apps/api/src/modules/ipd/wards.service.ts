@@ -16,7 +16,7 @@ export const createWardSchema = z.object({ name: z.string().trim().min(2).max(80
 export const updateWardSchema = z.object({ name: z.string().trim().min(2).max(80), status: z.enum(["ACTIVE", "INACTIVE"]) }).partial().strict().refine((v) => Object.keys(v).length > 0, "No changes supplied");
 export const createRoomSchema = z.object({ wardId: uuid, name: z.string().trim().min(1).max(80), code }).strict();
 export const updateRoomSchema = updateWardSchema;
-export const createBedSchema = z.object({ roomId: uuid, code, dailyRate: amount().default(0) }).strict();
+export const createBedSchema = z.object({ roomId: uuid, code, dailyRate: amount().prefault(0) }).strict();
 export const updateBedSchema = z.object({ dailyRate: amount(), active: z.enum(["ACTIVE", "INACTIVE"]) }).partial().strict().refine((v) => Object.keys(v).length > 0, "No changes supplied");
 export const bedStatusSchema = z.object({ status: z.enum(["AVAILABLE", "CLEANING", "MAINTENANCE", "RESERVED"]), reason: z.string().trim().min(3).max(200).optional() }).strict();
 export const listBedsSchema = z.object({ wardId: uuid.optional(), status: z.enum(BED_STATUSES).optional(), includeInactive: z.enum(["true", "false"]).default("false").transform((v) => v === "true") }).strict();

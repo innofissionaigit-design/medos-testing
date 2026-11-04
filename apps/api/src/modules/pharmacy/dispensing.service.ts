@@ -1,5 +1,5 @@
 import { Injectable } from "@nestjs/common";
-import { Decimal, DomainError } from "@medos/shared";
+import { calculateQuantity, Decimal, DomainError } from "@medos/shared";
 import type { Prisma } from "@medos/database";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
@@ -7,16 +7,16 @@ import { AuditService, actorOf } from "../../common/audit.service";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { chartPatientIds } from "../patients/patient-links";
 import { fmt, round2 } from "../billing/billing.domain";
 import { InvoicesService } from "../billing/invoices.service";
+import { TestOrdersService } from "../test-orders/test-orders.service";
 import { LedgerService } from "../billing/ledger.service";
-import { amount } from "../billing/money.schema";
 import { AllergiesService, allergenKey, findAllergyMatches } from "../clinical/allergies.service";
 import { NumberingService } from "../numbering/numbering.service";
 import { StockService } from "./stock.service";
 
 const uuid = z.string().uuid();
-const method = z.enum(["CASH", "UPI", "CARD", "BANK_TRANSFER", "OTHER"]);
 
 export const dispenseSchema = z.object({
   patientId: uuid,
@@ -24,12 +24,23 @@ export const dispenseSchema = z.object({
   items: z.array(z.object({
     medicationOrderItemId: uuid.optional(), medicineId: uuid, quantity: z.number().int().min(1).max(100_000), batchId: uuid.optional(),
   }).strict()).min(1).max(30),
-  payments: z.array(z.object({ method, amount: amount({ positive: true }), reference: z.string().trim().min(4).max(60).optional() }).strict()).max(6).optional(),
   acknowledgeAllergyWarnings: z.boolean().optional(),
   /** IPD patients: add the medicines to the admission bill instead of invoicing at the counter. */
   chargeToAdmission: z.boolean().optional(),
   notes: z.string().trim().max(300).optional(),
-}).strict().refine((v) => !(v.chargeToAdmission && v.payments?.length), { message: "Payment is taken at discharge for charges added to an admission", path: ["payments"] });
+  /** Dispensing from a doctor's handwritten prescription picture: the pharmacist confirms they checked the picture and entered the medicines from it. */
+  prescriptionScanId: uuid.optional(),
+  verifiedHandwriting: z.boolean().optional(),
+  /** False when more of this prescription is still to be dispensed later; by default this dispense completes it. */
+  completesPrescription: z.boolean().optional(),
+}).strict().superRefine((v, c) => {
+  if (!v.prescriptionScanId) return;
+  if (v.verifiedHandwriting !== true) c.addIssue({ code: "custom", path: ["verifiedHandwriting"], message: "Confirm that you checked the handwritten prescription" });
+  if (v.medicationOrderId) c.addIssue({ code: "custom", path: ["medicationOrderId"], message: "A handwritten prescription is not a digital prescription" });
+  if (v.chargeToAdmission) c.addIssue({ code: "custom", path: ["chargeToAdmission"], message: "A handwritten prescription is for counter sales" });
+  if (v.items.some((i) => i.medicationOrderItemId)) c.addIssue({ code: "custom", path: ["items"], message: "Enter the medicines yourself; there are no prescription lines to select" });
+});
+export const rejectHandwrittenSchema = z.object({ reason: z.string().trim().min(5).max(240) }).strict();
 
 export const dispenseReturnSchema = z.object({
   reason: z.string().trim().min(5).max(240),
@@ -56,7 +67,7 @@ export class DispensingService {
   constructor(
     private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly stock: StockService,
     private readonly numbering: NumberingService, private readonly idempotency: IdempotencyService, private readonly invoices: InvoicesService,
-    private readonly ledger: LedgerService, private readonly allergies: AllergiesService,
+    private readonly ledger: LedgerService, private readonly allergies: AllergiesService, private readonly testOrders: TestOrdersService,
   ) {}
 
   // ───── prescription queue ─────
@@ -70,22 +81,29 @@ export class DispensingService {
     };
     const rows = await this.prisma.medicationOrder.findMany({
       where, orderBy: { signedAt: "asc" }, take: 500,
-      include: { items: { orderBy: { lineNo: "asc" } }, patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } } },
+      include: { items: { orderBy: { lineNo: "asc" } }, scans: { select: { file: { select: { id: true, fileName: true, contentType: true, status: true } }, pages: { orderBy: { pageNo: "asc" }, select: { pageNo: true, file: { select: { id: true, fileName: true, contentType: true, status: true } } } } } }, patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } } },
     });
     const open = rows.filter((o) => o.items.some((i) => i.status === "ACTIVE" && (i.quantity === null ? i.dispensedQuantity === 0 : i.dispensedQuantity < i.quantity)));
     const page = open.slice((q.page - 1) * q.pageSize, q.page * q.pageSize);
     const doctorIds = [...new Set(page.map((o) => o.orderedById))];
     const docs = await this.prisma.practitioner.findMany({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, userId: { in: doctorIds } }, select: { userId: true, displayName: true } });
+    const testsByVisit = await this.testOrders.listFor(this.prisma, ctx, [...new Set(page.map((o) => o.encounterId))]);
     const items = await Promise.all(page.map(async (o) => {
       const warnings = findAllergyMatches(await this.allergies.activeForMatching(this.prisma, ctx, o.patientId), o.items.flatMap((i) => [i.genericName, ...(i.brandName ? [i.brandName] : [])]));
       return {
-        id: o.id, orderNumber: o.orderNumber, signedAt: o.signedAt, patientId: o.patientId, encounterId: o.encounterId,
+        id: o.id, orderNumber: o.orderNumber, source: o.source,
+        /** The doctor's tests for the same visit, so the pharmacy sees the whole prescription (the Cashier bills them). */
+        testsAdvised: (testsByVisit.get(o.encounterId) ?? []).filter((x) => x.status !== "CANCELLED"),
+        /** For a handwritten prescription: the doctor's original pages, so the pharmacist can compare them with the approved medicines. */
+        handwrittenPages: o.scans.flatMap((sc) => [{ pageNo: 1, file: sc.file }, ...sc.pages]).filter((pg) => pg.file.status === "ACTIVE").map((pg) => ({ pageNo: pg.pageNo, fileId: pg.file.id, fileName: pg.file.fileName, contentType: pg.file.contentType })), signedAt: o.signedAt, patientId: o.patientId, encounterId: o.encounterId,
         patientName: [o.patient.firstName, o.patient.lastName].filter(Boolean).join(" "), mrn: o.patient.identifiers[0]?.value ?? null,
         doctorName: docs.find((d) => d.userId === o.orderedById)?.displayName ?? null,
         status: o.items.some((i) => i.dispensedQuantity > 0) ? "PARTIAL" : "PENDING", allergyWarnings: warnings,
         items: o.items.map((i) => ({
           id: i.id, lineNo: i.lineNo, medicineId: i.medicineId, genericName: i.genericName, brandName: i.brandName, strength: i.strength, dosage: i.dosage, route: i.route, frequency: i.frequency,
           frequencyText: i.frequencyText, durationDays: i.durationDays, quantity: i.quantity, dispensedQuantity: i.dispensedQuantity, status: i.status,
+          /** When the doctor wrote no quantity: dose x times a day x days, so the pharmacist is told how many to give instead of guessing. Null when it cannot be counted. */
+          suggestedQuantity: i.quantity === null ? calculateQuantity(i.dosage, i.frequency, i.durationDays) : null,
           remaining: i.status !== "ACTIVE" ? 0 : i.quantity === null ? null : i.quantity - i.dispensedQuantity,
         })),
       };
@@ -105,10 +123,15 @@ export class DispensingService {
 
   async dispense(ctx: RequestContext, input: z.infer<typeof dispenseSchema>, key: string | undefined) {
     if (!key) throw new DomainError("VALIDATION_FAILED", "An Idempotency-Key header is required for dispensing", 400);
-    if (input.payments?.length && !ctx.permissions.has("PAYMENT_CREATE")) throw new DomainError("FORBIDDEN", "You do not have permission to take payments", 403);
     return this.idempotency.run(ctx.tenantId, "DISPENSE", key, input, async (tx) => {
       const patient = await tx.patient.findFirst({ where: { id: input.patientId, tenantId: ctx.tenantId, status: "ACTIVE" }, select: { id: true } });
       if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+      // A handwritten prescription picture: it must be this patient's, at this facility, and not already dealt with.
+      const scan = input.prescriptionScanId
+        ? await tx.prescriptionScan.findFirst({ where: { id: input.prescriptionScanId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId }, select: { id: true, encounterId: true, pharmacyOutcome: true } })
+        : null;
+      if (input.prescriptionScanId && !scan) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      if (scan?.pharmacyOutcome) throw new DomainError("INVALID_STATE", "This handwritten prescription was already dealt with by the pharmacy", 409);
 
       const medicines = await tx.medicine.findMany({ where: { id: { in: [...new Set(input.items.map((i) => i.medicineId))] }, tenantId: ctx.tenantId, status: "ACTIVE" } });
       const medById = new Map(medicines.map((m) => [m.id, m]));
@@ -154,14 +177,14 @@ export class DispensingService {
       // Allocate batches (FEFO) in medicine-id order so lock order is globally consistent.
       const dispenseNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "PHARMACY_RECEIPT");
       const header = { id: randomUUID() };
-      const lines: { id: string; medicationOrderItemId: string | null; medicineId: string; batchId: string; quantity: number; unitPrice: Decimal; gst: Decimal; total: Decimal; label: string }[] = [];
+      const lines: { id: string; medicationOrderItemId: string | null; medicineId: string; batchId: string; quantity: number; unitPrice: Decimal; gst: Decimal; total: Decimal; label: string; hsn: string | null }[] = [];
       for (const [, it] of [...input.items.entries()].sort(([, a], [, b]) => a.medicineId.localeCompare(b.medicineId))) {
         const med = medById.get(it.medicineId)!;
         const allocations = it.batchId ? await this.explicitBatch(tx, ctx, it.medicineId, it.batchId, it.quantity) : await this.stock.allocateFefo(tx, ctx, it.medicineId, it.quantity, { lock: true });
         for (const a of allocations) {
           await this.stock.move(tx, ctx, { batchId: a.batchId, medicineId: it.medicineId, type: "SALE", direction: "OUT", quantity: a.quantity, sourceType: "DISPENSE", sourceId: header.id });
           const price = new Decimal(a.sellingPrice);
-          lines.push({ id: randomUUID(), medicationOrderItemId: it.medicationOrderItemId ?? null, medicineId: it.medicineId, batchId: a.batchId, quantity: a.quantity, unitPrice: price, gst: new Decimal(med.gstPercent.toString()), total: round2(price.times(a.quantity)), label: [med.brandName, med.strength].filter(Boolean).join(" ") });
+          lines.push({ id: randomUUID(), medicationOrderItemId: it.medicationOrderItemId ?? null, medicineId: it.medicineId, batchId: a.batchId, quantity: a.quantity, unitPrice: price, gst: new Decimal(med.gstPercent.toString()), total: round2(price.times(a.quantity)), label: [med.brandName, med.strength].filter(Boolean).join(" "), hsn: med.hsnCode });
         }
       }
       // Medicine prices are MRP-inclusive of GST: the bill is exactly qty x selling price; the GST component is recorded for reporting.
@@ -173,7 +196,7 @@ export class DispensingService {
         if (!adm) throw new DomainError("INVALID_STATE", "The patient is not currently admitted, so medicines cannot be charged to an admission", 409);
         if (adm.finalInvoiceId) throw new DomainError("INVALID_STATE", "The final bill has already been issued; sell the medicines at the counter instead", 409);
         await tx.dispense.create({
-          data: { id: header.id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId, medicationOrderId: order?.id ?? null, encounterId: order?.encounterId ?? null, dispenseNumber, invoiceId: null, subtotal: total.minus(gstIncluded).toFixed(2), taxTotal: gstIncluded.toFixed(2), total: total.toFixed(2), notes: input.notes ?? null, dispensedById: ctx.userId },
+          data: { id: header.id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId, medicationOrderId: order?.id ?? null, encounterId: order?.encounterId ?? scan?.encounterId ?? null, prescriptionScanId: scan?.id ?? null, dispenseNumber, invoiceId: null, subtotal: total.minus(gstIncluded).toFixed(2), taxTotal: gstIncluded.toFixed(2), total: total.toFixed(2), notes: input.notes ?? null, dispensedById: ctx.userId },
         });
         await tx.dispenseItem.createMany({
           data: lines.map((l, idx) => ({ id: l.id, tenantId: ctx.tenantId, dispenseId: header.id, lineNo: idx + 1, medicationOrderItemId: l.medicationOrderItemId, medicineId: l.medicineId, batchId: l.batchId, quantity: l.quantity, unitPrice: l.unitPrice.toFixed(2), taxPercent: l.gst.toFixed(2), lineTotal: l.total.toFixed(2) })),
@@ -183,27 +206,68 @@ export class DispensingService {
         });
       } else {
         const created = await this.invoices.createIssuedFromSource(tx, ctx, {
-          patientId: input.patientId, encounterId: order?.encounterId ?? null, kind: "PHARMACY", notes: `Pharmacy ${dispenseNumber}`,
-          lines: lines.map((l) => ({ description: l.label, quantity: new Decimal(l.quantity), unitPrice: l.unitPrice, taxPercent: new Decimal(0), sourceType: "DISPENSE", sourceId: l.id })),
+          patientId: input.patientId, encounterId: order?.encounterId ?? scan?.encounterId ?? null, kind: "PHARMACY", notes: `Pharmacy ${dispenseNumber}`,
+          lines: lines.map((l) => ({ description: l.label, quantity: new Decimal(l.quantity), unitPrice: l.unitPrice, taxPercent: new Decimal(0), sourceType: "DISPENSE", sourceId: l.id, hsnSac: l.hsn })),
         });
         invoice = { id: created.id, invoiceNumber: created.invoiceNumber };
         await tx.dispense.create({
-          data: { id: header.id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId, medicationOrderId: order?.id ?? null, encounterId: order?.encounterId ?? null, dispenseNumber, invoiceId: invoice.id, subtotal: total.minus(gstIncluded).toFixed(2), taxTotal: gstIncluded.toFixed(2), total: total.toFixed(2), notes: input.notes ?? null, dispensedById: ctx.userId },
+          data: { id: header.id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId, medicationOrderId: order?.id ?? null, encounterId: order?.encounterId ?? scan?.encounterId ?? null, prescriptionScanId: scan?.id ?? null, dispenseNumber, invoiceId: invoice.id, subtotal: total.minus(gstIncluded).toFixed(2), taxTotal: gstIncluded.toFixed(2), total: total.toFixed(2), notes: input.notes ?? null, dispensedById: ctx.userId },
         });
         await tx.dispenseItem.createMany({
           data: lines.map((l, idx) => ({ id: l.id, tenantId: ctx.tenantId, dispenseId: header.id, lineNo: idx + 1, medicationOrderItemId: l.medicationOrderItemId, medicineId: l.medicineId, batchId: l.batchId, quantity: l.quantity, unitPrice: l.unitPrice.toFixed(2), taxPercent: l.gst.toFixed(2), lineTotal: l.total.toFixed(2) })),
         });
       }
 
-      let receipt: { receiptNumber: string; total: string } | null = null;
-      if (input.payments?.length && invoice) {
-        const inv = await this.ledger.lock(tx, ctx, invoice.id);
-        const r = await this.ledger.receive(tx, ctx, inv, input.payments.map((p) => ({ method: p.method, amount: p.amount, reference: p.reference ?? null })));
-        receipt = { receiptNumber: r.receiptNumber, total: fmt(r.total) };
+      if (scan && input.completesPrescription !== false) {
+        // The picture leaves the queue with the dispense that completes it; if someone else finished it first, this dispense is rolled back.
+        const done = await tx.prescriptionScan.updateMany({ where: { id: scan.id, tenantId: ctx.tenantId, pharmacyOutcome: null }, data: { pharmacyOutcome: "DISPENSED", pharmacyAt: new Date(), pharmacyById: ctx.userId } });
+        if (done.count !== 1) throw new DomainError("INVALID_STATE", "This handwritten prescription was already dealt with by the pharmacy", 409);
       }
-      await this.audit.record(tx, actorOf(ctx), { action: "PHARMACY_DISPENSED", entityType: "Dispense", entityId: header.id, metadata: { dispenseNumber, lines: lines.length, total: fmt(total), orderNumber: order?.orderNumber ?? null, invoiceNumber: invoice?.invoiceNumber ?? null, chargedToAdmission: !!input.chargeToAdmission } });
+      await this.audit.record(tx, actorOf(ctx), { action: "PHARMACY_DISPENSED", entityType: "Dispense", entityId: header.id, metadata: { scanId: scan?.id ?? null, handwrittenVerified: scan ? true : undefined, completesPrescription: scan ? input.completesPrescription !== false : undefined, dispenseNumber, lines: lines.length, total: fmt(total), orderNumber: order?.orderNumber ?? null, invoiceNumber: invoice?.invoiceNumber ?? null, chargedToAdmission: !!input.chargeToAdmission } });
       if (warnings.length) await this.audit.record(tx, actorOf(ctx), { action: "DISPENSE_ALLERGY_ACKNOWLEDGED", entityType: "Dispense", entityId: header.id, metadata: { allergies: warnings.map((w) => w.allergen) } });
-      return { dispense: await this.view(tx, ctx, header.id), receipt };
+      return { dispense: await this.view(tx, ctx, header.id) };
+    });
+  }
+
+  // ───── handwritten prescriptions ─────
+
+  /** Handwritten prescription pictures the doctors uploaded, as soon as they are uploaded and until the pharmacy has dealt with them (all pages, oldest first). */
+  async handwrittenQueue(ctx: RequestContext) {
+    const rows = await this.prisma.prescriptionScan.findMany({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, pharmacyOutcome: null }, orderBy: { createdAt: "asc" }, take: 200,
+      include: {
+        file: { select: { id: true, fileName: true, contentType: true, status: true } },
+        pages: { orderBy: { pageNo: "asc" }, select: { pageNo: true, ocrText: true, file: { select: { id: true, fileName: true, contentType: true, status: true } } } },
+        patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } },
+        encounter: { select: { encounterNumber: true, practitioner: { select: { displayName: true } } } },
+      },
+    });
+    const uploaders = new Map((await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set(rows.map((r) => r.createdById))] } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
+    return Promise.all(rows.map(async (r) => {
+      const pages = [{ pageNo: 1, file: r.file, ocrText: r.ocrText }, ...r.pages].filter((pg) => pg.file.status === "ACTIVE");
+      const parts = [r.ocrText, ...r.pages.map((pg) => pg.ocrText)].filter((t): t is string => !!t);
+      const allergies = await this.allergies.activeForMatching(this.prisma, ctx, r.patientId);
+      return {
+        id: r.id, uploadedAt: r.createdAt, uploadedBy: uploaders.get(r.createdById) ?? null, doctorName: r.encounter.practitioner?.displayName ?? null, encounterNumber: r.encounter.encounterNumber,
+        patientId: r.patientId, patientName: [r.patient.firstName, r.patient.lastName].filter(Boolean).join(" "), mrn: r.patient.identifiers[0]?.value ?? null,
+        pages: pages.map((pg) => ({ pageNo: pg.pageNo, fileId: pg.file.id, fileName: pg.file.fileName, contentType: pg.file.contentType })),
+        /** What the doctor typed or the reading service returned: a help, never the prescription itself. */
+        text: r.correctedText ?? (parts.length > 0 ? parts.join("\n") : null),
+        allergies: allergies.map((a) => ({ allergen: a.allergen, severity: a.severity })),
+      };
+    }));
+  }
+
+  /** The pharmacy cannot use the picture (unreadable, wrong patient, not a prescription): it leaves the queue with the reason, which the doctor can see. */
+  async rejectHandwritten(ctx: RequestContext, scanId: string, input: z.infer<typeof rejectHandwrittenSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      const s = await tx.prescriptionScan.findFirst({ where: { id: scanId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, pharmacyOutcome: true, encounterId: true } });
+      if (!s) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      if (s.pharmacyOutcome) throw new DomainError("INVALID_STATE", "This handwritten prescription was already dealt with by the pharmacy", 409);
+      const res = await tx.prescriptionScan.updateMany({ where: { id: s.id, tenantId: ctx.tenantId, pharmacyOutcome: null }, data: { pharmacyOutcome: "REJECTED", pharmacyAt: new Date(), pharmacyById: ctx.userId, pharmacyNote: input.reason } });
+      if (res.count !== 1) throw new DomainError("INVALID_STATE", "This handwritten prescription was already dealt with by the pharmacy", 409);
+      await this.audit.record(tx, actorOf(ctx), { action: "HANDWRITTEN_PRESCRIPTION_REJECTED", entityType: "PrescriptionScan", entityId: s.id, metadata: { encounterId: s.encounterId, reason: input.reason } });
+      return { id: s.id, outcome: "REJECTED" };
     });
   }
 
@@ -269,7 +333,7 @@ export class DispensingService {
   }
 
   async list(ctx: RequestContext, q: z.infer<typeof dispenseListSchema>) {
-    const where = { tenantId: ctx.tenantId, facilityId: ctx.facilityId, ...(q.patientId ? { patientId: q.patientId } : {}) };
+    const where = { tenantId: ctx.tenantId, facilityId: ctx.facilityId, ...(q.patientId ? { patientId: { in: (await chartPatientIds(this.prisma, ctx.tenantId, q.patientId)) ?? [q.patientId] } } : {}) };
     const [rows, total] = await Promise.all([
       this.prisma.dispense.findMany({ where, orderBy: { dispensedAt: "desc" }, skip: (q.page - 1) * q.pageSize, take: q.pageSize, select: { id: true } }),
       this.prisma.dispense.count({ where }),

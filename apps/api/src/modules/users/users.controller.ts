@@ -4,7 +4,7 @@ import { PERMISSIONS } from "@medos/shared";
 import type { RequestContext } from "../../common/request-context";
 import {
   changePasswordSchema, createRoleSchema, createUserSchema, listUsersSchema, resetPasswordSchema,
-  setFacilitiesSchema, setPermissionsSchema, setRolesSchema, updateUserSchema, UsersService,
+  setDepartmentsSchema, setFacilitiesSchema, setPermissionsSchema, setRolesSchema, updateUserSchema, UsersService,
 } from "./users.service";
 
 @Controller()
@@ -26,7 +26,7 @@ export class UsersController {
   }
 
   @AnyAuthenticated()
-  @RateLimit({ limit: 10, windowMs: 60_000 })
+  @RateLimit({ limit: 10, windowMs: 60_000, by: "session" })
   @Post("users/me/password")
   @HttpCode(204)
   async changeOwnPassword(@Ctx() ctx: RequestContext, @Body() body: unknown): Promise<void> {
@@ -55,6 +55,12 @@ export class UsersController {
   @Put("users/:id/facilities")
   async setFacilities(@Ctx() ctx: RequestContext, @Param("id") userId: string, @Body() body: unknown) {
     return { data: await this.users.setFacilities(ctx, id(userId), parse(setFacilitiesSchema, body)) };
+  }
+
+  @RequirePermissions("ADMIN_USERS")
+  @Put("users/:id/departments")
+  async setDepartments(@Ctx() ctx: RequestContext, @Param("id") userId: string, @Body() body: unknown) {
+    return { data: await this.users.setDepartments(ctx, id(userId), parse(setDepartmentsSchema, body)) };
   }
 
   @RequirePermissions("ADMIN_USERS")

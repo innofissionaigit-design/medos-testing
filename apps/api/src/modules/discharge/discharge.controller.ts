@@ -32,7 +32,7 @@ export class DischargeController {
     return { data: await this.discharge.waive(ctx, id(admissionId), parse(waiveSchema, body)) };
   }
 
-  @RequirePermissions("INVOICE_CREATE", "INVOICE_ISSUE")
+  @RequirePermissions("IPD_FINAL_BILL")
   @Post("discharge/final-invoice")
   @HttpCode(200)
   async finalInvoice(@Ctx() ctx: RequestContext, @Param("id") admissionId: string) {

@@ -4,6 +4,8 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { admissionScope } from "../../common/data-scope";
+import { linkedIdsByPatient } from "../patients/patient-links";
 import { dateOnly, formatHm, zonedToUtc } from "../../common/time";
 
 const uuid = z.string().uuid();
@@ -38,7 +40,7 @@ export class NursingService {
   constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
 
   private async admission(db: Db, ctx: RequestContext, id: string, mustBeCurrent: boolean) {
-    const a = await db.admission.findFirst({ where: { id, tenantId: ctx.tenantId, facilityId: ctx.facilityId } });
+    const a = await db.admission.findFirst({ where: { id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] } });
     if (!a) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     if (mustBeCurrent && a.status !== "ADMITTED") throw new DomainError("INVALID_STATE", "The patient is no longer admitted", 409);
     return a;
@@ -212,11 +214,12 @@ export class NursingService {
     });
     const admIds = adms.map((a) => a.id);
     const encIds = adms.map((a) => a.encounterId);
+    const chart = await linkedIdsByPatient(this.prisma, ctx.tenantId, [...new Set(adms.map((a) => a.patientId))]);
     const [tasks, dueMar, lastVitals, allergies] = await Promise.all([
       this.prisma.nursingTask.findMany({ where: { tenantId: ctx.tenantId, admissionId: { in: admIds }, status: "PENDING" }, orderBy: { dueAt: "asc" }, select: { id: true, admissionId: true, type: true, title: true, dueAt: true, assignedToId: true } }),
       this.prisma.medicationAdministration.groupBy({ by: ["admissionId"], where: { tenantId: ctx.tenantId, admissionId: { in: admIds }, status: "DUE", scheduledAt: { lte: new Date(now + 60 * 60_000) }, item: { status: "ACTIVE" } }, _count: { _all: true }, _min: { scheduledAt: true } }),
       this.prisma.observation.groupBy({ by: ["encounterId"], where: { tenantId: ctx.tenantId, encounterId: { in: encIds }, status: "FINAL" }, _max: { recordedAt: true } }),
-      this.prisma.allergy.groupBy({ by: ["patientId"], where: { tenantId: ctx.tenantId, patientId: { in: adms.map((a) => a.patientId) }, status: "ACTIVE" }, _count: { _all: true } }),
+      this.prisma.allergy.groupBy({ by: ["patientId"], where: { tenantId: ctx.tenantId, patientId: { in: [...chart.values()].flat() }, status: "ACTIVE" }, _count: { _all: true } }),
     ]);
     const overdueRows = await this.prisma.medicationAdministration.groupBy({ by: ["admissionId"], where: { tenantId: ctx.tenantId, admissionId: { in: admIds }, status: "DUE", scheduledAt: { lt: new Date(now - 30 * 60_000) }, item: { status: "ACTIVE" } }, _count: { _all: true } });
     return adms.map((a) => {
@@ -228,7 +231,7 @@ export class NursingService {
         admissionId: a.id, admissionNumber: a.admissionNumber, patientId: a.patientId, encounterId: a.encounterId,
         patientName: [a.patient.firstName, a.patient.lastName].filter(Boolean).join(" "), gender: a.patient.gender, mrn: a.patient.identifiers[0]?.value ?? null,
         bed: bed?.code ?? null, ward: bed?.ward.name ?? null, wardId: bed?.ward.id ?? null, doctor: a.consultant.displayName, admittedAt: a.admittedAt,
-        hasAllergies: allergies.some((x) => x.patientId === a.patientId),
+        hasAllergies: allergies.some((x) => (chart.get(a.patientId) ?? [a.patientId]).includes(x.patientId)),
         pendingTasks: myTasks.length, overdueTasks: myTasks.filter((t) => t.dueAt.getTime() < now).length, tasks: myTasks.slice(0, 5),
         medicationDue: due?._count._all ?? 0, medicationOverdue: overdueRows.find((o) => o.admissionId === a.id)?._count._all ?? 0, nextMedicationAt: due?._min.scheduledAt ?? null,
         lastVitalsAt: lastV, vitalsDue: !lastV || now - lastV.getTime() > VITALS_INTERVAL_MIN * 60_000,

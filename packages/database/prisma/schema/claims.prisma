@@ -1,0 +1,144 @@
+// Insurance claims (docs/claims.md): who pays (insurers and TPAs), the patient's policies, and a claim that follows one issued invoice from pre-authorisation to
+// settlement. Money received from the insurer is posted as a payment on the invoice in the same transaction. Nothing here is ever deleted.
+
+enum PayerKind {
+  INSURER
+  TPA
+  GOVERNMENT
+  CORPORATE
+}
+
+enum PayerStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ClaimType {
+  CASHLESS
+  REIMBURSEMENT
+}
+
+enum ClaimStatus {
+  DRAFT
+  PREAUTH_PENDING
+  PREAUTH_APPROVED
+  SUBMITTED
+  QUERY
+  APPROVED
+  REJECTED
+  SETTLED
+  CLOSED
+}
+
+model Insurer {
+  id        String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String      @db.Uuid
+  name      String
+  kind      PayerKind   @default(INSURER)
+  contact   String?
+  status    PayerStatus @default(ACTIVE)
+  createdAt DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime    @updatedAt @db.Timestamptz(3)
+
+  policies PatientPolicy[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+model PatientPolicy {
+  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String      @db.Uuid
+  patientId    String      @db.Uuid
+  insurerId    String      @db.Uuid
+  policyNumber String
+  memberId     String?
+  holderName   String?
+  validFrom    DateTime    @db.Date
+  validTo      DateTime    @db.Date
+  sumInsured   Decimal?    @db.Decimal(14, 2)
+  status       PayerStatus @default(ACTIVE)
+  createdById  String      @db.Uuid
+  createdAt    DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime    @updatedAt @db.Timestamptz(3)
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  insurer Insurer @relation(fields: [tenantId, insurerId], references: [tenantId, id], onDelete: Restrict)
+  claims  Claim[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, patientId, insurerId, policyNumber])
+  @@index([tenantId, patientId])
+}
+
+model Claim {
+  id               String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String      @db.Uuid
+  facilityId       String      @db.Uuid
+  patientId        String      @db.Uuid
+  policyId         String      @db.Uuid
+  encounterId      String?     @db.Uuid
+  invoiceId        String?     @db.Uuid
+  claimNumber      String
+  type             ClaimType
+  status           ClaimStatus @default(DRAFT)
+  diagnosis        String?
+  preauthRequested Decimal?    @db.Decimal(14, 2)
+  preauthApproved  Decimal?    @db.Decimal(14, 2)
+  claimedAmount    Decimal?    @db.Decimal(14, 2)
+  approvedAmount   Decimal?    @db.Decimal(14, 2)
+  settledAmount    Decimal     @default(0) @db.Decimal(14, 2)
+  /// Why the insurer rejected it, or why it was closed without full payment.
+  closeReason      String?
+  createdById      String      @db.Uuid
+  createdAt        DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime    @updatedAt @db.Timestamptz(3)
+
+  patient     Patient           @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  policy      PatientPolicy     @relation(fields: [tenantId, policyId], references: [tenantId, id], onDelete: Restrict)
+  encounter   Encounter?        @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  invoice     Invoice?          @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  events      ClaimEvent[]
+  settlements ClaimSettlement[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, claimNumber])
+  @@index([tenantId, facilityId, status, updatedAt(sort: Desc)])
+  @@index([tenantId, patientId])
+}
+
+/// The claim's timeline: every step, who took it and when. Append-only.
+model ClaimEvent {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String       @db.Uuid
+  claimId    String       @db.Uuid
+  fromStatus ClaimStatus?
+  toStatus   ClaimStatus
+  amount     Decimal?     @db.Decimal(14, 2)
+  note       String?
+  actorId    String       @db.Uuid
+  at         DateTime     @default(now()) @db.Timestamptz(3)
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId, at])
+}
+
+/// Money received from the insurer against an approved claim, and the receipt it was posted under on the invoice. Append-only.
+model ClaimSettlement {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  claimId     String   @db.Uuid
+  amount      Decimal  @db.Decimal(14, 2)
+  reference   String
+  receivedOn  DateTime @db.Date
+  receiptId   String?  @db.Uuid
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId])
+}

@@ -1,11 +1,14 @@
 import { Injectable } from "@nestjs/common";
 import { DomainError } from "@medos/shared";
+import { RegistrationFeeService } from "../patients/registration-fee.service";
 import type { Prisma } from "@medos/database";
 import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { admissionScope } from "../../common/data-scope";
+import { chartPatientIds } from "../patients/patient-links";
 import { fmt } from "../billing/billing.domain";
 import { EncountersService } from "../encounters/encounters.service";
 import { NumberingService } from "../numbering/numbering.service";
@@ -48,7 +51,7 @@ export function toAdmissionView(a: Row, now = Date.now()) {
 export class AdmissionsService {
   constructor(
     private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService,
-    private readonly encounters: EncountersService, private readonly idempotency: IdempotencyService,
+    private readonly encounters: EncountersService, private readonly idempotency: IdempotencyService, private readonly registrationFee: RegistrationFeeService,
   ) {}
 
   // ───── admit ─────
@@ -57,6 +60,8 @@ export class AdmissionsService {
   async admit(ctx: RequestContext, input: z.infer<typeof admitSchema>, key: string | undefined) {
     return this.idempotency.run(ctx.tenantId, "ADMIT", key, input, async (tx) => {
       const patient = await tx.patient.findFirst({ where: { id: input.patientId, tenantId: ctx.tenantId, status: "ACTIVE" }, select: { id: true } });
+      // A patient whose registration fee is still pending is admitted once it is collected or exempted at Reception.
+      if (patient) await this.registrationFee.gate(tx, ctx, patient.id);
       if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
       const consultant = await tx.practitioner.findFirst({ where: { id: input.consultantId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE" }, select: { id: true, departmentId: true } });
       if (!consultant) throw new DomainError("VALIDATION_FAILED", "Consultant not found or inactive at this facility", 400, [{ path: "consultantId", message: "Unknown consultant" }]);
@@ -137,8 +142,8 @@ export class AdmissionsService {
 
   async list(ctx: RequestContext, q: z.infer<typeof listAdmissionsSchema>) {
     const where: Prisma.AdmissionWhereInput = {
-      tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: q.status,
-      ...(q.patientId ? { patientId: q.patientId } : {}),
+      tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: q.status, AND: [admissionScope(ctx)],
+      ...(q.patientId ? { patientId: { in: (await chartPatientIds(this.prisma, ctx.tenantId, q.patientId)) ?? [q.patientId] } } : {}),
       ...(q.wardId ? { assignments: { some: { releasedAt: null, bed: { wardId: q.wardId } } } } : {}),
       ...(q.q ? { OR: [{ admissionNumber: { contains: q.q, mode: "insensitive" } }, { patient: { searchName: { contains: q.q.toLowerCase() } } }, { patient: { identifiers: { some: { value: { contains: q.q, mode: "insensitive" } } } } }] } : {}),
     };
@@ -151,7 +156,7 @@ export class AdmissionsService {
   }
 
   async get(ctx: RequestContext, id: string) {
-    const a = await this.prisma.admission.findFirst({ where: { id, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true } });
+    const a = await this.prisma.admission.findFirst({ where: { id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] }, select: { id: true } });
     if (!a) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     return { ...(await this.view(this.prisma, ctx, id)), bedHistory: await this.bedHistory(this.prisma, ctx, id) };
   }

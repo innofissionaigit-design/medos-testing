@@ -1,15 +1,24 @@
 "use client";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { RolesCard, ScheduleEditor, StaffAccess } from "@/components/admin-extras";
+import { BookingFeeSettings } from "@/components/booking-fee-extras";
+import { DataImport } from "@/components/data-import";
+import { IntegrationsAdmin } from "@/components/integration-extras";
+import { PrivacyRequests } from "@/components/privacy-extras";
+import { FooterCard, NumberingCard, RolesCard, ScheduleEditor, StaffAccess } from "@/components/admin-extras";
+import { EarningsAdmin } from "@/components/earnings-admin";
+import { AbdmAdmin } from "@/components/abdm";
+import { AiAdmin } from "@/components/ai";
+import { PrescriptionUploadSettings } from "@/components/ocr-admin";
+import { RegistrationFeeSettings } from "@/components/registration-fee";
 import { Gate } from "@/components/gate";
 import { Badge, Button, Card, ErrorNote, Field, Input, PageHeader, Select, Spinner, StatusBadge, Table, Tabs, Td } from "@/components/ui";
 import { api } from "@/lib/api";
 import { useMe } from "@/lib/me";
 
-type Tab = "users" | "prices" | "wards" | "doctors" | "settings";
+type Tab = "users" | "prices" | "wards" | "doctors" | "settings" | "privacy" | "import" | "integrations" | "earnings" | "abdm" | "ai";
 
-interface User { id: string; username: string; fullName: string; status: string; roles: { id: string; name: string }[] }
+interface User { id: string; username: string; fullName: string; status: string; roles: { id: string; name: string }[]; departments?: { id: string; name: string }[] }
 interface Role { id: string; name: string }
 
 function Users() {
@@ -39,9 +48,9 @@ function Users() {
       </Card>
       <Card title="Staff">
         {users.isLoading ? <Spinner /> : (
-          <Table head={["Name", "Username", "Roles", "Status", ""]}>
+          <Table head={["Name", "Username", "Roles", "Sees", "Status", ""]}>
             {users.data?.data.map((u) => (
-              <tr key={u.id}><Td>{u.fullName}</Td><Td>{u.username}</Td><Td>{u.roles.map((r) => <Badge key={r.id}>{r.name.toLowerCase()}</Badge>)}</Td><Td><StatusBadge value={u.status} /></Td>
+              <tr key={u.id}><Td>{u.fullName}</Td><Td>{u.username}</Td><Td>{u.roles.map((r) => <Badge key={r.id}>{r.name.toLowerCase()}</Badge>)}</Td><Td>{u.departments && u.departments.length > 0 ? u.departments.map((d) => d.name).join(", ") : <span className="text-slate-400">all their role allows</span>}</Td><Td><StatusBadge value={u.status} /></Td>
                 <Td><Button variant="ghost" onClick={() => setAccess(u)}>Access…</Button>{u.id !== me.id && <Button variant="ghost" onClick={() => toggle.mutate(u)}>{u.status === "ACTIVE" ? "Deactivate" : "Activate"}</Button>}</Td></tr>
             ))}
           </Table>
@@ -147,6 +156,7 @@ function Settings() {
   const list = useQuery({ queryKey: ["settings"], queryFn: () => api.get<Setting[]>("/settings") });
   const put = useMutation({ mutationFn: ({ key, value }: { key: string; value: unknown }) => api.put(`/settings/${key}`, { value }), onSuccess: async () => { await qc.invalidateQueries({ queryKey: ["settings"] }); await qc.invalidateQueries({ queryKey: ["features"] }); } });
   const [hdr, setHdr] = useState<Record<string, string> | null>(null);
+  const [hoursText, setHoursText] = useState<string | null>(null);
   if (list.isLoading) return <Spinner />;
   const get = (k: string) => list.data?.find((s) => s.key === k);
   const current = (get("PRINT_HEADER")?.value as Record<string, string> | null) ?? null;
@@ -154,18 +164,40 @@ function Settings() {
   const flag = (k: string, label: string) => (
     <label key={k} className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 text-sm"><span>{label}</span><input type="checkbox" checked={get(k)?.value === true} onChange={(e) => put.mutate({ key: k, value: e.target.checked })} /></label>
   );
+  // Reminder times are stored in minutes; staff think in hours ("24, 2" = a day before and two hours before).
+  const hoursShown = hoursText ?? ((get("FOLLOWUP_REMINDER_OFFSETS_MINUTES")?.value as number[] | undefined) ?? [1440]).map((m) => String(m / 60)).join(", ");
+  const minutes = hoursShown.split(",").map((s) => s.trim()).filter(Boolean).map((s) => Math.round(Number(s) * 60));
+  const minutesOk = minutes.length >= 1 && minutes.length <= 5 && minutes.every((m) => Number.isInteger(m) && m >= 15 && m <= 10_080) && new Set(minutes).size === minutes.length;
   return (
     <div className="space-y-4">
       <Card title="Modules"><div className="grid gap-2 sm:grid-cols-3">{flag("PHARMACY_ENABLED", "Pharmacy")}{flag("IPD_ENABLED", "Admissions and beds")}{flag("NURSING_ENABLED", "Nursing")}</div></Card>
       <Card title="Discharge rules"><div className="grid gap-2 sm:grid-cols-2">{flag("DISCHARGE_REQUIRE_SUMMARY", "Require a signed discharge summary")}
         <div className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 text-sm"><span>Bed status after discharge</span><select aria-label="Bed after discharge" value={String(get("BED_AFTER_DISCHARGE")?.value ?? "CLEANING")} onChange={(e) => put.mutate({ key: "BED_AFTER_DISCHARGE", value: e.target.value })} className="rounded border border-slate-300 px-2 py-1"><option value="CLEANING">Needs cleaning</option><option value="AVAILABLE">Available</option></select></div></div></Card>
+      <Card title="Follow-up reminders (SMS)">
+        <div className="grid gap-2 sm:grid-cols-2">
+          {flag("FOLLOWUP_REMINDERS_ENABLED", "Send reminders for follow-up appointments")}
+          {flag("REMINDERS_REQUIRE_CONSENT", "Only remind patients who have agreed (otherwise remind unless the patient has withdrawn)")}
+          <form className="flex items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (minutesOk) put.mutate({ key: "FOLLOWUP_REMINDER_OFFSETS_MINUTES", value: minutes }, { onSuccess: () => setHoursText(null) }); }}>
+            <Field label="Hours before the appointment (comma-separated)" className="flex-1"><Input aria-label="Reminder hours" value={hoursShown} onChange={(e) => setHoursText(e.target.value)} /></Field>
+            <Button type="submit" variant="secondary" loading={put.isPending} disabled={!minutesOk || hoursText === null}>Save</Button>
+          </form>
+        </div>
+        <p className="mt-2 text-xs text-slate-500">Up to 5 reminders, each between 15 minutes (0.25) and 7 days (168) before. Changes apply to follow-ups booked or rescheduled from now on.</p>
+      </Card>
+      <PrescriptionUploadSettings flag={flag} />
+      <Card title="Cash shifts"><div className="grid gap-2">{flag("CASH_AUTO_OPEN_SHIFT", "Open a cash shift automatically when cash is taken and the person has none open")}</div><p className="mt-2 text-xs text-slate-500">The shift starts with no opening cash and is closed and counted as usual at the end of the day. Turn this off to make staff open their shift first.</p></Card>
+      <Card title="OPD visit payment"><div className="grid gap-2 sm:grid-cols-1">{flag("OPD_FEE_BEFORE_VISIT", "An OPD visit can start only after the OPD consultation bill is paid at Reception")}</div><p className="mt-2 text-xs text-slate-500">Reception creates the bill with the OPD consultation, takes the payment, then starts the visit. Follow-up visits, appointments that carry a booking fee and emergencies are not held up. One paid bill starts one visit.</p></Card>
+      <Card title="Patient registration fee"><RegistrationFeeSettings get={get} save={(key, value) => put.mutate({ key, value })} saving={put.isPending} /></Card>
+      <Card title="Appointment booking fee"><BookingFeeSettings get={get} save={(key, value) => put.mutate({ key, value })} saving={put.isPending} /></Card>
       <Card title="Print header (shown on bills, receipts and prescriptions)">
         <form className="grid gap-2 sm:grid-cols-2" onSubmit={(e) => { e.preventDefault(); const v = Object.fromEntries(Object.entries(form).filter(([, x]) => x && String(x).trim())); put.mutate({ key: "PRINT_HEADER", value: v }); }}>
           {([["hospitalName", "Hospital name"], ["tagline", "Tagline"], ["address", "Address"], ["phone", "Phone"], ["email", "Email"], ["gstin", "GSTIN"]] as const).map(([k, label]) => <Field key={k} label={label}><Input value={form[k] ?? ""} onChange={(e) => setHdr({ ...form, [k]: e.target.value })} /></Field>)}
           <div className="sm:col-span-2"><Button type="submit" loading={put.isPending} disabled={!form["hospitalName"]}>Save header</Button></div>
         </form>
       </Card>
+      <FooterCard value={(get("PRINT_FOOTER")?.value as Record<string, string> | null) ?? null} saving={put.isPending} onSave={(v) => put.mutate({ key: "PRINT_FOOTER", value: v })} />
       <ErrorNote error={put.error} />
+      <NumberingCard />
     </div>
   );
 }
@@ -175,14 +207,16 @@ export default function AdminPage() {
   const tabs: { id: Tab; label: string; perm: string }[] = [
     { id: "users", label: "Staff", perm: "ADMIN_USERS" }, { id: "prices", label: "Price list", perm: "ADMIN_MASTERS" }, { id: "wards", label: "Wards and beds", perm: "ADMIN_MASTERS" },
     { id: "doctors", label: "Doctors and departments", perm: "ADMIN_MASTERS" }, { id: "settings", label: "Settings", perm: "ADMIN_SETTINGS" },
+    { id: "privacy", label: "Privacy", perm: "PRIVACY_MANAGE" }, { id: "import", label: "Data import", perm: "DATA_IMPORT" }, { id: "integrations", label: "Integrations", perm: "ADMIN_INTEGRATIONS" },
+    { id: "earnings", label: "Earnings split", perm: "EARNINGS_CONFIGURE" }, { id: "abdm", label: "ABDM", perm: "ADMIN_SETTINGS" }, { id: "ai", label: "AI assistant", perm: "AI_CONFIGURE" },
   ];
   const allowed = tabs.filter((t) => can(t.perm));
   const [tab, setTab] = useState<Tab>(allowed[0]?.id ?? "users");
   return (
-    <Gate anyOf={["ADMIN_USERS", "ADMIN_MASTERS", "ADMIN_SETTINGS"]}>
+    <Gate anyOf={["ADMIN_USERS", "ADMIN_MASTERS", "ADMIN_SETTINGS", "PRIVACY_MANAGE", "DATA_IMPORT", "ADMIN_INTEGRATIONS", "EARNINGS_CONFIGURE", "AI_CONFIGURE"]}>
       <PageHeader title="Administration" />
       <Tabs tabs={allowed} value={tab} onChange={setTab} />
-      {tab === "users" && <Users />}{tab === "prices" && <Prices />}{tab === "wards" && <Wards />}{tab === "doctors" && <Doctors />}{tab === "settings" && <Settings />}
+      {tab === "users" && <Users />}{tab === "prices" && <Prices />}{tab === "wards" && <Wards />}{tab === "doctors" && <Doctors />}{tab === "settings" && <Settings />}{tab === "privacy" && <PrivacyRequests />}{tab === "import" && <DataImport />}{tab === "integrations" && <IntegrationsAdmin />}{tab === "earnings" && <EarningsAdmin />}{tab === "abdm" && <AbdmAdmin />}{tab === "ai" && <AiAdmin />}
     </Gate>
   );
 }

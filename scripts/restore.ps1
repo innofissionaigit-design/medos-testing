@@ -20,4 +20,9 @@ if ($exists) { throw "Database '$Database' already exists. Restore into a new na
 & "$pg\psql.exe" -h $HostName -p $Port -U $User -d postgres -c "CREATE DATABASE `"$Database`"" | Out-Null
 & "$pg\pg_restore.exe" -h $HostName -p $Port -U $User -d $Database --no-owner --no-privileges --exit-on-error $File
 if ($LASTEXITCODE -ne 0) { throw "pg_restore failed with exit code $LASTEXITCODE" }
+# Backups are taken with --no-privileges, so a restored database has the row-level security policies but none of the grants:
+# re-apply them (docs/rls.md). Without this the API's restricted login can read nothing and the login functions are open to everyone.
+$grants = Join-Path $PSScriptRoot '../packages/database/ops/rls-grants.sql'
+& "$pg\psql.exe" -h $HostName -p $Port -U $User -d $Database -v ON_ERROR_STOP=1 -q -f $grants | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Re-applying the row-level security privileges failed with exit code $LASTEXITCODE" }
 Write-Host "Restored into database '$Database'."

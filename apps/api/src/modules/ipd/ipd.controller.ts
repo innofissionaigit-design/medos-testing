@@ -129,6 +129,12 @@ export class IpdController {
 
   // ───── charges ─────
 
+  @RequirePermissions("INVOICE_READ")
+  @Get("charges/unbilled")
+  async unbilledCharges(@Ctx() ctx: RequestContext) {
+    return { data: await this.charges.unbilled(ctx) };
+  }
+
   @RequirePermissions("ADMISSION_READ")
   @Get("admissions/:id/charges")
   async listCharges(@Ctx() ctx: RequestContext, @Param("id") admissionId: string, @Query() query: unknown) {

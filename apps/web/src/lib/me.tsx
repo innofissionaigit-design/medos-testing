@@ -10,6 +10,8 @@ export interface Me {
   facility: { id: string; name: string; code: string; timezone: string } | null;
   facilities: { id: string; name: string; code: string }[];
   roles: string[]; permissions: string[];
+  /** What clinical data this person may see: everything, only their own patients (doctor), or only their departments. */
+  dataScope?: { kind: "ALL" | "DOCTOR" | "DEPARTMENT"; departments: { id: string; name: string }[] };
 }
 export type Features = { PHARMACY_ENABLED: boolean; IPD_ENABLED: boolean; NURSING_ENABLED: boolean };
 

@@ -52,13 +52,32 @@ model Patient {
   status                 ActiveStatus @default(ACTIVE)
   /// Optimistic-concurrency token; incremented on every demographic update.
   version                Int          @default(1)
+  /// Set when this record was found to be a duplicate and was linked to the real patient (docs/patient-merge.md). Records are never moved:
+  /// everything stays on this patient and the real patient's chart reads both. Once set it can be re-pointed, never cleared (no undo).
+  mergedIntoId           String?      @db.Uuid
+  mergedAt               DateTime?    @db.Timestamptz(3)
+  mergedById             String?      @db.Uuid
+  mergeReason            String?
   createdById            String       @db.Uuid
   createdAt              DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt              DateTime     @updatedAt @db.Timestamptz(3)
 
+  mergedInto  Patient?            @relation("PatientMerge", fields: [tenantId, mergedIntoId], references: [tenantId, id], onDelete: Restrict)
+  mergedFrom  Patient[]           @relation("PatientMerge")
   facility    Facility            @relation(fields: [tenantId, registeredFacilityId], references: [tenantId, id], onDelete: Restrict)
   identifiers  PatientIdentifier[]
   encounters   Encounter[]
+  testOrders   TestOrder[]
+  testBillingLines TestBillingLine[]
+  labSamples   LabSample[]
+  labResults   LabResult[]
+  radStudies   RadStudy[]
+  policies     PatientPolicy[]
+  appointmentRequests AppointmentRequest[]
+  teleconsults Teleconsult[]
+  abhaLinks    AbhaLink[]
+  aiDrafts     AiDraft[]
+  claims       Claim[]
   appointments Appointment[]
   queueEntries QueueEntry[]
   observations Observation[]
@@ -73,11 +92,18 @@ model Patient {
   charges      Charge[]
   nursingNotes NursingNote[]
   nursingTasks NursingTask[]
+  consents     PatientConsent[]
+  dataRequests PatientDataRequest[]
   administrations MedicationAdministration[]
   intakeOutputs IntakeOutput[]
+  advanceDeposits AdvanceDeposit[]
+  prescriptionScans PrescriptionScan[]
+  prescriptionShares PrescriptionShare[]
+  registration PatientRegistration?
 
   @@unique([tenantId, id])
   @@index([tenantId, mobile])
+  @@index([tenantId, mergedIntoId])
   @@index([tenantId, createdAt(sort: Desc)])
   @@index([searchName(ops: raw("gin_trgm_ops"))], type: Gin, map: "Patient_searchName_trgm")
   @@index([mobile(ops: raw("gin_trgm_ops"))], type: Gin, map: "Patient_mobile_trgm")
@@ -110,4 +136,118 @@ model IdempotencyKey {
   createdAt    DateTime @default(now()) @db.Timestamptz(3)
 
   @@id([tenantId, scope, key])
+}
+
+enum ConsentPurpose {
+  PRIVACY_NOTICE_ACKNOWLEDGED
+  APPOINTMENT_REMINDERS
+}
+
+enum ConsentStatus {
+  GRANTED
+  WITHDRAWN
+}
+
+enum ConsentMethod {
+  VERBAL
+  WRITTEN
+  DIGITAL
+}
+
+/// Append-only record of what a patient agreed to or withdrew. The current state of a purpose is its newest row; history is never edited (a database trigger refuses updates and deletes).
+/// The purposes and notice wording are placeholders for the legal review (docs/reviews/pending-decisions.md): this records facts, it does not decide what consent is required.
+model PatientConsent {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String         @db.Uuid
+  patientId     String         @db.Uuid
+  purpose       ConsentPurpose
+  status        ConsentStatus
+  method        ConsentMethod
+  /// Which version of the hospital's notice the patient saw (free text set by the hospital).
+  noticeVersion String?
+  note          String?
+  recordedById  String         @db.Uuid
+  recordedAt    DateTime       @default(now()) @db.Timestamptz(3)
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, patientId, purpose, recordedAt])
+}
+
+enum DataRequestType {
+  ACCESS
+  CORRECTION
+  ERASURE
+  GRIEVANCE
+}
+
+enum DataRequestStatus {
+  OPEN
+  IN_PROGRESS
+  COMPLETED
+  REJECTED
+}
+
+/// A log of requests a patient makes about their data. It tracks the request and its outcome only: nothing here erases or changes clinical records.
+model PatientDataRequest {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  patientId    String            @db.Uuid
+  type         DataRequestType
+  status       DataRequestStatus @default(OPEN)
+  details      String
+  receivedOn   DateTime          @db.Date
+  dueOn        DateTime?         @db.Date
+  resolution   String?
+  closedAt     DateTime?         @db.Timestamptz(3)
+  closedById   String?           @db.Uuid
+  version      Int               @default(1)
+  createdById  String            @db.Uuid
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime          @updatedAt @db.Timestamptz(3)
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, status, receivedOn])
+  @@index([tenantId, patientId])
+}
+
+// ───────────────────────── Registration fee (docs/registration-fee.md) ─────────────────────────
+
+enum RegistrationFeeStatus {
+  /// The patient was registered where nobody could take the fee (for example by a booking bot): it is collected, or exempted, at the front desk.
+  PENDING
+  PAID
+  EXEMPTED
+}
+
+/// One row per patient registered with a registration fee. The unique patient makes a second charge impossible; patients registered before the fee was
+/// introduced (or imported from an old system) have no row and are never charged. PAID points to the registration invoice; EXEMPTED carries who and why.
+model PatientRegistration {
+  id              String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String                @db.Uuid
+  facilityId      String                @db.Uuid
+  patientId       String                @db.Uuid
+  status          RegistrationFeeStatus @default(PENDING)
+  /// The fee at the time of registration, so later changes of the setting never rewrite history.
+  amount          Decimal               @db.Decimal(14, 2)
+  invoiceId       String?               @unique @db.Uuid
+  exemptionReason String?
+  exemptedById    String?               @db.Uuid
+  settledAt       DateTime?             @db.Timestamptz(3)
+  settledById     String?               @db.Uuid
+  createdById     String                @db.Uuid
+  createdAt       DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime              @updatedAt @db.Timestamptz(3)
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient  Patient  @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  invoice  Invoice? @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, patientId])
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, createdAt(sort: Desc)])
+  @@index([tenantId, facilityId, status])
 }

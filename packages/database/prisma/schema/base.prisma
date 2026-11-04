@@ -56,6 +56,17 @@ model Facility {
 
   tenant          Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   userFacilities  UserFacility[]
+  apiClients      ApiClient[]
+  shareRules      DoctorShareRule[]
+  shareEntries    DoctorShareEntry[]
+  stockLocations  StockLocation[]
+  doctorPayouts   DoctorPayout[]
+  labDefinitions  LabTestDefinition[]
+  stockTransfers  StockTransfer[]
+  prescriptionTemplates PrescriptionTemplate[]
+  prescriptionScans PrescriptionScan[]
+  ocrConfig       OcrConfig?
+  registrations   PatientRegistration[]
   numberSequences NumberSequence[]
   numberConfigs   NumberSequenceConfig[]
   departments     Department[]
@@ -91,6 +102,8 @@ model User {
   status            ActiveStatus @default(ACTIVE)
   failedLoginCount  Int          @default(0)
   lockedUntil       DateTime?    @db.Timestamptz(3)
+  /// The hidden user behind an API client (an outside system or a bot, docs/integration-api.md). It can never sign in with a password.
+  isService         Boolean      @default(false)
   createdAt         DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt         DateTime     @updatedAt @db.Timestamptz(3)
 
@@ -99,6 +112,10 @@ model User {
   roles      UserRole[]
   tokens     RefreshToken[]
   practitioners Practitioner[]
+  departments   UserDepartment[]
+  apiClient     ApiClient?
+  prescriptionTemplates PrescriptionTemplate[]
+  employees     Employee[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, username])
@@ -127,6 +144,7 @@ model Role {
   tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   permissions RolePermission[]
   users       UserRole[]
+  apiClients  ApiClient[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, name])
@@ -226,4 +244,101 @@ model NumberSequence {
   facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
 
   @@id([tenantId, facilityId, type, periodKey])
+}
+
+// ───────────────────────── API clients (integrations) ─────────────────────────
+
+enum ApiClientStatus {
+  ACTIVE
+  REVOKED
+}
+
+/// An outside system or bot that calls the API with a key instead of a person's login (docs/integration-api.md). It acts as a hidden service user whose
+/// role holds only the abilities it was given, at one facility. Only the SHA-256 of the key is stored; the key is shown once, when it is created.
+model ApiClient {
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String          @db.Uuid
+  facilityId   String          @db.Uuid
+  userId       String          @db.Uuid
+  roleId       String          @db.Uuid
+  name         String
+  /// The first characters of the key, so people can tell keys apart. Not a secret.
+  keyPrefix    String
+  keyHash      String
+  /// The abilities chosen when it was created (FIND_PATIENTS, REGISTER_PATIENTS, BOOK_APPOINTMENTS); the role holds the matching permissions.
+  abilities    String[]
+  /// Addresses (or CIDR ranges) the key may be used from; empty means from anywhere.
+  allowedIps   String[]        @default([])
+  status       ApiClientStatus @default(ACTIVE)
+  expiresAt    DateTime?       @db.Timestamptz(3)
+  lastUsedAt   DateTime?       @db.Timestamptz(3)
+  createdById  String          @db.Uuid
+  createdAt    DateTime        @default(now()) @db.Timestamptz(3)
+  revokedAt    DateTime?       @db.Timestamptz(3)
+  revokedById  String?         @db.Uuid
+  revokeReason String?
+
+  user     User     @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+  role     Role     @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  webhook  WebhookEndpoint?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+  @@unique([keyHash])
+  @@unique([tenantId, userId])
+  @@index([tenantId, status])
+}
+
+// ───────────────────────── Integration webhooks (docs/integration-api.md) ─────────────────────────
+
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+/// Where one integration key wants to hear about changes to the appointments it made. The signing secret is shown once and kept only encrypted.
+model WebhookEndpoint {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  facilityId  String       @db.Uuid
+  clientId    String       @db.Uuid
+  url         String
+  secretEnc   String
+  secretLast4 String
+  events      String[]
+  status      ActiveStatus @default(ACTIVE)
+  createdById String       @db.Uuid
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime     @updatedAt @db.Timestamptz(3)
+
+  client     ApiClient         @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Restrict)
+  deliveries WebhookDelivery[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, clientId])
+}
+
+/// One event to send, with its retries. The payload carries identifiers, times and the status only: no patient details.
+model WebhookDelivery {
+  id            String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String                @db.Uuid
+  endpointId    String                @db.Uuid
+  event         String
+  appointmentId String                @db.Uuid
+  payload       Json
+  status        WebhookDeliveryStatus @default(PENDING)
+  attempts      Int                   @default(0)
+  nextAttemptAt DateTime              @default(now()) @db.Timestamptz(3)
+  lastStatus    Int?
+  lastError     String?
+  deliveredAt   DateTime?             @db.Timestamptz(3)
+  createdAt     DateTime              @default(now()) @db.Timestamptz(3)
+
+  endpoint WebhookEndpoint @relation(fields: [tenantId, endpointId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, endpointId, createdAt(sort: Desc)])
 }

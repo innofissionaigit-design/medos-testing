@@ -5,6 +5,7 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { chartPatientIds } from "../patients/patient-links";
 import { NumberingService } from "../numbering/numbering.service";
 import { balanceDue, computeLine, computeTotals, fmt, netReceived, refundable, type LineAmounts } from "./billing.domain";
 import { LedgerService, type Method } from "./ledger.service";
@@ -23,6 +24,11 @@ export const createInvoiceSchema = z.object({
   lines: z.array(lineInput).min(1).max(50),
 }).strict();
 
+/** Discount given by an approver (INVOICE_DISCOUNT) on lines of a DRAFT invoice, without needing to edit the bill itself. */
+export const discountInvoiceSchema = z.object({
+  version: z.number().int().min(1), reason: z.string().trim().min(5).max(240),
+  lines: z.array(z.object({ lineNo: z.number().int().min(1), discountAmount: amount() }).strict()).min(1).max(50),
+}).strict();
 export const updateInvoiceSchema = z.object({
   version: z.number().int().min(1), notes: z.string().trim().max(500).nullable().optional(), lines: z.array(lineInput).min(1).max(50),
 }).strict();
@@ -36,11 +42,12 @@ export const listInvoicesSchema = z.object({
   patientId: uuid.optional(), encounterId: uuid.optional(),
   status: z.enum(["DRAFT", "ISSUED", "PARTIALLY_PAID", "PAID", "CANCELLED", "REFUNDED"]).optional(),
   outstanding: z.enum(["true", "false"]).optional().transform((v) => v === "true"),
+  kind: z.enum(["OPD", "IPD", "PHARMACY", "OTHER", "REGISTRATION"]).optional(),
   q: z.string().trim().max(40).optional(),
   page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25),
 }).strict();
 
-interface ResolvedLine { serviceId: string | null; description: string; quantity: Decimal; unitPrice: Decimal; taxPercent: Decimal; discount: Decimal; amounts: LineAmounts }
+interface ResolvedLine { serviceId: string | null; hsnSac: string | null; description: string; quantity: Decimal; unitPrice: Decimal; taxPercent: Decimal; discount: Decimal; amounts: LineAmounts }
 
 const INVOICE_INCLUDE = {
   patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" as const }, select: { value: true } } } },
@@ -61,7 +68,7 @@ export function toInvoiceView(i: InvoiceFull) {
     netReceived: fmt(netReceived(money)), balanceDue: i.status === "DRAFT" || i.status === "CANCELLED" || i.status === "REFUNDED" ? "0.00" : fmt(balanceDue(money)), refundable: fmt(refundable(money)),
     notes: i.notes, issuedAt: i.issuedAt, cancelledAt: i.cancelledAt, cancelReason: i.cancelReason, version: i.version, createdAt: i.createdAt,
     lines: i.lines.map((l) => ({
-      lineNo: l.lineNo, serviceId: l.serviceId, description: l.description, quantity: l.quantity.toString(), unitPrice: fmt(l.unitPrice),
+      lineNo: l.lineNo, serviceId: l.serviceId, hsnSac: l.hsnSac, description: l.description, quantity: l.quantity.toString(), unitPrice: fmt(l.unitPrice),
       discountAmount: fmt(l.discountAmount), taxPercent: fmt(l.taxPercent), taxAmount: fmt(l.taxAmount), lineTotal: fmt(l.lineTotal), sourceType: l.sourceType,
     })),
     receipts: i.receipts.map((r) => ({ id: r.id, receiptNumber: r.receiptNumber, total: fmt(r.total), receivedAt: r.receivedAt, payments: r.payments.map((p) => ({ method: p.method, amount: fmt(p.amount), reference: p.reference })) })),
@@ -90,8 +97,8 @@ export class InvoicesService {
   async list(ctx: RequestContext, q: z.infer<typeof listInvoicesSchema>) {
     const where: Prisma.InvoiceWhereInput = {
       tenantId: ctx.tenantId, facilityId: ctx.facilityId,
-      ...(q.patientId ? { patientId: q.patientId } : {}), ...(q.encounterId ? { encounterId: q.encounterId } : {}),
-      ...(q.status ? { status: q.status } : {}),
+      ...(q.patientId ? { patientId: { in: (await chartPatientIds(this.prisma, ctx.tenantId, q.patientId)) ?? [q.patientId] } } : {}), ...(q.encounterId ? { encounterId: q.encounterId } : {}),
+      ...(q.status ? { status: q.status } : {}), ...(q.kind ? { kind: q.kind } : {}),
       ...(q.outstanding ? { status: { in: ["ISSUED", "PARTIALLY_PAID"] } } : {}),
       ...(q.q ? { invoiceNumber: { contains: q.q, mode: "insensitive" } } : {}),
     };
@@ -147,6 +154,51 @@ export class InvoicesService {
       if (res.count !== 1) throw new DomainError("STALE_VERSION", "This invoice was changed by someone else", 409);
       await this.audit.record(tx, actorOf(ctx), { action: "INVOICE_DRAFT_UPDATED", entityType: "Invoice", entityId: id, metadata: { lines: resolved.length, total: fmt(totals.total) } });
       if (totals.discountTotal.gt(0)) await this.audit.record(tx, actorOf(ctx), { action: "INVOICE_DISCOUNT_APPLIED", entityType: "Invoice", entityId: id, metadata: { discount: fmt(totals.discountTotal) } });
+      return this.view(tx, ctx, id);
+    });
+  }
+
+  /**
+   * Sets the discount on chosen lines of a DRAFT invoice. Lines are updated in place (never rewritten) so links to the
+   * charge or dispense they bill are kept; totals are recomputed here and the change is audited with before/after and reason.
+   */
+  async applyDiscount(ctx: RequestContext, id: string, input: z.infer<typeof discountInvoiceSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      const inv = await this.ledger.lock(tx, ctx, id);
+      if (inv.status !== "DRAFT") throw new DomainError("INVOICE_ALREADY_ISSUED", "A discount can only be given before the invoice is issued. Use a credit note instead.", 409);
+      if (inv.version !== input.version) throw new DomainError("STALE_VERSION", "This invoice was changed by someone else. Reload and try again.", 409, { currentVersion: inv.version });
+      const lines = await tx.invoiceLine.findMany({ where: { tenantId: ctx.tenantId, invoiceId: id }, orderBy: { lineNo: "asc" } });
+      const wanted = new Map(input.lines.map((l) => [l.lineNo, l.discountAmount]));
+      if (wanted.size !== input.lines.length) throw new DomainError("VALIDATION_FAILED", "Each line can appear only once", 400, [{ path: "lines", message: "Duplicate line" }]);
+      for (const n of wanted.keys()) if (!lines.some((l) => l.lineNo === n)) throw new DomainError("VALIDATION_FAILED", `Line ${n} is not on this invoice`, 400, [{ path: "lines", message: "Unknown line" }]);
+
+      const computed = lines.map((l) => {
+        const discount = wanted.get(l.lineNo) ?? new Decimal(l.discountAmount.toString());
+        try {
+          return { line: l, discount, amounts: computeLine({ quantity: l.quantity.toString(), unitPrice: l.unitPrice.toString(), discountAmount: discount, taxPercent: l.taxPercent.toString() }) };
+        } catch (e) {
+          throw new DomainError("INVALID_AMOUNT", `Line ${l.lineNo}: ${e instanceof RangeError ? e.message : "invalid discount"}`, 400, [{ path: "lines", message: "Invalid discount" }]);
+        }
+      });
+      const changes: { lineNo: number; from: string; to: string }[] = [];
+      for (const c of computed) {
+        const before = new Decimal(c.line.discountAmount.toString());
+        if (!wanted.has(c.line.lineNo) || before.eq(c.amounts.discount)) continue;
+        await tx.invoiceLine.updateMany({
+          where: { id: c.line.id, tenantId: ctx.tenantId },
+          data: { discountAmount: c.amounts.discount.toFixed(2), taxAmount: c.amounts.tax.toFixed(2), lineTotal: c.amounts.total.toFixed(2) },
+        });
+        changes.push({ lineNo: c.line.lineNo, from: fmt(before), to: fmt(c.amounts.discount) });
+      }
+      if (changes.length === 0) throw new DomainError("VALIDATION_FAILED", "No discount was changed", 400, [{ path: "lines", message: "No change" }]);
+
+      const totals = computeTotals(computed.map((c) => c.amounts));
+      const res = await tx.invoice.updateMany({
+        where: { id, tenantId: ctx.tenantId, status: "DRAFT", version: input.version },
+        data: { subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2), version: { increment: 1 } },
+      });
+      if (res.count !== 1) throw new DomainError("STALE_VERSION", "This invoice was changed by someone else", 409);
+      await this.audit.record(tx, actorOf(ctx), { action: "INVOICE_DISCOUNT_APPLIED", entityType: "Invoice", entityId: id, metadata: { reason: input.reason, lines: changes, discount: fmt(totals.discountTotal), total: fmt(totals.total) } });
       return this.view(tx, ctx, id);
     });
   }
@@ -223,7 +275,7 @@ export class InvoicesService {
    */
   async createIssuedFromSource(
     tx: Db, ctx: RequestContext,
-    input: { patientId: string; encounterId: string | null; kind: "OPD" | "IPD" | "PHARMACY" | "OTHER"; notes?: string; lines: { description: string; quantity: Decimal; unitPrice: Decimal; taxPercent: Decimal; sourceType: string; sourceId: string }[] },
+    input: { patientId: string; encounterId: string | null; kind: "OPD" | "IPD" | "PHARMACY" | "OTHER" | "REGISTRATION"; notes?: string; lines: { description: string; quantity: Decimal; unitPrice: Decimal; taxPercent: Decimal; sourceType: string; sourceId: string; hsnSac?: string | null }[] },
   ) {
     const amounts = input.lines.map((l) => computeLine({ quantity: l.quantity, unitPrice: l.unitPrice, discountAmount: 0, taxPercent: l.taxPercent }));
     const totals = computeTotals(amounts);
@@ -236,7 +288,7 @@ export class InvoicesService {
     });
     await tx.invoiceLine.createMany({
       data: input.lines.map((l, i) => ({
-        tenantId: ctx.tenantId, invoiceId: inv.id, lineNo: i + 1, description: l.description, quantity: l.quantity.toString(), unitPrice: l.unitPrice.toFixed(2), discountAmount: "0.00",
+        tenantId: ctx.tenantId, invoiceId: inv.id, lineNo: i + 1, description: l.description, hsnSac: l.hsnSac ?? null, quantity: l.quantity.toString(), unitPrice: l.unitPrice.toFixed(2), discountAmount: "0.00",
         taxPercent: l.taxPercent.toFixed(2), taxAmount: (amounts[i] as LineAmounts).tax.toFixed(2), lineTotal: (amounts[i] as LineAmounts).total.toFixed(2), sourceType: l.sourceType, sourceId: l.sourceId,
       })),
     });
@@ -261,13 +313,14 @@ export class InvoicesService {
     const resolved: ResolvedLine[] = [];
     for (const [i, l] of inputs.entries()) {
       let serviceId: string | null = null;
+      let hsnSac: string | null = null;
       let description: string;
       let unitPrice: Decimal;
       let taxPercent: Decimal;
       if ("serviceId" in l) {
         const s = byId.get(l.serviceId);
         if (!s) throw new DomainError("VALIDATION_FAILED", "A selected service does not exist or is inactive", 400, [{ path: `lines.${i}.serviceId`, message: "Unknown or inactive service" }]);
-        serviceId = s.id; description = s.name; unitPrice = new Decimal(s.price.toString()); taxPercent = new Decimal(s.taxPercent.toString());
+        serviceId = s.id; hsnSac = s.sacCode; description = s.name; unitPrice = new Decimal(s.price.toString()); taxPercent = new Decimal(s.taxPercent.toString());
       } else {
         description = l.description; unitPrice = l.unitPrice; taxPercent = l.taxPercent;
       }
@@ -281,7 +334,7 @@ export class InvoicesService {
       } catch (e) {
         throw new DomainError("INVALID_AMOUNT", e instanceof RangeError ? e.message : "Invalid line amounts", 400, [{ path: `lines.${i}.discountAmount`, message: "Invalid discount" }]);
       }
-      resolved.push({ serviceId, description, quantity: l.quantity, unitPrice, taxPercent, discount, amounts });
+      resolved.push({ serviceId, hsnSac, description, quantity: l.quantity, unitPrice, taxPercent, discount, amounts });
     }
     return resolved;
   }
@@ -289,7 +342,7 @@ export class InvoicesService {
   private async writeLines(tx: Db, ctx: RequestContext, invoiceId: string, lines: ResolvedLine[]): Promise<void> {
     await tx.invoiceLine.createMany({
       data: lines.map((l, i) => ({
-        tenantId: ctx.tenantId, invoiceId, lineNo: i + 1, serviceId: l.serviceId, description: l.description,
+        tenantId: ctx.tenantId, invoiceId, lineNo: i + 1, serviceId: l.serviceId, hsnSac: l.hsnSac, description: l.description,
         quantity: l.quantity.toString(), unitPrice: l.unitPrice.toFixed(2), discountAmount: l.discount.toFixed(2), taxPercent: l.taxPercent.toFixed(2),
         taxAmount: l.amounts.tax.toFixed(2), lineTotal: l.amounts.total.toFixed(2),
       })),

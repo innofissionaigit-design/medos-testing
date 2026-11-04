@@ -1,0 +1,27 @@
+# HTTPS reverse proxy for MedOS (docker compose --profile proxy). SITE_ADDRESS is the public host name.
+#  - A public host name gets a free certificate (Let's Encrypt) that Caddy renews itself; ports 80 and 443 must be reachable.
+#  - "localhost" uses Caddy's own local certificate authority, which is fine for trying the setup but not trusted by browsers.
+# Only the web app is exposed. Browsers never talk to the API: the web app's server side does, over the compose network.
+{$SITE_ADDRESS:localhost} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "same-origin"
+		-Server
+	}
+
+	# Patient files are at most 5 MB; leave room for the request around them.
+	request_body {
+		max_size 8MB
+	}
+
+	reverse_proxy web:3000 {
+		# Replace whatever the client sent: the login rate limit trusts this header, so it must be the real address.
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		health_uri /login
+		health_interval 30s
+	}
+}

@@ -4,7 +4,7 @@
     {
       "name": "Debug API (needs build: pnpm --filter @medos/api build)",
       "type": "node", "request": "launch", "program": "${workspaceFolder}/apps/api/dist/main.js", "cwd": "${workspaceFolder}",
-      "env": { "DATABASE_URL": "postgresql://medos@127.0.0.1:54329/medos_dev", "JWT_ACCESS_SECRET": "dev-only-secret-dev-only-secret-0001", "SCRYPT_LOG_N": "14", "PORT": "4000", "PRISMA_ENGINES_CACHE_DIR": "D:\\.cache\\prisma" },
+      "env": { "DATABASE_URL": "postgresql://medos@127.0.0.1:54329/medos_dev", "JWT_ACCESS_SECRET": "dev-only-secret-dev-only-secret-0001", "PORT": "4000", "PRISMA_ENGINES_CACHE_DIR": "D:\\.cache\\prisma" },
       "sourceMaps": true, "skipFiles": ["<node_internals>/**"]
     },
     {

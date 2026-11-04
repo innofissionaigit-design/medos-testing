@@ -1,0 +1,9 @@
+# Enable with: systemctl enable --now medos-backup-status.timer   (runs medos-backup@status.service)
+[Unit]
+Description=MedOS backup health check
+[Timer]
+Unit=medos-backup@status.service
+OnCalendar=*:0/30
+Persistent=true
+[Install]
+WantedBy=timers.target

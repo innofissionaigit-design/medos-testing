@@ -1,6 +1,6 @@
 # ADR-004: Multi-tenancy model
 
-**Status:** Accepted for model; RLS question open (gap G5)
+**Status:** Accepted. The row-level security question is decided in [ADR-010](010-row-level-security.md) (gap G5 closed in code; staging and production not yet switched)
 
 ## Context
 Many hospitals share one platform. Cross-tenant data exposure is a release-blocking defect. A tenant may later own several facilities; a hospital is not a database.
@@ -14,7 +14,7 @@ Shared database, shared schema. Every tenant-owned table has a non-null `tenantI
 5. Unknown and cross-tenant IDs return the same not-found response (no existence leak).
 6. Every new tenant-owned entity ships cross-tenant, cross-facility, role and IDOR tests.
 
-**Open:** PostgreSQL Row-Level Security as a second layer (session variable `app.tenant_id` set per transaction). To be evaluated in Stage 2 and recorded as an amendment to this ADR.
+**Amendment:** PostgreSQL Row-Level Security was adopted as a second layer (transaction-local `app.tenant_id`, a restricted application role, a policy on every tenant table): see [ADR-010](010-row-level-security.md). The rules above still apply; RLS backs them up and does not replace them.
 
 ## Alternatives considered
 - **Database per tenant:** strongest isolation, but heavy operations, migrations and cost for small hospitals.

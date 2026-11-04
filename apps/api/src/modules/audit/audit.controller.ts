@@ -40,6 +40,18 @@ export class AuditController {
       }),
       this.prisma.auditEvent.count({ where }),
     ]);
-    return paginate(items, total, q.page, q.pageSize);
+    // Show who acted by name; tenant-scoped so an id from elsewhere can never resolve.
+    const actorIds = [...new Set(items.flatMap((e) => (e.actorUserId ? [e.actorUserId] : [])))];
+    const users = actorIds.length ? await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: actorIds } }, select: { id: true, fullName: true, username: true } }) : [];
+    const byId = new Map(users.map((u) => [u.id, u]));
+    return paginate(items.map((e) => ({ ...e, actorName: e.actorUserId ? byId.get(e.actorUserId)?.fullName ?? null : null, actorUsername: e.actorUserId ? byId.get(e.actorUserId)?.username ?? null : null })), total, q.page, q.pageSize);
+  }
+
+  /** Staff of this tenant, for the audit "user" filter. Names only; no roles, contact details or status. */
+  @RequirePermissions("AUDIT_READ")
+  @Get("actors")
+  async actors(@Ctx() ctx: RequestContext) {
+    const users = await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId }, select: { id: true, fullName: true, username: true }, orderBy: { fullName: "asc" }, take: 1000 });
+    return { data: users };
   }
 }

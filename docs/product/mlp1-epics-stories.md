@@ -10,7 +10,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 1.2 | As a user my session stays alive and can be ended | 15-min access token, rotating refresh token, reuse revokes the family, logout revokes | Done |
 | 1.3 | As a user I change my password | Old password required; other sessions revoked | Done |
 | 1.4 | As ADM I manage users and roles | Create, deactivate, assign roles; change takes effect on the next request | Done |
-| 1.5 | As ADM I use custom roles | API supports custom roles; no dedicated editor screen confirmed | Gap (UI) |
+| 1.5 | As ADM I use custom roles | Create a role and choose its permissions in Administration (roles card) | Done (UI untested) |
 | 1.6 | As the system I enforce permissions server-side | Every route declares a permission; 403 with stable code otherwise | Done |
 | 1.7 | As the system I isolate tenants | Cross-tenant id sweep returns 404 on every route | Done |
 | 1.8 | As the system I rate-limit auth endpoints | 429 after threshold (per instance) | Done / Deferred (shared limiter) |
@@ -24,7 +24,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 2.4 | ADM maintains the service catalogue and prices | Used for charges and invoices | Done |
 | 2.5 | ADM sets print header/footer, GST details, feature flags | Prints reflect settings; flags hide menus | Done |
 | 2.6 | ADM configures numbering | Concurrency-safe sequences for MRN, visit, admission, invoice, receipt, prescription | Done |
-| 2.7 | Supplier management screen | Create and edit suppliers | Gap (UI) |
+| 2.7 | Supplier management screen | Create, activate and deactivate suppliers (Pharmacy → Suppliers) | Done (UI untested) |
 
 ## E3 Patient registration and identity
 | ID | Story | Acceptance | Status |
@@ -36,7 +36,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 3.5 | REC edits demographics | Optimistic version check; audited | Done |
 | 3.6 | REC uploads a photo and scanned documents | PNG/JPEG/PDF ≤ 5 MB, content-checked; one active photo; remove keeps history | Done |
 | 3.7 | Patient identifiers beyond MRN | Separate identifier model | Done (model) |
-| 3.8 | Patient merge tool | Merge duplicates | Deferred (backlog) |
+| 3.8 | Patient merge tool | Link a duplicate to the real patient; history kept (`docs/patient-merge.md`) | Done |
 
 ## E4 Appointments and OPD queue
 | ID | Story | Acceptance | Status |
@@ -60,7 +60,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 5.5 | DOC creates a prescription | One draft per encounter; allergy matched to every item | Done |
 | 5.6 | DOC signs the consultation | Note becomes immutable; prescription signed with it | Done |
 | 5.7 | DOC amends a signed consultation | Reason required; every version kept with actor and time | Done |
-| 5.8 | DOC stops or amends a signed prescription item | Amendment supersedes; original kept | Done (API) / Gap (UI) |
+| 5.8 | DOC stops or amends a signed prescription item | Amendment supersedes; original kept | Done (API) / Done (UI untested) |
 | 5.9 | Allergy override | Warning shown; acknowledgement audited | Done |
 
 ## E6 Billing and payments
@@ -74,8 +74,10 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 6.6 | MGR applies a discount | INVOICE_DISCOUNT; audited | Done |
 | 6.7 | MGR cancels an invoice or issues a credit note | Reason required; original preserved | Done |
 | 6.8 | Receipts and invoices print | HTML and PDF; reprints stamped DUPLICATE COPY | Done |
-| 6.9 | Advance payments and deposits | | Deferred (backlog) |
+| 6.9 | Advance payments and deposits | Take an advance, apply it to a bill, give it back (`docs/advance-payments.md`) | Done |
 | 6.10 | GST/tax review | Per-line tax, MRP-inclusive medicines | Deferred (external review) |
+| 6.11 | ADM chooses commission or fixed value for doctors; the share is posted to a ledger on every payment and refund and shown on the bill (`docs/earnings-and-reports.md`) | Percentage or fixed rules; advance money counts when applied; refunds reduce it | Done |
+| 6.12 | ADM pays doctors their share with vouchers, tax deducted at source, reversals and statements (`docs/doctor-payouts.md`) | Never more than owed; vouchers never edited or deleted | Done |
 
 ## E7 Pharmacy
 | ID | Story | Acceptance | Status |
@@ -88,8 +90,11 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 7.6 | PHM returns stock to supplier | Ledger PURCHASE_RETURN | Done |
 | 7.7 | PHM adjusts or writes off stock | Reason; ledger ADJUSTMENT/DAMAGE; confirmation | Done |
 | 7.8 | PHM maintains the medicine master | Create and edit; audited | Done |
-| 7.9 | Stock transfer between locations | | Gap |
+| 7.9 | Stock transfer between locations | Locations (ward store, OT store) and transfers with ledgers on both sides, no oversell under concurrency (`docs/stock-transfers.md`) | Done |
 | 7.10 | Ledger reconciles to balances | DB check on every change | Done |
+| 7.11 | PHM sends stock in two steps (sent, then received or sent back) | Stock on the way is in neither place; closed once | Done |
+| 7.12 | NUR takes a medicine from a ward store for an admitted patient | Written to the store's ledger and charged to the admission | Done |
+| 7.13 | Location stock appears in the current, low and near-expiry stock reports | Shown beside the main store | Done |
 
 ## E8 Inpatient: beds and admissions
 | ID | Story | Acceptance | Status |
@@ -116,7 +121,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 |---|---|---|---|
 | 10.1 | DOC marks the patient fit for discharge | Prerequisite for clearances | Done |
 | 10.2 | Departments clear their steps | Configurable steps; each audited | Done |
-| 10.3 | Waive a step with a reason | Reason mandatory; audited | Done (API) / Gap (UI) |
+| 10.3 | Waive a step with a reason | Reason mandatory; audited | Done (API) / Done (UI untested) |
 | 10.4 | Consultant signs the discharge summary | Only the treating consultant | Done |
 | 10.5 | CSH raises the final bill from pending charges | Charges marked billed | Done |
 | 10.6 | Discharge completes only when paid | Part payment still blocks | Done |
@@ -139,14 +144,14 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | ID | Story | Acceptance | Status |
 |---|---|---|---|
 | 13.1 | Print invoice, receipt, prescription, discharge summary, patient label | One document model → HTML or PDF; escaped; audited | Done |
-| 13.2 | Admission form print | | Gap |
-| 13.3 | Indic scripts in PDF | Needs embedded Unicode font | Deferred |
+| 13.2 | Admission form print | Patient, admission, contacts, allergies, consent wording, signature lines; HTML and PDF; English, Bengali or Hindi; reprints stamped (`docs/admission-form.md`) | Done |
+| 13.3 | Indic scripts in PDF | Bengali and Devanagari fonts embedded | Done |
 
 ## E14 Localisation
 | ID | Story | Acceptance | Status |
 |---|---|---|---|
 | 14.1 | User switches the UI to Bengali or Hindi | ~600 strings; fallback to English; Latin digits | Done |
-| 14.2 | Native-speaker translation review | | Deferred |
+| 14.2 | Native-speaker translation review | Includes the Bengali and Hindi admission form wording | Deferred |
 
 ## E15 Quality, security and operations
 | ID | Story | Acceptance | Status |
@@ -156,7 +161,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 15.3 | Backup and verified restore | Scripts; manual drill passed | Done (manual) |
 | 15.4 | Seed realistic synthetic data | 1,000 patients, 12 admissions, 100 medicines, 50 invoices | Done |
 | 15.5 | Docker images, compose, CI | Written, never run | Deferred |
-| 15.6 | PostgreSQL RLS, shared rate limiter, PITR, encryption | | Deferred |
+| 15.6 | PostgreSQL RLS, shared rate limiter, PITR, encryption | RLS and the shared limiter are built and tested; encrypted backups and a point-in-time-recovery rehearsal work in development (`docs/backup.md`); WAL archiving and schedules are not yet set up on staging or production | Done (RLS, limiter, backups) / Deferred (production setup) |
 | 15.7 | Clinical, GST, DPDP, penetration, accessibility reviews | External | Deferred |
 
 ## E16 Shell and UX

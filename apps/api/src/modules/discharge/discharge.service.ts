@@ -4,6 +4,7 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { admissionScope } from "../../common/data-scope";
 import { balanceDue, fmt } from "../billing/billing.domain";
 import { InvoicesService } from "../billing/invoices.service";
 import { ClinicianService } from "../clinical/clinician.service";
@@ -33,7 +34,7 @@ export class DischargeService {
 
   /** Everything the discharge screen needs: each step, what blocks it, the bill, the summary, and whether discharge can complete. */
   async status(ctx: RequestContext, admissionId: string) {
-    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId } });
+    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] } });
     if (!adm) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     return this.evaluate(this.prisma, ctx, adm);
   }
@@ -69,9 +70,14 @@ export class DischargeService {
     const steps = STEP_ORDER.map((step) => {
       const row = done(step);
       const billingAuto = step === "BILLING" && !row && (settled || (!invoice && pendingTotal.isZero() && fitCleared));
+      // Pharmacy clears itself once nothing is left to dispense, so dispensing in the pharmacy updates this checklist without a second step.
+      // If something is still undispensed it stays pending and a pharmacist can still clear or waive it by hand.
+      const pharmacyAuto = step === "PHARMACY" && !row && fitCleared && unresolvedRx === 0;
+      const auto = billingAuto || pharmacyAuto;
+      const autoNote = billingAuto ? "Settled automatically" : pharmacyAuto ? (unfilled.length > 0 ? "All prescribed medicines dispensed" : "Nothing to dispense") : null;
       return {
-        step, required: required.has(step), status: row ? row.status : billingAuto ? "CLEARED" : "PENDING", by: row?.byId ?? null, at: row?.at ?? null, note: row?.note ?? (billingAuto ? "Settled automatically" : null),
-        blockers: row || billingAuto ? [] : blockers[step], automatic: step === "BILLING",
+        step, required: required.has(step), status: row ? row.status : auto ? "CLEARED" : "PENDING", by: row?.byId ?? null, at: row?.at ?? null, note: row?.note ?? autoNote,
+        blockers: row || auto ? [] : blockers[step], automatic: step === "BILLING",
       };
     });
     const summaryOk = !requireSummary || summary?.status === "SIGNED" || summary?.status === "AMENDED";
@@ -146,9 +152,10 @@ export class DischargeService {
         if (!have) await tx.dischargeClearance.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, admissionId, step: "BILLING", status: "CLEARED", note: "No chargeable items", byId: ctx.userId } });
         return { invoice: null, status: await this.evaluate(tx, ctx, adm) };
       }
+      const sacById = new Map((await tx.service.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set(pending.flatMap((c) => (c.serviceId ? [c.serviceId] : [])))] } }, select: { id: true, sacCode: true } })).map((s) => [s.id, s.sacCode]));
       const inv = await this.invoices.createIssuedFromSource(tx, ctx, {
         patientId: adm.patientId, encounterId: adm.encounterId, kind: "IPD", notes: `Final bill for admission ${adm.admissionNumber}`,
-        lines: pending.map((c) => ({ description: c.description, quantity: new Decimal(c.quantity.toString()), unitPrice: new Decimal(c.unitPrice.toString()), taxPercent: new Decimal(c.taxPercent.toString()), sourceType: "CHARGE", sourceId: c.id })),
+        lines: pending.map((c) => ({ description: c.description, quantity: new Decimal(c.quantity.toString()), unitPrice: new Decimal(c.unitPrice.toString()), taxPercent: new Decimal(c.taxPercent.toString()), sourceType: "CHARGE", sourceId: c.id, hsnSac: c.serviceId ? sacById.get(c.serviceId) ?? null : null })),
       });
       const billed = await tx.charge.updateMany({ where: { tenantId: ctx.tenantId, admissionId, status: "PENDING", id: { in: pending.map((c) => c.id) } }, data: { status: "BILLED", invoiceId: inv.id } });
       if (billed.count !== pending.length) throw new DomainError("INVALID_STATE", "Charges changed while billing; try again", 409);

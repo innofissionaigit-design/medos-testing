@@ -1,6 +1,6 @@
 # ADR-009: Platform, session and tooling decisions made during implementation
 
-**Status:** Accepted (with the limitations listed under Consequences)
+**Status:** Accepted (with the limitations listed under Consequences). **Later changes:** decision 1 (scrypt) is replaced by [ADR-011](011-argon2id.md) (Argon2id); decision 2's limiter is now shared across instances through PostgreSQL, still without Redis (`RATE_LIMIT_STORE`, [deployment.md](../deployment.md)); decision 3's S3-compatible driver now exists ([storage.md](../storage.md)); decision 11's Latin-only PDF fonts are replaced by embedded Noto Sans fonts for English, Bengali and Hindi (`apps/api/assets/fonts/`). The decisions are left as written below, as the record of what was decided then.
 
 ## Context
 CLAUDE.md names Argon2, Redis, S3-compatible storage, shadcn/ui and Jest/Vitest. While building MLP-1 several of these were deliberately replaced or deferred, and new decisions (browser session handling) were needed. This ADR records them so documentation matches the implementation (CLAUDE.md §54).

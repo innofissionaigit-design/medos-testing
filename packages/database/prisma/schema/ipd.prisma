@@ -114,6 +114,7 @@ model Admission {
   dischargeType  DischargeType?
   dischargeNote  String?
   finalInvoiceId String? @db.Uuid
+  wardIssues     StockLocationIssue[]
   finalInvoice   Invoice? @relation("AdmissionFinalInvoice", fields: [finalInvoiceId], references: [id], onDelete: Restrict)
 
   @@unique([tenantId, id])

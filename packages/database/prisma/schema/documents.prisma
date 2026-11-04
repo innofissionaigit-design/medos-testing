@@ -32,7 +32,21 @@ model PatientFile {
   removeReason String?
 
   patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  prescriptionScan PrescriptionScan?
+  scanPage PrescriptionScanPage?
 
   @@unique([tenantId, id])
   @@index([tenantId, patientId, status, uploadedAt(sort: Desc)])
+}
+
+// ───────────────────────── shared rate limiting ─────────────────────────
+
+/// Request counters for rate-limited routes (login, token refresh, password change), shared by every API instance.
+/// Not tenant data: the key is a hashed token or a client address plus the route. Rows expire and are swept.
+model RateLimitBucket {
+  key     String   @id
+  count   Int
+  resetAt DateTime @db.Timestamptz(3)
+
+  @@index([resetAt])
 }

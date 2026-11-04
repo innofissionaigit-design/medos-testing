@@ -2,14 +2,27 @@ import { Module } from "@nestjs/common";
 import { APP_FILTER, APP_GUARD } from "@nestjs/core";
 import { AuditService } from "./common/audit.service";
 import { AuthGuard } from "./common/auth.guard";
-import { CONFIG, loadConfig } from "./common/config";
+import { CONFIG, loadConfig, type AppConfig } from "./common/config";
 import { AllExceptionsFilter } from "./common/http-pipeline";
 import { IdempotencyService } from "./common/idempotency.service";
+import { SecretsService } from "./common/secrets";
 import { PrismaService } from "./common/prisma.service";
 import { RateLimitGuard } from "./common/rate-limit.guard";
 import { AppointmentsController } from "./modules/appointments/appointments.controller";
 import { AppointmentsService } from "./modules/appointments/appointments.service";
 import { EncountersController } from "./modules/encounters/encounters.controller";
+import { FollowUpsController } from "./modules/follow-ups/follow-ups.controller";
+import { FollowUpsService } from "./modules/follow-ups/follow-ups.service";
+import { TestOrdersController } from "./modules/test-orders/test-orders.controller";
+import { TestOrdersService } from "./modules/test-orders/test-orders.service";
+import { CashierViewService } from "./modules/test-orders/cashier-view.service";
+import { CashierCollectService } from "./modules/test-orders/cashier-collect.service";
+import { createReminderProvider, REMINDER_PROVIDER } from "./modules/follow-ups/reminder.provider";
+import { PaymentLinkWorker } from "./modules/appointments/payment-link.worker";
+import { PaymentLinksService } from "./modules/appointments/payment-links.service";
+import { createPaymentLinkProvider, PAYMENT_LINK_PROVIDER } from "./modules/appointments/payment-link.provider";
+import { ReminderWorker } from "./modules/follow-ups/reminder.worker";
+import { RemindersService } from "./modules/follow-ups/reminders.service";
 import { EncountersService } from "./modules/encounters/encounters.service";
 import { QueueController } from "./modules/queue/queue.controller";
 import { QueueService } from "./modules/queue/queue.service";
@@ -33,6 +46,8 @@ import { InventoryService } from "./modules/pharmacy/inventory.service";
 import { MedicinesService } from "./modules/pharmacy/medicines.service";
 import { MedicineMasterController } from "./modules/pharmacy/medicine-master.controller";
 import { PharmacyController } from "./modules/pharmacy/pharmacy.controller";
+import { StockLocationsController, WardStoresController } from "./modules/pharmacy/stock-locations.controller";
+import { StockLocationsService } from "./modules/pharmacy/stock-locations.service";
 import { StockService } from "./modules/pharmacy/stock.service";
 import { AdmissionsService } from "./modules/ipd/admissions.service";
 import { ChargesService } from "./modules/ipd/charges.service";
@@ -50,6 +65,7 @@ import { ReportsController } from "./modules/reports/reports.controller";
 import { ReportsService } from "./modules/reports/reports.service";
 import { FilesController } from "./modules/documents/files.controller";
 import { FilesService } from "./modules/documents/files.service";
+import { ScanService } from "./modules/documents/scan.service";
 import { StorageService } from "./modules/documents/storage.service";
 import { SettingsController } from "./modules/settings/settings.controller";
 import { SettingsService } from "./modules/settings/settings.service";
@@ -71,13 +87,62 @@ import { TenantsController } from "./modules/tenants/tenants.controller";
 import { TenantsService } from "./modules/tenants/tenants.service";
 import { UsersController } from "./modules/users/users.controller";
 import { UsersService } from "./modules/users/users.service";
+import { AdvancesController } from "./modules/billing/advances.controller";
+import { OCR_PROVIDER, createOcrProvider } from "./modules/prescriptions/ocr.provider";
+import { MESSAGE_PROVIDER, createMessageProvider } from "./modules/prescriptions/message.provider";
+import { PrescriptionDeliveryService } from "./modules/prescriptions/prescription-delivery.service";
+import { PrescriptionDeliveryController } from "./modules/prescriptions/prescription-delivery.controller";
+import { WebhooksService } from "./modules/integrations/webhooks.service";
+import { OutboundWorker } from "./modules/integrations/outbound.worker";
+import { OcrConfigController } from "./modules/prescriptions/ocr-config.controller";
+import { OcrConfigService } from "./modules/prescriptions/ocr-config.service";
+import { PrescriptionShareController, PublicPrescriptionController } from "./modules/prescriptions/prescription-share.controller";
+import { PrescriptionShareService } from "./modules/prescriptions/prescription-share.service";
+import { RegistrationFeeService } from "./modules/patients/registration-fee.service";
+import { ScansController } from "./modules/prescriptions/scans.controller";
+import { ScansService } from "./modules/prescriptions/scans.service";
+import { PrescriptionDraftService } from "./modules/prescriptions/prescription-draft.service";
+import { TemplatesController } from "./modules/prescriptions/templates.controller";
+import { TemplatesService } from "./modules/prescriptions/templates.service";
+import { EarningsController, EarningsReportsController } from "./modules/earnings/earnings.controller";
+import { EarningsService } from "./modules/earnings/earnings.service";
+import { ShareLedgerService } from "./modules/earnings/share-ledger.service";
+import { PayoutsService } from "./modules/earnings/payouts.service";
+import { LabController } from "./modules/lab/lab.controller";
+import { LabService } from "./modules/lab/lab.service";
+import { RadiologyController } from "./modules/radiology/radiology.controller";
+import { RadiologyService } from "./modules/radiology/radiology.service";
+import { ClaimsController } from "./modules/claims/claims.controller";
+import { ClaimsService } from "./modules/claims/claims.service";
+import { PayrollController } from "./modules/payroll/payroll.controller";
+import { PayrollService } from "./modules/payroll/payroll.service";
+import { PortalController, PortalAuthController, AppointmentRequestsController } from "./modules/portal/portal.controller";
+import { PortalAuthService, PortalGuard, PortalService } from "./modules/portal/portal.service";
+import { TelemedicineController } from "./modules/telemedicine/telemedicine.controller";
+import { TelemedicineService } from "./modules/telemedicine/telemedicine.service";
+import { AbdmController } from "./modules/abdm/abdm.controller";
+import { AbdmService } from "./modules/abdm/abdm.service";
+import { AiController } from "./modules/ai/ai.controller";
+import { AiService } from "./modules/ai/ai.service";
+import { BookingApiController } from "./modules/appointments/booking-api.controller";
+import { BookingApiService } from "./modules/appointments/booking-api.service";
+import { IntegrationsController } from "./modules/integrations/integrations.controller";
+import { IntegrationsService } from "./modules/integrations/integrations.service";
+import { StatementController } from "./modules/billing/statement.controller";
+import { StatementService } from "./modules/billing/statement.service";
+import { AdvancesService } from "./modules/billing/advances.service";
+import { MergeService } from "./modules/patients/merge.service";
+import { ImportsController } from "./modules/imports/imports.controller";
+import { ImportsService } from "./modules/imports/imports.service";
+import { PrivacyController } from "./modules/privacy/privacy.controller";
+import { PrivacyService } from "./modules/privacy/privacy.service";
 
 /** Single registry so a test can prove every route declares its access policy. */
 export const CONTROLLERS = [
   HealthController, AuthController, TenantsController, FacilitiesController,
   UsersController, NumberingController, AuditController, MastersController, PatientsController,
   EncountersController, AppointmentsController, QueueController, VitalsController,
-  AllergiesController, ConsultationsController, PrescriptionsController, BillingController, PharmacyController, IpdController, NursingController, DischargeController, SettingsController, MedicineMasterController, PrintController, ReportsController, FilesController,
+  AllergiesController, ConsultationsController, TestOrdersController, PrescriptionsController, BillingController, PharmacyController, StockLocationsController, WardStoresController, PrescriptionDeliveryController, EarningsReportsController, LabController, RadiologyController, ClaimsController, PayrollController, PortalAuthController, PortalController, AppointmentRequestsController, TelemedicineController, AbdmController, AiController, IpdController, NursingController, DischargeController, SettingsController, MedicineMasterController, PrintController, ReportsController, FilesController, FollowUpsController, PrivacyController, ImportsController, AdvancesController, StatementController, BookingApiController, IntegrationsController, EarningsController, ScansController, TemplatesController, OcrConfigController, PrescriptionShareController, PublicPrescriptionController,
 ];
 
 @Module({
@@ -89,8 +154,15 @@ export const CONTROLLERS = [
     EncountersService, AppointmentsService, QueueService, VitalsService,
     ClinicianService, AllergiesService, ConsultationsService, PrescriptionsService,
     CatalogService, InvoicesService, LedgerService, PaymentsService, ShiftsService,
-    StockService, MedicinesService, InventoryService, DispensingService,
-    WardsService, AdmissionsService, ChargesService, NursingService, MarService, SettingsService, DischargeService, SummaryService, PrintService, ReportsService, FilesService, StorageService,
+    StockService, MedicinesService, InventoryService, StockLocationsService, DispensingService,
+    WardsService, AdmissionsService, ChargesService, NursingService, MarService, SettingsService, DischargeService, SummaryService, PrintService, ReportsService, FilesService, StorageService, ScanService,
+    RemindersService, ReminderWorker, FollowUpsService, TestOrdersService, PrescriptionDraftService, CashierViewService, CashierCollectService, PrivacyService, ImportsService, MergeService, AdvancesService, StatementService, BookingApiService, IntegrationsService, EarningsService, ShareLedgerService, PayoutsService, LabService, RadiologyService, ClaimsService, PayrollService, PortalAuthService, PortalService, PortalGuard, TelemedicineService, AbdmService, AiService, ScansService, TemplatesService, OcrConfigService, SecretsService, PrescriptionShareService, RegistrationFeeService,
+    { provide: OCR_PROVIDER, useFactory: (c: AppConfig) => createOcrProvider(c), inject: [CONFIG] },
+    { provide: MESSAGE_PROVIDER, useFactory: (c: AppConfig) => createMessageProvider(c), inject: [CONFIG] },
+    WebhooksService, PrescriptionDeliveryService, OutboundWorker,
+    { provide: REMINDER_PROVIDER, useFactory: (c: AppConfig) => createReminderProvider(c.REMINDER_PROVIDER), inject: [CONFIG] },
+    { provide: PAYMENT_LINK_PROVIDER, useFactory: (c: AppConfig) => createPaymentLinkProvider(c.PAYMENT_LINK_PROVIDER), inject: [CONFIG] },
+    PaymentLinksService, PaymentLinkWorker,
     // Order matters: rate limit first (cheap), then authentication + authorization.
     { provide: APP_GUARD, useClass: RateLimitGuard },
     { provide: APP_GUARD, useClass: AuthGuard },

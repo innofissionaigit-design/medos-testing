@@ -11,7 +11,7 @@ $env:PGOPTIONS = '-c client_min_messages=warning'
 $env:DATABASE_URL = 'postgresql://medos@127.0.0.1:54329/medos_e2e'
 $env:PRISMA_ENGINES_CACHE_DIR = 'D:\.cache\prisma'
 $env:JWT_ACCESS_SECRET = 'e2e-only-secret-e2e-only-secret-0001'
-$env:SCRYPT_LOG_N = '12'
+$env:ARGON2_MEMORY_KIB = '1024'; $env:ARGON2_PASSES = '1'
 $env:SEED_PASSWORD = 'E2e-Passw0rd-2026!'
 $env:SEED_PROFILE = 'small'
 Set-Location $root

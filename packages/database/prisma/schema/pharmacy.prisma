@@ -86,6 +86,10 @@ model MedicineBatch {
   medicine Medicine      @relation(fields: [tenantId, medicineId], references: [tenantId, id], onDelete: Restrict)
   balance  StockBalance?
   ledger   StockLedger[]
+  locationBalances StockLocationBalance[]
+  locationLedger   StockLocationLedger[]
+  transferItems    StockTransferItem[]
+  locationIssues   StockLocationIssue[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, medicineId, batchNo])
@@ -253,6 +257,8 @@ model Dispense {
   patientId        String         @db.Uuid
   encounterId      String?        @db.Uuid
   medicationOrderId String?       @db.Uuid
+  /// Set when the pharmacist dispensed from a handwritten prescription picture.
+  prescriptionScanId String?      @db.Uuid
   dispenseNumber   String
   status           DispenseStatus @default(COMPLETED)
   invoiceId        String?        @db.Uuid
@@ -268,6 +274,7 @@ model Dispense {
   invoice  Invoice?       @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
   encounter Encounter?    @relation(fields: [encounterId], references: [id], onDelete: Restrict)
   order    MedicationOrder? @relation(fields: [medicationOrderId], references: [id], onDelete: Restrict)
+  scan     PrescriptionScan? @relation(fields: [tenantId, prescriptionScanId], references: [tenantId, id], onDelete: Restrict)
   items    DispenseItem[]
 
   @@unique([tenantId, id])
@@ -275,6 +282,7 @@ model Dispense {
   @@index([tenantId, facilityId, dispensedAt(sort: Desc)])
   @@index([tenantId, patientId, dispensedAt(sort: Desc)])
   @@index([tenantId, medicationOrderId])
+  @@index([tenantId, prescriptionScanId])
 }
 
 model DispenseItem {
@@ -297,4 +305,150 @@ model DispenseItem {
   @@unique([tenantId, id])
   @@unique([dispenseId, lineNo])
   @@index([tenantId, batchId])
+}
+
+// ───────────────────────── Stock locations and transfers (docs/stock-transfers.md) ─────────────────────────
+
+/// A place inside a facility, other than the main pharmacy store, that keeps its own stock: a ward store, an operation theatre store, an emergency box.
+/// The main store is the pharmacy's own stock (StockBalance and StockLedger): it is what the pharmacy counter sells from and is not a row here, so selling,
+/// FEFO and the stock reports are untouched. Locations are never deleted, only made inactive (and only when empty).
+model StockLocation {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  facilityId  String       @db.Uuid
+  name        String
+  code        String
+  status      ActiveStatus @default(ACTIVE)
+  createdById String       @db.Uuid
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime     @updatedAt @db.Timestamptz(3)
+
+  facility      Facility               @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  balances      StockLocationBalance[]
+  ledger        StockLocationLedger[]
+  transfersFrom StockTransfer[]        @relation("TransferFrom")
+  transfersTo   StockTransfer[]        @relation("TransferTo")
+  issues        StockLocationIssue[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, code])
+  @@index([tenantId, facilityId, status])
+}
+
+/// Current quantity of one batch in one location. Kept equal to StockLocationLedger by the database at commit.
+model StockLocationBalance {
+  tenantId   String   @db.Uuid
+  facilityId String   @db.Uuid
+  locationId String   @db.Uuid
+  batchId    String   @db.Uuid
+  medicineId String   @db.Uuid
+  quantity   Int      @default(0)
+  updatedAt  DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+
+  location StockLocation @relation(fields: [tenantId, locationId], references: [tenantId, id], onDelete: Restrict)
+  batch    MedicineBatch @relation(fields: [tenantId, batchId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([locationId, batchId])
+  @@index([tenantId, facilityId, medicineId])
+  @@index([tenantId, batchId])
+}
+
+/// One movement of stock between two places of a facility. A place is a StockLocation, or the main store when the id is empty (never both empty, never the same).
+/// A transfer is complete the moment it is saved; a mistake is put right with a transfer the other way. Never edited or deleted.
+model StockTransfer {
+  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String   @db.Uuid
+  facilityId     String   @db.Uuid
+  transferNumber String
+  fromLocationId String?  @db.Uuid
+  toLocationId   String?  @db.Uuid
+  reason         String
+  /// An immediate transfer is RECEIVED when saved; a two-step transfer is IN_TRANSIT until the other place confirms (RECEIVED) or it is sent back (CANCELLED).
+  status         StockTransferStatus @default(RECEIVED)
+  receivedAt     DateTime?           @db.Timestamptz(3)
+  receivedById   String?             @db.Uuid
+  closeNote      String?
+  createdById    String   @db.Uuid
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  facility Facility            @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  from     StockLocation?      @relation("TransferFrom", fields: [tenantId, fromLocationId], references: [tenantId, id], onDelete: Restrict)
+  to       StockLocation?      @relation("TransferTo", fields: [tenantId, toLocationId], references: [tenantId, id], onDelete: Restrict)
+  items    StockTransferItem[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, transferNumber])
+  @@index([tenantId, facilityId, createdAt(sort: Desc)])
+}
+
+model StockTransferItem {
+  id         String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String @db.Uuid
+  transferId String @db.Uuid
+  batchId    String @db.Uuid
+  medicineId String @db.Uuid
+  quantity   Int
+
+  transfer StockTransfer @relation(fields: [tenantId, transferId], references: [tenantId, id], onDelete: Restrict)
+  batch    MedicineBatch @relation(fields: [tenantId, batchId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([transferId, batchId])
+  @@index([tenantId, batchId])
+}
+
+/// Append-only history of every movement in or out of a stock location. The main store keeps its own history in StockLedger (type TRANSFER).
+model StockLocationLedger {
+  seq          BigInt         @unique @default(autoincrement())
+  id           String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String         @db.Uuid
+  facilityId   String         @db.Uuid
+  locationId   String         @db.Uuid
+  batchId      String         @db.Uuid
+  medicineId   String         @db.Uuid
+  direction    StockDirection
+  quantity     Int
+  balanceAfter Int
+  /// Exactly one of the two: the transfer that moved the stock, or the issue to a patient that used it.
+  transferId   String?        @db.Uuid
+  issueId      String?        @db.Uuid
+  userId       String         @db.Uuid
+  createdAt    DateTime       @default(now()) @db.Timestamptz(3)
+
+  location StockLocation @relation(fields: [tenantId, locationId], references: [tenantId, id], onDelete: Restrict)
+  batch    MedicineBatch @relation(fields: [tenantId, batchId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, locationId, batchId, seq])
+  @@index([tenantId, transferId])
+}
+
+enum StockTransferStatus {
+  RECEIVED
+  IN_TRANSIT
+  CANCELLED
+}
+
+/// A medicine taken from a location's stock for a patient who is admitted (a nurse drawing from the ward store). It is billed to the admission as a medicine
+/// charge at the batch's selling price and written to the location's ledger. Never edited or deleted.
+model StockLocationIssue {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  locationId  String   @db.Uuid
+  batchId     String   @db.Uuid
+  medicineId  String   @db.Uuid
+  quantity    Int
+  admissionId String   @db.Uuid
+  patientId   String   @db.Uuid
+  chargeId    String?  @db.Uuid
+  remarks     String?
+  issuedById  String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  location  StockLocation @relation(fields: [tenantId, locationId], references: [tenantId, id], onDelete: Restrict)
+  batch     MedicineBatch @relation(fields: [tenantId, batchId], references: [tenantId, id], onDelete: Restrict)
+  admission Admission     @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, admissionId, createdAt(sort: Desc)])
+  @@index([tenantId, locationId, createdAt(sort: Desc)])
 }

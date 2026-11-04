@@ -5,7 +5,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { AuditService } from "../../common/audit.service";
 import { CONFIG, type AppConfig } from "../../common/config";
+import { logJson } from "../../common/logger";
 import { PrismaService, type Db } from "../../common/prisma.service";
+import type { DataScope } from "../../common/request-context";
+import { tenantScope } from "../../common/tenant-scope";
 import { PasswordService } from "./password.service";
 
 export const loginSchema = z.object({
@@ -35,19 +38,37 @@ export class AuthService {
     @Inject(CONFIG) private readonly config: AppConfig,
   ) {}
 
+  /** Login starts before any hospital is known: a narrow database function resolves the code, the rest runs under that hospital. */
+  private async resolveTenant(code: string): Promise<{ id: string; status: string } | null> {
+    const rows = await tenantScope.system("login: resolve hospital code", () =>
+      this.prisma.$queryRaw<{ id: string; status: string }[]>`SELECT id::text AS id, status FROM medos_resolve_tenant(${code})`);
+    return rows[0] ?? null;
+  }
+
+  /** Refresh and logout carry only the token: a narrow database function says which hospital issued it. */
+  private async resolveTokenTenant(refreshToken: string): Promise<string | null> {
+    const rows = await tenantScope.system("token refresh: resolve issuing hospital", () =>
+      this.prisma.$queryRaw<{ tenant_id: string | null }[]>`SELECT medos_resolve_refresh_token(${sha256(refreshToken)})::text AS tenant_id`);
+    return rows[0]?.tenant_id ?? null;
+  }
+
   async login(input: z.infer<typeof loginSchema>, requestId: string | undefined): Promise<LoginResult> {
-    const tenant = await this.prisma.tenant.findUnique({ where: { code: input.tenantCode } });
+    const tenant = await this.resolveTenant(input.tenantCode);
     if (!tenant) {
       await this.passwords.verifyDummy(input.password);
       throw INVALID();
     }
+    return tenantScope.run(tenant.id, () => this.loginInTenant(input, requestId, tenant));
+  }
+
+  private async loginInTenant(input: z.infer<typeof loginSchema>, requestId: string | undefined, tenant: { id: string; status: string }): Promise<LoginResult> {
     const user = await this.prisma.user.findFirst({
       where: { tenantId: tenant.id, OR: [{ username: input.identifier }, { email: input.identifier }] },
       include: { facilities: { where: { facility: { status: "ACTIVE" } }, include: { facility: true } } },
     });
     const actor = { tenantId: tenant.id, userId: user?.id ?? null, requestId };
 
-    if (!user) {
+    if (!user || user.isService) {
       await this.passwords.verifyDummy(input.password);
       await this.audit.recordStandalone(actor, { action: "LOGIN_FAILED", entityType: "User", metadata: { reason: "UNKNOWN_USER" } });
       throw INVALID();
@@ -80,6 +101,7 @@ export class AuthService {
     if (!chosen) return { status: "FACILITY_SELECTION_REQUIRED", facilities };
 
     await this.prisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null } });
+    await this.upgradeHash(actor, user.id, tenant.id, user.passwordHash, input.password);
     const tokens = await this.prisma.$transaction(async (tx) => {
       const t = await this.issue(tx, tenant.id, user.id, chosen.id, randomUUID());
       await this.audit.record(tx, { ...actor, facilityId: chosen.id }, { action: "LOGIN_SUCCESS", entityType: "User", entityId: user.id });
@@ -88,7 +110,31 @@ export class AuthService {
     return { status: "AUTHENTICATED", tokens, facility: chosen };
   }
 
+  /**
+   * Now that the right password is in hand, replace an old-format (scrypt) or weaker hash with a fresh Argon2id one.
+   * Sign-in never fails because of this, and the write only applies if the stored hash is still the one that was just
+   * checked, so a password changed in the meantime is never overwritten with the old password's hash.
+   */
+  private async upgradeHash(actor: { tenantId: string; userId: string | null; requestId: string | undefined }, userId: string, tenantId: string, current: string, password: string): Promise<void> {
+    if (!this.passwords.needsRehash(current)) return;
+    try {
+      const next = await this.passwords.hash(password);
+      const res = await this.prisma.user.updateMany({ where: { id: userId, tenantId, passwordHash: current }, data: { passwordHash: next } });
+      if (res.count === 1) {
+        await this.audit.recordStandalone(actor, { action: "PASSWORD_HASH_UPGRADED", entityType: "User", entityId: userId, metadata: { from: current.startsWith("$argon2id$") ? "argon2id-weaker" : "scrypt", to: "argon2id" } });
+      }
+    } catch (e) {
+      logJson("warn", "password_hash_upgrade_failed", { tenantId, userId, errorName: e instanceof Error ? e.name : typeof e });
+    }
+  }
+
   async refresh(refreshToken: string, requestId: string | undefined): Promise<TokenPair> {
+    const tenantId = await this.resolveTokenTenant(refreshToken);
+    if (!tenantId) throw new DomainError("TOKEN_REVOKED", "Session is no longer valid", 401);
+    return tenantScope.run(tenantId, () => this.refreshInTenant(refreshToken, requestId));
+  }
+
+  private async refreshInTenant(refreshToken: string, requestId: string | undefined): Promise<TokenPair> {
     const row = await this.prisma.refreshToken.findUnique({ where: { tokenHash: sha256(refreshToken) } });
     if (!row) throw new DomainError("TOKEN_REVOKED", "Session is no longer valid", 401);
 
@@ -124,6 +170,12 @@ export class AuthService {
   }
 
   async logout(refreshToken: string, requestId: string | undefined): Promise<void> {
+    const tenantId = await this.resolveTokenTenant(refreshToken);
+    if (!tenantId) return; // idempotent; do not reveal whether the token existed
+    return tenantScope.run(tenantId, () => this.logoutInTenant(refreshToken, requestId));
+  }
+
+  private async logoutInTenant(refreshToken: string, requestId: string | undefined): Promise<void> {
     const row = await this.prisma.refreshToken.findUnique({ where: { tokenHash: sha256(refreshToken) } });
     if (!row) return; // idempotent; do not reveal whether the token existed
     await this.prisma.$transaction(async (tx) => {
@@ -154,7 +206,7 @@ export class AuthService {
     });
   }
 
-  async me(tenantId: string, userId: string, facilityId: string, permissions: ReadonlySet<Permission>) {
+  async me(tenantId: string, userId: string, facilityId: string, permissions: ReadonlySet<Permission>, dataScope: DataScope) {
     const user = await this.prisma.user.findFirstOrThrow({
       where: { id: userId, tenantId },
       select: {
@@ -164,8 +216,12 @@ export class AuthService {
         roles: { select: { role: { select: { name: true } } } },
       },
     });
+    const scopeDepartments = dataScope.kind === "DEPARTMENT"
+      ? await this.prisma.department.findMany({ where: { tenantId, id: { in: [...dataScope.departmentIds] } }, select: { id: true, name: true }, orderBy: { name: "asc" } })
+      : [];
     return {
       id: user.id, username: user.username, fullName: user.fullName, email: user.email,
+      dataScope: { kind: dataScope.kind, departments: scopeDepartments },
       tenant: user.tenant,
       facility: user.facilities.map((f) => f.facility).find((f) => f.id === facilityId) ?? null,
       facilities: user.facilities.map((f) => f.facility),

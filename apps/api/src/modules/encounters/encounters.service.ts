@@ -5,6 +5,8 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
+import { assertPatientVisible, visitScope } from "../../common/data-scope";
+import { chartPatientIds } from "../patients/patient-links";
 import { NumberingService } from "../numbering/numbering.service";
 
 export type EncounterStatusName = "ACTIVE" | "COMPLETED" | "CANCELLED";
@@ -38,9 +40,11 @@ export class EncountersService {
   constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService) {}
 
   /** Opens an OPD encounter inside the caller's transaction (used by check-in and walk-in). */
-  async openOpd(tx: Db, ctx: RequestContext, input: { patientId: string; practitionerId: string; departmentId: string | null }) {
-    const patient = await tx.patient.findFirst({ where: { id: input.patientId, tenantId: ctx.tenantId, status: "ACTIVE" }, select: { id: true } });
-    if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+  async openOpd(tx: Db, ctx: RequestContext, input: { patientId: string; practitionerId: string; departmentId: string | null }, opts: { patientVerified?: boolean } = {}) {
+    if (!opts.patientVerified) {
+      const patient = await tx.patient.findFirst({ where: { id: input.patientId, tenantId: ctx.tenantId, status: "ACTIVE" }, select: { id: true } });
+      if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+    }
     const encounterNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "OPD_VISIT");
     const e = await tx.encounter.create({
       data: {
@@ -78,15 +82,16 @@ export class EncountersService {
   }
 
   async get(ctx: RequestContext, id: string) {
-    const e = await this.prisma.encounter.findFirst({ where: { id, tenantId: ctx.tenantId }, select: VIEW });
+    const e = await this.prisma.encounter.findFirst({ where: { id, tenantId: ctx.tenantId, AND: [visitScope(ctx)] }, select: VIEW });
     if (!e) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     return toEncounterView(e);
   }
 
   async listForPatient(ctx: RequestContext, patientId: string, q: z.infer<typeof listEncountersSchema>) {
-    const patient = await this.prisma.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
-    if (!patient) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
-    const where: Prisma.EncounterWhereInput = { tenantId: ctx.tenantId, patientId, ...(q.type ? { type: q.type } : {}) };
+    const ids = await chartPatientIds(this.prisma, ctx.tenantId, patientId);
+    if (!ids) throw new DomainError("PATIENT_NOT_FOUND", "Patient not found", 404);
+    await assertPatientVisible(this.prisma, ctx, patientId);
+    const where: Prisma.EncounterWhereInput = { tenantId: ctx.tenantId, patientId: { in: ids }, AND: [visitScope(ctx)], ...(q.type ? { type: q.type } : {}) };
     const [rows, total] = await Promise.all([
       this.prisma.encounter.findMany({ where, select: VIEW, orderBy: { startedAt: "desc" }, skip: (q.page - 1) * q.pageSize, take: q.pageSize }),
       this.prisma.encounter.count({ where }),

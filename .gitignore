@@ -6,6 +6,9 @@ dist
 .env
 .env.*
 !.env.example
+# deployment secrets and the real per-environment settings (the committed templates are deploy/*.env.example)
+secrets/
+deploy/*.env
 coverage
 *.log
 

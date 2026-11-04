@@ -4,9 +4,10 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { z } from "zod";
 import { Gate } from "@/components/gate";
+import { FeeSection, feePayload, feeProblem, initialChoice, RegistrationDone, type FeeChoice, type FeeConfig, type RegistrationResult } from "@/components/registration-fee";
 import { patientName, type PatientRow } from "@/components/shell";
 import { Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Select, Spinner, Table, Td, useDebounced } from "@/components/ui";
 import { api, ApiError, newKey } from "@/lib/api";
@@ -41,24 +42,44 @@ function RegisterPatient({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [key] = useState(newKey);
   const mode = watch("ageMode");
+  // The registration fee is collected in the same step as the registration: the Patient ID is issued only once it is paid (or exempted by someone allowed to).
+  const fee = useQuery({ queryKey: ["reg-fee-config"], queryFn: () => api.get<FeeConfig>("/patients/registration-fee/config") });
+  const [choice, setChoice] = useState<FeeChoice | null>(null);
+  const [done, setDone] = useState<{ id: string; mrn: string | null; registration: RegistrationResult | null } | null>(null);
+  const feeOn = fee.data?.enabled === true;
+  const feeChoice = choice ?? (fee.data ? initialChoice(fee.data) : null);
+  const problem = feeOn && fee.data && feeChoice ? feeProblem(fee.data, feeChoice) : null;
+  const openShift = useMutation({ mutationFn: () => api.post("/shifts/open", { openingCash: "0" }), onSuccess: () => { setError(null); void save(getValues()); } });
 
   const body = (v: Form, override: boolean) => ({
     firstName: v.firstName, ...(v.lastName ? { lastName: v.lastName } : {}), gender: v.gender,
     ...(v.ageMode === "age" ? { estimatedAgeYears: Number(v.age) } : { dateOfBirth: v.dob }),
     ...(v.mobile ? { mobile: v.mobile } : {}), ...(v.addressLine ? { addressLine: v.addressLine } : {}), ...(v.city ? { city: v.city } : {}), ...(v.postalCode ? { postalCode: v.postalCode } : {}),
     ...(override ? { duplicateOverride: { confirmedDistinct: true, reason: "Confirmed as a different person at registration" } } : {}),
+    ...(feeOn && feeChoice ? { registration: feePayload(feeChoice) } : {}),
   });
   async function save(v: Form, override = false) {
     setError(null); setBusy(true);
     try {
-      const p = await api.post<{ id: string }>("/patients", body(v, override), override ? newKey() : key);
-      router.push(`/patients/${p.id}`);
+      const p = await api.post<{ id: string; mrn: string | null; registration: RegistrationResult | null }>("/patients", body(v, override), override ? newKey() : key);
+      if (p.registration) setDone({ id: p.id, mrn: p.mrn, registration: p.registration });
+      else router.push(`/patients/${p.id}`);
     } catch (e) {
       if (e instanceof ApiError && e.code === "DUPLICATE_PATIENT_SUSPECTED") setDups(((e.details as { candidates?: Candidate[] } | undefined)?.candidates) ?? []);
       else setError(e);
     } finally { setBusy(false); }
   }
 
+  if (done) {
+    return (
+      <Modal title="Patient registered" onClose={() => router.push(`/patients/${done.id}`)}>
+        <div className="space-y-3">
+          <RegistrationDone mrn={done.mrn} reg={done.registration} />
+          <div className="flex justify-end"><Button onClick={() => router.push(`/patients/${done.id}`)}>Open the patient</Button></div>
+        </div>
+      </Modal>
+    );
+  }
   if (dups) {
     return (
       <Modal title="This patient may already be registered" onClose={onClose} wide>
@@ -103,8 +124,15 @@ function RegisterPatient({ onClose }: { onClose: () => void }) {
         <Field label="Address"><Input {...register("addressLine")} /></Field>
         <Field label="City"><Input {...register("city")} /></Field>
         <Field label="PIN code"><Input inputMode="numeric" {...register("postalCode")} /></Field>
-        <div className="sm:col-span-2"><ErrorNote error={error} /></div>
-        <div className="flex justify-end gap-2 sm:col-span-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" loading={isSubmitting || busy}>Register</Button></div>
+        {feeOn && fee.data && feeChoice && <div className="sm:col-span-2"><FeeSection config={fee.data} value={feeChoice} onChange={setChoice} /></div>}
+        <div className="sm:col-span-2">
+          <ErrorNote error={error instanceof ApiError && error.code === "SHIFT_NOT_OPEN" ? null : error} />
+          {error instanceof ApiError && error.code === "SHIFT_NOT_OPEN" && (
+            <div className="space-y-1"><Notice tone="warn">Open your cash shift before taking cash.</Notice>{can("CASHIER_SHIFT_MANAGE") && <Button variant="secondary" loading={openShift.isPending} onClick={() => openShift.mutate()}>Open my cash shift (₹0 opening) and register</Button>}</div>
+          )}
+          {problem && <p className="text-xs text-slate-500">{problem}</p>}
+        </div>
+        <div className="flex justify-end gap-2 sm:col-span-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button type="submit" loading={isSubmitting || busy} disabled={problem !== null}>{feeOn && feeChoice ? (feeChoice.kind === "PAY" ? "Collect fee and register" : "Register without fee") : "Register"}</Button></div>
       </form>
     </Modal>
   );

@@ -618,6 +618,16 @@ describe("clinical core: allergies, diagnoses, consultation, prescription, signi
       assert.equal((await t.api("post", `/queue/${v.queueId}/complete`, v.doctor.token)).status, 200);
     });
 
+    it("a visit cannot be completed while its prescription is an unsigned draft, even with no consultation note", async () => {
+      const v = await visit();
+      assert.equal((await rx(v.doctor.token, v.encounterId, [AMOX])).status, 200);
+      await t.api("post", `/queue/${v.queueId}/start`, v.doctor.token);
+      const blocked = await t.api("post", `/queue/${v.queueId}/complete`, v.doctor.token);
+      assert.equal(blocked.status, 409);
+      assert.match(blocked.body.error.message, /prescription/);
+      assert.equal((await t.prisma.encounter.findFirstOrThrow({ where: { id: v.encounterId } })).status, "ACTIVE", "the visit stays open so the doctor can still sign");
+    });
+
     it("a visit with no consultation can still be completed (e.g. nurse-only review)", async () => {
       const v = await visit();
       await t.api("post", `/queue/${v.queueId}/start`, v.doctor.token);

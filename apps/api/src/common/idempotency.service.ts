@@ -15,6 +15,8 @@ export function parseIdempotencyKey(raw: string | string[] | undefined): string 
 }
 
 function stableStringify(v: unknown): string {
+  // A Date has no enumerable fields, so without this two requests that differ only in a date (a date of birth, an appointment time) compared as equal.
+  if (v instanceof Date) return JSON.stringify(v.toISOString());
   if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
   if (v && typeof v === "object") {
     const o = v as Record<string, unknown>;

@@ -4,6 +4,6 @@
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", ".next/**"] },
     "lint": { "dependsOn": ["^build"] },
     "typecheck": { "dependsOn": ["^build"] },
-    "test": { "dependsOn": ["^build"], "cache": false }
+    "test": { "dependsOn": ["^build"], "cache": false, "passThroughEnv": ["PG_BIN"] }
   }
 }

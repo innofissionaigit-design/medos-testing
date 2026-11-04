@@ -2,8 +2,9 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { useMe } from "@/lib/me";
 import { patientName, type PatientRow } from "./shell";
-import { Input, useDebounced } from "./ui";
+import { ErrorNote, Input, Spinner, useDebounced } from "./ui";
 
 export interface PickedPatient { id: string; name: string; mrn: string | null }
 
@@ -40,6 +41,30 @@ export function PatientPicker({ value, onPick, autoFocus }: { value: PickedPatie
 
 /** Today's date (YYYY-MM-DD) in a given time zone. */
 export const todayIn = (tz: string): string => new Intl.DateTimeFormat("en-CA", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+
+/** Calendar arithmetic on YYYY-MM-DD strings (no time zone involved). */
+export const addDays = (ymd: string, days: number): string => new Date(Date.parse(`${ymd}T00:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+
+export interface Slot { startAt: string; endAt: string; available: boolean }
+
+/** Free-time buttons for one doctor on one day (from /practitioners/:id/availability); taken and past slots are disabled. */
+export function SlotPicker({ practitionerId, date, value, onPick }: { practitionerId: string; date: string; value: string; onPick: (startAt: string) => void }) {
+  const { dateTime } = useMe();
+  const slots = useQuery({ queryKey: ["slots", practitionerId, date], queryFn: () => api.get<Slot[]>(`/practitioners/${practitionerId}/availability`, { date }), enabled: !!practitionerId && !!date });
+  if (!practitionerId) return <p className="text-sm text-slate-500">Choose a doctor to see free times.</p>;
+  if (slots.isLoading) return <Spinner />;
+  if (slots.error) return <ErrorNote error={slots.error} />;
+  if (!slots.data?.length) return <p className="text-sm text-slate-500">This doctor does not see patients on that day.</p>;
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {slots.data.map((s) => (
+        <button key={s.startAt} type="button" disabled={!s.available} onClick={() => onPick(s.startAt)} className={`rounded border px-2 py-1 text-sm ${value === s.startAt ? "border-brand-600 bg-brand-600 text-white" : s.available ? "border-slate-300 hover:bg-brand-50" : "cursor-not-allowed border-slate-200 bg-slate-100 text-slate-400 line-through"}`}>
+          {dateTime(s.startAt).split(", ").pop()}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 /** Available beds with readable labels, from the bed board (ward and room names are only on the board). */
 export function useAvailableBeds() {

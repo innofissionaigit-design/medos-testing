@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Button, Card, ErrorNote, Field, Input, KV, Notice, PageHeader } from "@/components/ui";
+import { MyPayslips } from "@/components/payroll";
 import { api } from "@/lib/api";
 import { LANGUAGES, useI18n } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
@@ -37,6 +38,7 @@ export default function AccountPage() {
         <Card title="Your details">
           <dl className="grid grid-cols-2 gap-3 sm:grid-cols-3"><KV label="Name">{me.fullName}</KV><KV label="Username">{me.username}</KV><KV label="Email">{me.email}</KV><KV label="Hospital">{me.tenant.name}</KV><KV label="Facility">{me.facility?.name}</KV><KV label="Roles">{me.roles.map((r) => r.toLowerCase()).join(", ")}</KV></dl>
         </Card>
+        <MyPayslips />
         <Card title="Change password">
           {done ? <Notice tone="success">Password changed. You are being signed out so you can sign in again.</Notice> : (
             <form className="max-w-sm space-y-3" onSubmit={(e) => { e.preventDefault(); if (!mismatch && next.length >= 10) change.mutate(); }}>

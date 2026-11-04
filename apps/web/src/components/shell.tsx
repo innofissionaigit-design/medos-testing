@@ -104,7 +104,14 @@ export function Shell({ children }: { children: ReactNode }) {
             {nav.map((n) => <Link key={n.href} onClick={() => setMenu(false)} href={n.href} className="block rounded px-3 py-2 text-sm hover:bg-slate-100">{t(n.label)}</Link>)}
           </nav>
         )}
-        <main className="min-w-0 flex-1 p-4 md:p-6">{children}</main>
+        <main className="min-w-0 flex-1 p-4 md:p-6">
+          {me.dataScope && me.dataScope.kind !== "ALL" && (
+            <p className="mb-3 rounded border border-brand-100 bg-brand-50 px-3 py-2 text-sm text-slate-700" data-testid="scope-note">
+              {me.dataScope.kind === "DOCTOR" ? t("You see only your own patients, records and reports.") : `${t("You see only the data of your department:")} ${me.dataScope.departments.map((d) => d.name).join(", ")}`}
+            </p>
+          )}
+          {children}
+        </main>
       </div>
     </div>
   );

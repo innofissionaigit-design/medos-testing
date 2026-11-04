@@ -44,6 +44,8 @@ describe("billing, payments, refunds and cashier shifts", () => {
     t = await startApp();
     a = await t.makeTenant("bill-a");
     b = await t.makeTenant("bill-b");
+    // These tests check the strict rule (cash needs an open shift), which a hospital can choose; the default opens one automatically (cash-shift.spec.ts).
+    assert.equal((await t.api("put", "/settings/CASH_AUTO_OPEN_SHIFT", a.admin.token).send({ value: false })).status, 200);
     rec = await t.makeUser(a, ["RECEPTIONIST"]);
     cashier = await t.makeUser(a, ["CASHIER"]);
     manager = await t.makeUser(a, ["MANAGER"]);
@@ -196,12 +198,41 @@ describe("billing, payments, refunds and cashier shifts", () => {
       assert.equal((await t.api("post", `/invoices/${full.body.data.id}/issue`, cashier.token)).status, 400, "a zero-value invoice cannot be issued");
     });
 
-    it("reception can draft, only cashiers (INVOICE_ISSUE) can issue; patients and visits must belong to the tenant", async () => {
+    it("a manager discounts a draft in place: totals recomputed server-side, reason required, before/after audited, issued invoices refused", async () => {
+      const p = await registerPatient(t, rec.token);
+      const d = await draft(p.id, [{ serviceId: svc.consult, quantity: 1 }, { serviceId: svc.inj, quantity: 2 }]);
+      const lineIds = async () => (await t.prisma.invoiceLine.findMany({ where: { invoiceId: d.id }, orderBy: { lineNo: "asc" } })).map((l) => l.id);
+      const before = await lineIds();
+      const disc = (body: Record<string, unknown>, tok = manager.token) => t.api("post", `/invoices/${d.id}/discount`, tok).send(body);
+
+      assert.equal((await disc({ version: d.version, reason: "Staff family", lines: [{ lineNo: 1, discountAmount: "100" }] }, cashier.token)).status, 403, "cashiers cannot discount");
+      assert.equal((await disc({ version: d.version, reason: "Staff family", lines: [{ lineNo: 1, discountAmount: "100" }] }, rec.token)).status, 403);
+      assert.equal((await disc({ version: d.version, lines: [{ lineNo: 1, discountAmount: "100" }] })).status, 400, "a reason is required");
+      assert.equal((await disc({ version: d.version, reason: "Staff family", lines: [{ lineNo: 1, discountAmount: "500.01" }] })).status, 400, "cannot exceed the line");
+      assert.equal((await disc({ version: d.version, reason: "Staff family", lines: [{ lineNo: 9, discountAmount: "10" }] })).status, 400, "unknown line");
+      assert.equal((await disc({ version: d.version, reason: "Staff family", lines: [{ lineNo: 1, discountAmount: "100" }], total: "1" })).status, 400, "client totals are rejected");
+
+      const ok = await disc({ version: d.version, reason: "Staff family concession", lines: [{ lineNo: 1, discountAmount: "100" }] });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.equal(ok.body.data.discountTotal, "100.00");
+      // 500 - 100 + injection 2 x 75 + 5% tax (157.50) = 557.50
+      assert.equal(ok.body.data.total, "557.50");
+      assert.deepEqual(await lineIds(), before, "lines are updated in place, never rewritten");
+      const evt = await t.prisma.auditEvent.findFirstOrThrow({ where: { tenantId: a.tenantId, action: "INVOICE_DISCOUNT_APPLIED", entityId: d.id, actorUserId: manager.id } });
+      assert.deepEqual(evt.metadata, { reason: "Staff family concession", lines: [{ lineNo: 1, from: "0.00", to: "100.00" }], discount: "100.00", total: "557.50" });
+
+      assert.equal((await disc({ version: d.version, reason: "Staff family", lines: [{ lineNo: 1, discountAmount: "50" }] })).status, 409, "a stale version is refused");
+      assert.equal((await t.api("post", `/invoices/${d.id}/issue`, cashier.token)).status, 200);
+      assert.equal((await disc({ version: d.version + 1, reason: "Too late now", lines: [{ lineNo: 1, discountAmount: "50" }] })).status, 409, "issued invoices are frozen");
+      assert.equal((await t.api("post", `/invoices/${d.id}/discount`, b.admin.token).send({ version: 1, reason: "Other tenant", lines: [{ lineNo: 1, discountAmount: "1" }] })).status, 403, "other tenants are refused");
+    });
+
+    it("reception drafts, issues and takes payment (the OPD consultation is paid at the desk); nurses cannot bill; patients and visits must belong to the tenant", async () => {
       const p = await registerPatient(t, rec.token);
       const d = await draft(p.id, [{ serviceId: svc.consult, quantity: 1 }], {}, rec.token);
-      assert.equal((await t.api("post", `/invoices/${d.id}/issue`, rec.token)).status, 403);
-      assert.equal((await t.api("post", `/invoices/${d.id}/issue`, cashier.token)).status, 200);
+      assert.equal((await t.api("post", `/invoices/${d.id}/issue`, rec.token)).status, 200);
       const nurse = await t.makeUser(a, ["NURSE"]);
+      assert.equal((await t.api("post", `/invoices/${d.id}/issue`, nurse.token)).status, 403);
       assert.equal((await t.api("post", "/invoices", nurse.token).send({ patientId: p.id, lines: [{ serviceId: svc.consult, quantity: 1 }] })).status, 403);
       assert.equal((await t.api("get", "/invoices", nurse.token)).status, 403);
       assert.equal((await t.api("post", "/invoices", cashier.token).send({ patientId: randomUUID(), lines: [{ serviceId: svc.consult, quantity: 1 }] })).status, 404);
@@ -455,7 +486,8 @@ describe("billing, payments, refunds and cashier shifts", () => {
     it("only PAYMENT_CREATE can take payments; receipts and invoices are tenant/facility isolated", async () => {
       await openShift().catch(() => undefined);
       const i = await issued("200.00");
-      for (const u of [rec, manager]) assert.equal((await pay(i.id, [{ method: "UPI", amount: "10", reference: "UPI000111" }], key(), u.token)).status, 403);
+      // Reception can take payments (booking fees at the desk); a manager and a nurse cannot.
+      for (const u of [manager, await t.makeUser(a, ["NURSE"])]) assert.equal((await pay(i.id, [{ method: "UPI", amount: "10", reference: "UPI000111" }], key(), u.token)).status, 403);
       assert.equal((await t.api("post", `/invoices/${i.id}/payments`).set("Idempotency-Key", key()).send({})).status, 401);
       const bCashier = await t.makeUser(b, ["CASHIER"]);
       assert.equal((await pay(i.id, [{ method: "UPI", amount: "10", reference: "UPI000222" }], key(), bCashier.token)).status, 404);
@@ -732,7 +764,7 @@ describe("billing, payments, refunds and cashier shifts", () => {
       assert.equal((await t.api("post", `/shifts/${s.id}/close`, other.token).send({ actualCash: "100" })).status, 403);
       assert.equal((await t.api("get", `/shifts/${s.id}`, other.token)).status, 403, "cashiers see only their own shifts");
       assert.equal((await t.api("get", "/shifts", other.token)).body.data.length, 0);
-      for (const u of [rec, manager]) assert.equal((await t.api("post", "/shifts/open", u.token).send({ openingCash: "1" })).status, 403);
+      for (const u of [manager, await t.makeUser(a, ["NURSE"])]) assert.equal((await t.api("post", "/shifts/open", u.token).send({ openingCash: "1" })).status, 403);
       const bCashier = await t.makeUser(b, ["CASHIER"]);
       assert.equal((await t.api("get", `/shifts/${s.id}`, bCashier.token)).status, 404);
       assert.equal((await t.api("post", `/shifts/${s.id}/close`, bCashier.token).send({ actualCash: "100" })).status, 404);

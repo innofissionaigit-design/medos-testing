@@ -105,6 +105,19 @@ describe("audit trail review", () => {
     assert.equal((await t.api("get", "/audit-events", a.admin.token).query({ tenantId: b.tenantId })).status, 400, "no tenant override");
   });
 
+  it("names the actor on each event and lists this tenant's staff for the user filter, gated by AUDIT_READ", async () => {
+    const rows = (await t.api("get", "/audit-events", a.admin.token).query({ actorUserId: rec.id })).body.data as { actorUserId: string; actorName: string | null; actorUsername: string | null }[];
+    const recUser = await t.prisma.user.findUniqueOrThrow({ where: { id: rec.id } });
+    assert.ok(rows.length > 0 && rows.every((r) => r.actorName === recUser.fullName && r.actorUsername === recUser.username));
+    const actors = await t.api("get", "/audit-events/actors", manager.token);
+    assert.equal(actors.status, 200);
+    const ids = new Set((actors.body.data as { id: string }[]).map((u) => u.id));
+    assert.ok(ids.has(rec.id) && ids.has(manager.id));
+    assert.ok(!ids.has(b.admin.id), "other tenants' staff never appear");
+    assert.deepEqual(Object.keys(actors.body.data[0]).sort(), ["fullName", "id", "username"], "names only");
+    assert.equal((await t.api("get", "/audit-events/actors", cashier.token)).status, 403);
+  });
+
   it("is tenant-isolated and readable only with AUDIT_READ; the API offers no way to change events", async () => {
     const mine = new Set((await events()).map((e) => e.id));
     const theirs = await events({}, b.admin.token);

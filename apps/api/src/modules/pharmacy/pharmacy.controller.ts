@@ -4,7 +4,7 @@ import { Feature } from "../../common/feature.guard";
 import { Ctx, id, paginate, parse, RequirePermissions } from "../../common/http";
 import { parseIdempotencyKey } from "../../common/idempotency.service";
 import type { RequestContext } from "../../common/request-context";
-import { DispensingService, dispenseListSchema, dispenseReturnSchema, dispenseSchema, queueQuerySchema, suggestSchema } from "./dispensing.service";
+import { DispensingService, dispenseListSchema, dispenseReturnSchema, dispenseSchema, queueQuerySchema, rejectHandwrittenSchema, suggestSchema } from "./dispensing.service";
 import {
   adjustSchema, batchQuerySchema, blockBatchSchema, InventoryService, ledgerQuerySchema, openingBatchSchema, purchaseListSchema,
   purchaseReturnSchema, purchaseSchema, stockQuerySchema,
@@ -150,6 +150,16 @@ export class PharmacyController {
     const { items, total } = await this.dispensing.queue(ctx, q);
     return paginate(items, total, q.page, q.pageSize);
   }
+
+  /** Handwritten prescription pictures from the doctors, waiting for the pharmacist to check them, enter the medicines and dispense. */
+  @RequirePermissions("PHARMACY_DISPENSE")
+  @Get("pharmacy/handwritten")
+  async handwritten(@Ctx() ctx: RequestContext) { return { data: await this.dispensing.handwrittenQueue(ctx) }; }
+
+  @RequirePermissions("PHARMACY_DISPENSE")
+  @Post("pharmacy/handwritten/:id/reject")
+  @HttpCode(200)
+  async rejectHandwritten(@Ctx() ctx: RequestContext, @Param("id") scanId: string, @Body() body: unknown) { return { data: await this.dispensing.rejectHandwritten(ctx, id(scanId), parse(rejectHandwrittenSchema, body)) }; }
 
   @RequirePermissions("PHARMACY_DISPENSE")
   @Post("pharmacy/dispenses")

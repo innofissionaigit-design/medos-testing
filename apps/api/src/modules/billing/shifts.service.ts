@@ -88,28 +88,40 @@ export class ShiftsService {
   // ───── internals ─────
 
   private async cashTotals(db: Db, ctx: RequestContext, shiftId: string) {
-    const [inn, out] = await Promise.all([
-      db.payment.aggregate({ where: { tenantId: ctx.tenantId, method: "CASH", receipt: { shiftId } }, _sum: { amount: true } }),
+    // Advances count when they are taken or given back (cash in the drawer), not when they are used up against an invoice.
+    const [inn, advIn, out, advOut] = await Promise.all([
+      db.payment.aggregate({ where: { tenantId: ctx.tenantId, method: "CASH", advanceUseId: null, receipt: { shiftId } }, _sum: { amount: true } }),
+      db.advanceTender.aggregate({ where: { tenantId: ctx.tenantId, method: "CASH", deposit: { shiftId } }, _sum: { amount: true } }),
       db.refund.aggregate({ where: { tenantId: ctx.tenantId, method: "CASH", shiftId }, _sum: { amount: true } }),
+      db.advanceRefund.aggregate({ where: { tenantId: ctx.tenantId, method: "CASH", shiftId }, _sum: { amount: true } }),
     ]);
-    return { cashIn: new Decimal(inn._sum.amount?.toString() ?? 0), cashOut: new Decimal(out._sum.amount?.toString() ?? 0) };
+    const d = (v: { toString(): string } | null | undefined) => new Decimal(v?.toString() ?? 0);
+    return { cashIn: d(inn._sum.amount).plus(d(advIn._sum.amount)), cashOut: d(out._sum.amount).plus(d(advOut._sum.amount)) };
   }
 
   async summary(db: Db, ctx: RequestContext, id: string) {
     const s = await db.cashierShift.findFirstOrThrow({ where: { id, tenantId: ctx.tenantId } });
-    const [paid, refunded, receiptCount, cashier] = await Promise.all([
-      db.payment.groupBy({ by: ["method"], where: { tenantId: ctx.tenantId, receipt: { shiftId: id } }, _sum: { amount: true } }),
+    const [paidPay, paidAdv, refundedInv, refundedAdv, receiptCount, depositCount, cashier] = await Promise.all([
+      db.payment.groupBy({ by: ["method"], where: { tenantId: ctx.tenantId, advanceUseId: null, receipt: { shiftId: id } }, _sum: { amount: true } }),
+      db.advanceTender.groupBy({ by: ["method"], where: { tenantId: ctx.tenantId, deposit: { shiftId: id } }, _sum: { amount: true } }),
       db.refund.groupBy({ by: ["method"], where: { tenantId: ctx.tenantId, shiftId: id }, _sum: { amount: true } }),
+      db.advanceRefund.groupBy({ by: ["method"], where: { tenantId: ctx.tenantId, shiftId: id }, _sum: { amount: true } }),
       db.receipt.count({ where: { tenantId: ctx.tenantId, shiftId: id } }),
+      db.advanceDeposit.count({ where: { tenantId: ctx.tenantId, shiftId: id } }),
       db.user.findFirst({ where: { id: s.cashierId, tenantId: ctx.tenantId }, select: { fullName: true } }),
     ]);
+    // Advances taken and given back are money in and out of the drawer; advances used up against an invoice are not counted again.
+    const add = (a: { method: string; _sum: { amount: Prisma.Decimal | null } }[], b: { method: string; _sum: { amount: Prisma.Decimal | null } }[]) =>
+      METHODS.map((m) => ({ method: m as string, _sum: { amount: new Decimal(a.find((r) => r.method === m)?._sum.amount?.toString() ?? 0).plus(b.find((r) => r.method === m)?._sum.amount?.toString() ?? 0).toFixed(2) as unknown as Prisma.Decimal } }));
+    const paid = add(paidPay, paidAdv);
+    const refunded = add(refundedInv, refundedAdv);
     const sum = (rows: { method: string; _sum: { amount: Prisma.Decimal | null } }[], m: string) => new Decimal(rows.find((r) => r.method === m)?._sum.amount?.toString() ?? 0);
     const { cashIn, cashOut } = await this.cashTotals(db, ctx, id);
     const liveExpected = new Decimal(s.openingCash.toString()).plus(cashIn).minus(cashOut);
     return {
       id: s.id, status: s.status, cashierId: s.cashierId, cashierName: cashier?.fullName ?? null, openedAt: s.openedAt, closedAt: s.closedAt,
       openingCash: fmt(s.openingCash), expectedCash: fmt(s.expectedCash ?? liveExpected), actualCash: s.actualCash ? fmt(s.actualCash) : null, difference: s.difference ? fmt(s.difference) : null, closeNotes: s.closeNotes,
-      receiptCount,
+      receiptCount: receiptCount + depositCount,
       collectionsByMethod: Object.fromEntries(METHODS.map((m) => [m, fmt(sum(paid, m))])),
       refundsByMethod: Object.fromEntries(METHODS.map((m) => [m, fmt(sum(refunded, m))])),
       netCollections: fmt(METHODS.reduce((a, m) => a.plus(sum(paid, m)).minus(sum(refunded, m)), new Decimal(0))),
