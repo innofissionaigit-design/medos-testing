@@ -283,13 +283,14 @@ export class ConsultationsService {
     });
     if (!enc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const p = enc.patient;
-    const [allergies, vitals, previous, consultation] = await Promise.all([
+    const [allergies, vitals, previous, consultation, byVideo] = await Promise.all([
       this.allergies.list(ctx, p.id, false),
       ctx.permissions.has("VITALS_READ")
         ? this.prisma.observation.findMany({ where: { tenantId: ctx.tenantId, encounterId, status: "FINAL" }, orderBy: { recordedAt: "desc" }, take: 30, select: { id: true, type: true, value: true, unit: true, recordedAt: true } })
         : Promise.resolve([]),
       this.previousVisits(ctx, p.id, encounterId),
       this.get(ctx, encounterId),
+      this.prisma.teleconsult.count({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, appointment: { encounterId }, status: { not: "CANCELLED" } } }).then((n) => n > 0),
     ]);
     const latestVitals: Record<string, { value: string; unit: string; recordedAt: Date }> = {};
     for (const o of vitals) if (!latestVitals[o.type]) latestVitals[o.type] = { value: o.value.toString(), unit: o.unit, recordedAt: o.recordedAt };
@@ -297,7 +298,7 @@ export class ConsultationsService {
       header: {
         patientId: p.id, mrn: p.identifiers[0]?.value ?? null, name: [p.firstName, p.lastName].filter(Boolean).join(" "),
         gender: p.gender, age: currentAge(p), bloodGroup: p.bloodGroup, mobile: p.mobile,
-        encounterId: enc.id, encounterNumber: enc.encounterNumber, visitStatus: enc.status, startedAt: enc.startedAt,
+        encounterId: enc.id, encounterNumber: enc.encounterNumber, visitStatus: enc.status, startedAt: enc.startedAt, consultedByVideo: byVideo,
         practitionerId: enc.practitionerId, practitionerName: enc.practitioner?.displayName ?? null, practitionerSpecialty: enc.practitioner?.specialty ?? null, practitionerRegistrationNo: enc.practitioner?.registrationNo ?? null, departmentName: enc.department?.name ?? null,
       },
       allergies, latestVitals, previousVisits: previous, consultation,
@@ -339,13 +340,13 @@ export class ConsultationsService {
     const orders: OrderView[] = await tx.medicationOrder.findMany({
       where: { tenantId: ctx.tenantId, encounterId, status: "SIGNED", source: "DIGITAL" }, orderBy: { signedAt: "asc" },
       select: { id: true, orderNumber: true, status: true, source: true, encounterId: true, patientId: true, orderedById: true, signedById: true, signedAt: true, supersededAtVersion: true, createdAt: true,
-        items: { orderBy: { lineNo: "asc" }, select: { id: true, lineNo: true, medicineId: true, genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true, frequencyText: true, foodRelation: true, durationDays: true, quantity: true, instructions: true, status: true, dispensedQuantity: true, stopReason: true } } },
+        items: { orderBy: { lineNo: "asc" }, select: { id: true, lineNo: true, medicineId: true, genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true, frequencyText: true, foodRelation: true, durationDays: true, quantity: true, instructions: true, status: true, dispensedQuantity: true, stopReason: true, amendsItemId: true } } },
     });
     return {
       diagnoses,
       prescriptions: orders.map((o) => ({
         orderNumber: o.orderNumber,
-        items: o.items.map(({ id: _id, dispensedQuantity: _d, stopReason: _s, status: _st, ...rest }) => rest),
+        items: o.items.map(({ id: _id, dispensedQuantity: _d, stopReason: _s, status: _st, amendsItemId: _a, ...rest }) => rest),
       })),
     };
   }

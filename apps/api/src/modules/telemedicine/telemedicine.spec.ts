@@ -52,13 +52,23 @@ describe("telemedicine: making an appointment a video consultation, joining it, 
   const video = async (inMinutes = 5, o: Parameters<typeof appointment>[1] = {}) => { const ap = await appointment(inMinutes, o); const r = await make(ap.appointmentId); assert.equal(r.status, 201, JSON.stringify(r.body)); return { ...ap, id: r.body.data.id as string }; };
   const joinDoc = (id: string, tok = doc.token) => t.api("post", `/teleconsults/${id}/join`, tok);
   const codeFor = (mobile: string) => /^(\d{6}) is your/.exec([...sent].reverse().find((m) => m.to === mobile)?.text ?? "")?.[1] ?? "";
+  /** Proofs of a confirmed date of birth, per token, sent the way the web gateway sends them. */
+  const proofs = new Map<string, string[]>();
   const signIn = async (mobile: string) => {
     await t.api("post", "/patient-portal/auth/code").send({ hospitalCode: a.code, mobile });
     const r = await t.api("post", "/patient-portal/auth/verify").send({ hospitalCode: a.code, mobile, code: codeFor(mobile) });
     assert.equal(r.status, 200, JSON.stringify(r.body));
-    return r.body.data.token as string;
+    const token = r.body.data.token as string;
+    // Patients here share numbers on purpose; each is confirmed with the default test date of birth.
+    for (const pt of await t.prisma.patient.findMany({ where: { tenantId: a.tenantId, mobile }, select: { id: true } })) {
+      const u = await t.api("post", "/patient-portal/unlock").set("Authorization", `Bearer ${token}`).set("x-patient-proofs", proofHeader(token)).send({ patientId: pt.id, dateOfBirth: "1990-04-02" });
+      assert.equal(u.status, 200, JSON.stringify(u.body));
+      proofs.set(token, [...(proofs.get(token) ?? []), u.body.data.proof as string]);
+    }
+    return token;
   };
-  const patientJoin = (token: string, id: string, body: Record<string, unknown> = {}) => t.api("post", `/patient-portal/teleconsults/${id}/join`).set("Authorization", `Bearer ${token}`).send(body);
+  const proofHeader = (token: string) => (proofs.get(token) ?? []).join(",");
+  const patientJoin = (token: string, id: string, body: Record<string, unknown> = {}) => t.api("post", `/patient-portal/teleconsults/${id}/join`).set("Authorization", `Bearer ${token}`).set("x-patient-proofs", proofHeader(token)).send(body);
 
   before(async () => {
     t = await startApp();
@@ -164,7 +174,7 @@ describe("telemedicine: making an appointment a video consultation, joining it, 
     const v = await video(5);
     const later = await video(240, { mobile: v.mobile, doctor: doc });
     const token = await signIn(v.mobile);
-    const appts = (await t.api("get", `/patient-portal/appointments?patientId=${v.patient.id}`).set("Authorization", `Bearer ${token}`)).body.data as { upcoming: { id: string; video: { id: string; canJoin: boolean; consented: boolean } | null }[] };
+    const appts = (await t.api("get", `/patient-portal/appointments?patientId=${v.patient.id}`).set("Authorization", `Bearer ${token}`).set("x-patient-proofs", proofHeader(token))).body.data as { upcoming: { id: string; video: { id: string; canJoin: boolean; consented: boolean } | null }[] };
     assert.deepEqual(appts.upcoming.map((x) => [x.id, x.video?.id, x.video?.canJoin, x.video?.consented]), [[v.appointmentId, v.id, true, false]]);
     const noConsent = await patientJoin(token, v.id);
     assert.equal(noConsent.status, 409);

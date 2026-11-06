@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { RadImagesCard } from "./rad-images";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, Spinner, Table, Td, Textarea, useDebounced } from "./ui";
 
 interface WorkItem { testOrderId: string; test: string; state: string; accessionNumber: string | null; patient: string; mrn: string | null; modality: string | null; bodyPart: string | null; critical: boolean }
@@ -56,6 +57,7 @@ function StudyModal({ testOrderId, onClose }: { testOrderId: string; onClose: ()
             ) : <Notice tone="warn">This scan has not been done yet.</Notice>
           )}
           {d.study?.hasCritical && <Notice tone="error">A critical finding was reported{d.study.criticalAcknowledged ? " and the doctor has acknowledged it." : ": the doctor must acknowledge it."}</Notice>}
+          {d.study && <RadImagesCard studyId={d.study.id} canManage={can("RAD_PERFORM")} />}
           {d.study && d.study.clinicalNotes && <p className="text-sm text-slate-600">Clinical notes: {d.study.clinicalNotes}</p>}
           {reported && latest && !amending && (
             <div className="space-y-2 rounded-md border border-slate-200 p-3 text-sm">
@@ -132,6 +134,7 @@ export function RadCritical() {
 /** The doctor's view of the radiology tests of one visit: where each stands, the report once signed, and acknowledging a critical finding. */
 export function VisitRadiology({ encounterId }: { encounterId: string }) {
   const { can } = useMe();
+  const [imagesOf, setImagesOf] = useState<string | null>(null);
   const qc = useQueryClient();
   const q = useQuery({ queryKey: ["visit-rad", encounterId], queryFn: () => api.get<{ testOrderId: string; test: string; state: string; studyId: string | null; critical: boolean; amended: boolean; report: { findings: string; impression: string } | null }[]>(`/encounters/${encounterId}/radiology`), enabled: can("RAD_READ"), refetchInterval: 30_000 });
   const ack = useMutation({ mutationFn: (id: string) => api.post(`/rad/studies/${id}/acknowledge`, {}, newKey()), onSuccess: () => { void qc.invalidateQueries({ queryKey: ["visit-rad", encounterId] }); } });
@@ -144,7 +147,8 @@ export function VisitRadiology({ encounterId }: { encounterId: string }) {
           <div key={o.testOrderId} className="text-sm">
             <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{o.test}</span><Badge tone={o.state === "REPORTED" ? "green" : "gray"}>{STATE_LABEL[o.state] ?? o.state}</Badge>{o.amended && <Badge tone="amber">amended</Badge>}
               {o.critical && o.studyId && <Button variant="secondary" loading={ack.isPending} onClick={() => ack.mutate(o.studyId!)}>Critical: acknowledge</Button>}
-              {o.state === "REPORTED" && <a className="text-brand-700" href={printUrl(`radiology-reports/${o.testOrderId}`)} target="_blank" rel="noreferrer">Print report</a>}</div>
+              {o.state === "REPORTED" && <a className="text-brand-700" href={printUrl(`radiology-reports/${o.testOrderId}`)} target="_blank" rel="noreferrer">Print report</a>}{o.studyId && <button className="text-brand-700 hover:underline" onClick={() => setImagesOf(imagesOf === o.studyId ? null : o.studyId)}>{imagesOf === o.studyId ? "Hide images" : "Images"}</button>}</div>
+            {o.studyId && imagesOf === o.studyId && <div className="mt-2"><RadImagesCard studyId={o.studyId} canManage={false} /></div>}
             {o.report && <div className="mt-1 text-slate-700"><div>{o.report.findings}</div><div className="font-medium">Impression: {o.report.impression}</div></div>}
           </div>
         ))}

@@ -37,6 +37,12 @@ A nightly dump can lose up to a day. PITR keeps every change (WAL) so the databa
 
 **Rehearse it any time, safely:** `db-backup pitr-rehearsal` builds a throwaway cluster in a temp folder on port 54400 (never your real database), turns on archiving, takes a base backup, writes data, "makes a mistake" (drops the table), then recovers to the moment before it and checks the rows. Test: `pitr.spec.ts`. Last result: passed (about 50 s).
 
+**Docker stack (switched on by default).** `docker-compose.yml` starts the database with `wal_level=replica`, `archive_mode=on`, `archive_timeout=60` and an archive command that copies each WAL file to the `medos-wal-archive` volume (never overwriting a file, and failing so PostgreSQL retries when the copy fails). A one-off job (`wal-archive-init`) gives that volume and `medos-base-backups` to the postgres user before the database starts; without it every archive attempt would fail and the WAL would pile up on the data disk. Take a base backup (the starting point a recovery replays the archive from) regularly, for example daily:
+```
+docker compose exec -u postgres db sh -c 'pg_basebackup -U "$POSTGRES_USER" -D /base-backups/base-$(date -u +%Y%m%dT%H%M%SZ) -X stream -c fast'
+```
+Check it is working: `SELECT archived_count, failed_count, last_archived_time FROM pg_stat_archiver;` (failed_count should stay 0). **Still the operator's job:** both volumes live on the same host as the database unless they are mounted from another disk, so copy them off-host (the same way as the encrypted backups) or point the volumes at a different disk; prune archived WAL older than the oldest base backup you keep; and rehearse a recovery (below) before relying on it. This was written and checked as configuration only (`docker compose config`); the Docker stack has not been run here.
+
 **Production (self-managed server)** in `postgresql.conf`:
 
 ```

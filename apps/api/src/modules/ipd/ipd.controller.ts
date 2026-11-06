@@ -12,7 +12,7 @@ import {
 } from "./wards.service";
 
 const wardQuery = z.object({ includeInactive: z.enum(["true", "false"]).default("false").transform((v) => v === "true") }).strict();
-const roomQuery = z.object({ wardId: z.string().uuid().optional() }).strict();
+const roomQuery = z.object({ wardId: z.string().uuid().optional(), includeInactive: z.enum(["true", "false"]).default("false").transform((v) => v === "true") }).strict();
 
 @Feature("IPD_ENABLED")
 @Controller()
@@ -42,7 +42,8 @@ export class IpdController {
   @RequirePermissions("ADMISSION_READ")
   @Get("rooms")
   async listRooms(@Ctx() ctx: RequestContext, @Query() query: unknown) {
-    return { data: await this.wards.listRooms(ctx, parse(roomQuery, query).wardId) };
+    const q = parse(roomQuery, query);
+    return { data: await this.wards.listRooms(ctx, q.wardId, q.includeInactive && ctx.permissions.has("ADMIN_MASTERS")) };
   }
 
   @RequirePermissions("ADMIN_MASTERS")

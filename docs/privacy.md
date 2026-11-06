@@ -15,7 +15,7 @@ Rollback script (destroys the new records; written but not run): `packages/datab
 
 Both tables are hospital-scoped (`tenantId`, composite foreign key to the patient, row-level-security policy) and carry the same isolation tests as every other tenant table.
 
-Consent purposes today: `PRIVACY_NOTICE_ACKNOWLEDGED` and `APPOINTMENT_REMINDERS`. They are the two the product can act on; the list is expected to change after the legal review.
+Consent purposes today: `PRIVACY_NOTICE_ACKNOWLEDGED`, `APPOINTMENT_REMINDERS` and `EMAIL_MESSAGES` (appointment, receipt and report emails: [email.md](email.md)). They are the ones the product can act on; the list is expected to change after the legal review.
 
 ## Workflows
 
@@ -68,3 +68,7 @@ COMPLETED and REJECTED are final (log a new request to reopen the matter) and ne
 3. Assess: whether personal data was accessed or lost, and whether it was encrypted (backups are AES-256-GCM encrypted; see [backup.md](backup.md)).
 4. Notify: who must be told (the hospital as fiduciary, the regulator, affected patients), by when, and in what words: **to be decided by the legal review**.
 5. Remediate, then review: fix the cause, add a test, update this checklist.
+
+
+## What the audit trail shows about allergies
+An allergy override (signing a prescription, or dispensing, despite an allergy alert) is audited with who did it, when, on which order or dispense, how many alerts, and their severities, plus the ids of the allergy records. The allergen name is not copied into the audit trail, because managers and administrators can read it and the name is clinical detail; anyone with clinical access sees it on the order itself. Older events written before 5 Nov 2026 still carry the name.

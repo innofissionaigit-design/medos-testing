@@ -21,9 +21,29 @@ describe("patient app: sign-in with a code, what a patient sees, and appointment
   const setting = (value: boolean, tenant = a) => t.api("put", "/settings/PATIENT_PORTAL_ENABLED", tenant.admin.token).send({ value });
   const ask = (mobile: string, hospitalCode = a.code) => t.api("post", "/patient-portal/auth/code").send({ hospitalCode, mobile });
   const verify = (mobile: string, code: string, hospitalCode = a.code) => t.api("post", "/patient-portal/auth/verify").send({ hospitalCode, mobile, code });
-  const signIn = async (mobile: string, tenant = a) => { await ask(mobile, tenant.code); const r = await verify(mobile, codeFor(mobile), tenant.code); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body.data.token as string; };
-  const get = (path: string, token?: string) => (token ? t.api("get", path).set("Authorization", `Bearer ${token}`) : t.api("get", path));
-  const post = (path: string, token: string, body: Record<string, unknown> = {}) => t.api("post", path).set("Authorization", `Bearer ${token}`).send(body);
+  /** The signed proofs each token has earned by confirming a date of birth; the helpers below send them the way the web gateway does. */
+  const proofs = new Map<string, string[]>();
+  const authed = (method: "get" | "post", path: string, token: string) => {
+    const r = t.api(method, path).set("Authorization", `Bearer ${token}`);
+    const p = proofs.get(token);
+    return p?.length ? r.set("x-patient-proofs", p.join(",")) : r;
+  };
+  const unlock = async (token: string, patientId: string, dateOfBirth = "1990-04-02") => {
+    const r = await authed("post", "/patient-portal/unlock", token).send({ patientId, dateOfBirth });
+    if (r.status === 200) proofs.set(token, [...(proofs.get(token) ?? []).filter((x) => !x.startsWith(patientId)), r.body.data.proof as string]);
+    return r;
+  };
+  /** Signs in. By default it also confirms every patient on the number (they all have the default test date of birth); `confirm: false` leaves them locked. */
+  const signIn = async (mobile: string, tenant = a, confirm = true) => {
+    await ask(mobile, tenant.code);
+    const r = await verify(mobile, codeFor(mobile), tenant.code);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const token = r.body.data.token as string;
+    if (confirm) for (const pt of await t.prisma.patient.findMany({ where: { tenantId: tenant.tenantId, mobile }, select: { id: true } })) await unlock(token, pt.id);
+    return token;
+  };
+  const get = (path: string, token?: string) => (token ? authed("get", path, token) : t.api("get", path));
+  const post = (path: string, token: string, body: Record<string, unknown> = {}) => authed("post", path, token).send(body);
   /** A patient with this mobile, with a signed consultation and prescription. */
   const visit = async (mobile: string, sign = true, first = "Meera") => {
     const patient = await registerPatient(t, rec.token, { firstName: first });
@@ -166,6 +186,90 @@ describe("patient app: sign-in with a code, what a patient sees, and appointment
       assert.equal(bToken, null, "the number is not a patient of the other hospital");
     });
 
+    it("a family sharing one number sees only first names until each person confirms their own date of birth", async () => {
+      const mobile = mobileNo();
+      const asha = await visit(mobile, true, "Asha");
+      const bina = await visit(mobile, true, "Bina");
+      const token = await signIn(mobile, a, false);
+      const me = (await get("/patient-portal/me", token)).body.data as { patients: { id: string; name: string; mrn: string | null; gender: string | null; age: number | null; locked: boolean; canUnlock: boolean }[] };
+      assert.equal(me.patients.length, 2);
+      for (const pt of me.patients) assert.deepEqual([pt.locked, pt.canUnlock, pt.mrn, pt.gender, pt.age], [true, true, null, null, null], "nothing but a first name before confirming");
+      assert.deepEqual(me.patients.map((x) => x.name).sort(), ["Asha", "Bina"]);
+      const lastNames = await t.prisma.patient.findMany({ where: { id: { in: [asha.patient.id, bina.patient.id] } }, select: { lastName: true } });
+      assert.ok(!JSON.stringify(me).includes(lastNames[0]!.lastName!), "no surname while locked");
+      for (const path of ["appointments", "visits", "reports", "bills", "appointment-requests"]) {
+        const r = await get(`/patient-portal/${path}?patientId=${asha.patient.id}`, token);
+        assert.deepEqual([r.status, r.body.error?.code], [403, "PROFILE_LOCKED"], path);
+      }
+      assert.equal((await post("/patient-portal/appointment-requests", token, { patientId: asha.patient.id, preferredDate: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10), reason: "Follow-up visit" })).status, 403, "cannot ask for an appointment for a locked patient");
+      // A wrong date of birth does not open anything and is recorded.
+      const wrong = await unlock(token, asha.patient.id, "1991-04-02");
+      assert.deepEqual([wrong.status, wrong.body.error.code], [403, "PROFILE_VERIFICATION_FAILED"]);
+      assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "PATIENT_APP_UNLOCK_FAILED", entityId: asha.patient.id } }));
+      assert.equal((await get(`/patient-portal/visits?patientId=${asha.patient.id}`, token)).status, 403);
+      // The right one opens that person only.
+      assert.equal((await unlock(token, asha.patient.id)).status, 200);
+      assert.equal((await get(`/patient-portal/visits?patientId=${asha.patient.id}`, token)).status, 200);
+      assert.equal((await get(`/patient-portal/visits?patientId=${bina.patient.id}`, token)).status, 403, "confirming Asha does not open Bina");
+      const after = (await get("/patient-portal/me", token)).body.data as { patients: { id: string; name: string; mrn: string | null; locked: boolean }[] };
+      assert.deepEqual(after.patients.map((x) => [x.id === asha.patient.id, x.locked, !!x.mrn]).sort(), [[false, true, false], [true, false, true]]);
+      assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "PATIENT_APP_PROFILE_UNLOCKED", entityId: asha.patient.id } }));
+    });
+
+    it("a proof works only for its own session, patient and hospital, and cannot be forged or reused after sign-out", async () => {
+      const mobile = mobileNo();
+      const one = await visit(mobile, true, "Esha");
+      await visit(mobile, true, "Farah");
+      const token = await signIn(mobile);
+      const proof = proofs.get(token)!.find((x) => x.startsWith(one.patient.id))!;
+      assert.ok(proof);
+      const other = await signIn(mobile, a, false);
+      const replay = await t.api("get", `/patient-portal/visits?patientId=${one.patient.id}`).set("Authorization", `Bearer ${other}`).set("x-patient-proofs", proof);
+      assert.equal(replay.status, 403, "a proof from another session is ignored");
+      const [id, exp, sig] = proof.split(".") as [string, string, string];
+      for (const forged of [`${id}.${Number(exp) + 60_000}.${sig}`, `${id}.${exp}.${"A".repeat(43)}`, `${randomUUID()}.${exp}.${sig}`, `${id}.${Date.now() - 1000}.${sig}`, "garbage", ""]) {
+        assert.equal((await t.api("get", `/patient-portal/visits?patientId=${one.patient.id}`).set("Authorization", `Bearer ${other}`).set("x-patient-proofs", forged)).status, 403, forged);
+      }
+      const out = await post("/patient-portal/logout", token);
+      assert.equal(out.status, 200);
+      assert.equal((await get(`/patient-portal/visits?patientId=${one.patient.id}`, token)).status, 401, "a signed-out session opens nothing, proof or not");
+    });
+
+    it("locks confirming after five wrong tries for a patient, even from a new sign-in; a patient without a date of birth cannot be confirmed", async () => {
+      const mobile = mobileNo();
+      const target = await visit(mobile, true, "Gita");
+      await visit(mobile, true, "Hari");
+      const first = await signIn(mobile, a, false);
+      for (let i = 0; i < 5; i++) assert.equal((await unlock(first, target.patient.id, "1980-01-01")).status, 403);
+      const sixth = await unlock(first, target.patient.id);
+      assert.deepEqual([sixth.status, sixth.body.error.code], [429, "RATE_LIMITED"], "even the right answer is refused once locked out");
+      // A fresh sign-in does not reset the count.
+      const second = await signIn(mobile, a, false);
+      assert.equal((await unlock(second, target.patient.id)).status, 429);
+      assert.equal((await unlock(first, randomUUID())).status, 404);
+      assert.equal((await unlock(first, target.patient.id, "not-a-date")).status, 400);
+      assert.equal((await t.api("post", "/patient-portal/unlock").send({ patientId: target.patient.id, dateOfBirth: "1990-04-02" })).status, 401);
+
+      const m2 = mobileNo();
+      const noDob = { patient: await registerPatient(t, rec.token, { firstName: "Indu", dateOfBirth: undefined, estimatedAgeYears: 34 }) };
+      await t.prisma.patient.update({ where: { id: noDob.patient.id }, data: { mobile: m2 } });
+      await visit(m2, true, "Jai");
+      const tk = await signIn(m2, a, false);
+      const list = (await get("/patient-portal/me", tk)).body.data as { patients: { id: string; canUnlock: boolean }[] };
+      assert.equal(list.patients.find((x) => x.id === noDob.patient.id)?.canUnlock, false);
+      const r = await unlock(tk, noDob.patient.id);
+      assert.deepEqual([r.status, r.body.error.code], [409, "PROFILE_NOT_VERIFIABLE"]);
+    });
+
+    it("a number with a single patient needs no extra step", async () => {
+      const mobile = mobileNo();
+      const only = await visit(mobile, true, "Kavya");
+      const token = await signIn(mobile, a, false);
+      const me = (await get("/patient-portal/me", token)).body.data as { patients: { locked: boolean; mrn: string | null }[] };
+      assert.deepEqual(me.patients.map((x) => [x.locked, !!x.mrn]), [[false, true]]);
+      assert.equal((await get(`/patient-portal/visits?patientId=${only.patient.id}`, token)).status, 200);
+    });
+
     it("shows signed visits with the diagnosis, advice and prescription; never a draft", async () => {
       const mobile = mobileNo();
       const signed = await visit(mobile, true, "Signed");
@@ -270,6 +374,9 @@ describe("patient app: sign-in with a code, what a patient sees, and appointment
       assert.equal(list.status, 200);
       const row = (list.body.data.items as { id: string; patientId: string; reason: string }[]).find((x) => x.id === r.body.data.id)!;
       assert.deepEqual([row.patientId, row.reason], [p.patient.id, "Follow-up for fever"]);
+      // The front desk is told a patient asked (once); the nurse and the other hospital are not (notifications.md).
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: rec.id, type: "BOOKING_FROM_OUTSIDE", entityId: r.body.data.id } }), 1);
+      assert.equal(await t.prisma.notification.count({ where: { recipientUserId: { in: [nurse.id, bRec.id] }, entityId: r.body.data.id } }), 0);
       assert.equal((await t.api("get", "/appointment-requests", nurse.token)).status, 403);
       assert.equal((await t.api("get", "/appointment-requests", token)).status, 401, "a patient token is not a staff token");
       assert.equal(((await t.api("get", "/appointment-requests?pageSize=100", bRec.token)).body.data.items as { id: string }[]).some((x) => x.id === r.body.data.id), false);

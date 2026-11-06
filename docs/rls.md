@@ -130,6 +130,13 @@ drop tables, truncate patient data, or edit the audit trail. Exit code 0 only if
 `apps/api/src/common/rls.bench.spec.ts` prints median and 95th-percentile latency for a representative workload in whichever mode runs. See the
 results table under "Evidence (phase 3)".
 
+## The id sweep (tenant isolation test)
+`apps/api/src/common/tenant-sweep.spec.ts` is the application-level check. A user of a new hospital who holds **every** permission (and is a practitioner, with handwritten prescriptions and the fee reasons switched on) tries every route of every controller that takes an id in its path, about 255 routes, against **real ids** of other hospitals' records: one or two from each of the ~107 tables that have a `tenantId`, taken from whatever the test database holds (about 55,000 requests). Random ids prove nothing, since they are "not found" whether or not a route checks the hospital.
+
+It asserts that no request succeeds or crashes, that every read route answers 404, and that every write route is **driven to its lookup** and answers 404. A write route has to pass input validation first, so the test learns a valid body for each route from the validation errors (with a few starting bodies for routes with configured reasons or unions). A route it cannot drive must be listed with a reason and the module test that covers it (today only the AI draft route and the two patient-app routes). A new route that cannot be driven fails the test until someone decides.
+
+Real defects it found and that are fixed: schedule and availability of an unknown practitioner answered 400 instead of 404; `GET /admissions/:id/intake-output/totals?date=garbage` answered 500; settling a registration fee for another hospital's patient answered 409 instead of 404.
+
 ## Where things are
 
 | What | Where |

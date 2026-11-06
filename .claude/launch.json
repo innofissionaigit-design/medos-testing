@@ -2,6 +2,8 @@
   "version": "0.0.1",
   "configurations": [
     { "name": "api", "runtimeExecutable": "C:\\Users\\Chakravardhan\\medos-tools\\node\\node-v22.23.4-win-x64\\node.exe", "runtimeArgs": ["--env-file=.local/api.dev.env", "apps/api/dist/main.js"], "port": 4000 },
-    { "name": "web", "runtimeExecutable": "C:\\Users\\Chakravardhan\\medos-tools\\node\\node-v22.23.4-win-x64\\node.exe", "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "-p", "3000"], "cwd": "apps/web", "port": 3000 }
+    { "name": "web", "runtimeExecutable": "C:\\Users\\Chakravardhan\\medos-tools\\node\\node-v22.23.4-win-x64\\node.exe", "runtimeArgs": ["node_modules/next/dist/bin/next", "dev", "-p", "3000"], "cwd": "apps/web", "port": 3000 },
+    { "name": "show-api", "runtimeExecutable": "C:\\Users\\Chakravardhan\\AppData\\Local\\Microsoft\\WinGet\\Packages\\OpenJS.NodeJS.22_Microsoft.Winget.Source_8wekyb3d8bbwe\\node-v22.22.0-win-x64\\node.exe", "runtimeArgs": ["--env-file=.local/show-api.env", "apps/api/dist/main.js"], "port": 4100 },
+    { "name": "show-web", "runtimeExecutable": "C:\\Users\\Chakravardhan\\AppData\\Local\\Microsoft\\WinGet\\Packages\\OpenJS.NodeJS.22_Microsoft.Winget.Source_8wekyb3d8bbwe\\node-v22.22.0-win-x64\\node.exe", "runtimeArgs": ["--env-file=../../.local/show-web.env", "node_modules/next/dist/bin/next", "start", "-p", "3100"], "cwd": "apps/web", "port": 3100 }
   ]
 }

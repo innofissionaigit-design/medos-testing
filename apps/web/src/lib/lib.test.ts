@@ -58,3 +58,24 @@ test("API errors are shown as short sentences", () => {
   assert.equal(errorText(new Error("boom")), "boom");
   assert.equal(errorText("weird"), "Something went wrong");
 });
+
+test("LIS is one module with Pathology and Radiology branches, each person seeing only their own", async () => {
+  const { lisBranches } = await import("./lis-branches");
+  const canOf = (...have: string[]) => (...p: string[]) => p.some((x) => have.includes(x));
+  // Navigation: one LIS entry, no separate Laboratory / Radiology entries
+  const nav = (...have: string[]) => visibleNav(new Set([...have, "PATIENT_READ"]), ALL_ON, []).map((n) => n.href);
+  assert.ok(nav("LAB_RESULT").includes("/lis") && nav("RAD_REPORT").includes("/lis"));
+  assert.ok(!nav("LAB_RESULT", "RAD_REPORT").includes("/lab") && !nav("LAB_RESULT", "RAD_REPORT").includes("/radiology"));
+  assert.ok(!nav("INVOICE_READ").includes("/lis"), "billing staff do not see LIS");
+  // Branches by role
+  const tech = lisBranches(canOf("LAB_READ", "LAB_COLLECT", "LAB_RESULT"));
+  assert.deepEqual(tech.allowed, ["pathology"]);
+  const radiologist = lisBranches(canOf("RAD_READ", "RAD_REPORT"));
+  assert.deepEqual(radiologist.allowed, ["radiology"]);
+  assert.equal(radiologist.first, "radiology");
+  const doctor = lisBranches(canOf("LAB_READ", "RAD_READ"));
+  assert.deepEqual(doctor.allowed, ["pathology", "radiology"], "a doctor may read both branches");
+  const both = lisBranches(canOf("LAB_READ", "LAB_VERIFY", "RAD_READ", "RAD_REPORT"));
+  assert.equal(both.first, "pathology", "someone working in both starts in Pathology");
+  assert.deepEqual(lisBranches(canOf("INVOICE_READ")).allowed, [], "no LIS permission, no branch");
+});

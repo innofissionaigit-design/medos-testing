@@ -79,3 +79,7 @@ Permissions: change the model or add rules `EARNINGS_CONFIGURE`; read the model,
 * The ledger counts OPD and IPD bills of a visit. The booking report above still works from the appointment's own collection (including booking fees and cancellation charges), so its figures can differ from the ledger for visits that had a booking fee.
 * The ledger starts when a visit's first payment is received after a rule exists; payments taken before then are included in that first line (the difference rule) but have no line of their own.
 * An IPD visit is shared with the admitting consultant only. Splitting one admission between several doctors is not supported.
+
+## Exporting a report
+
+"Download CSV" first records the export in the audit trail (`REPORT_EXPORTED`: who, which report, the dates, the number of rows; never the rows themselves) and only then saves the file. If the record cannot be written the file is not saved. Each person can only record, and so export, the reports they may open (`POST /reports/export-log`). Spreadsheet formulas in the data are neutralised in the file (`apps/web/src/lib/csv.ts`).

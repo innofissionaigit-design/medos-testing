@@ -183,6 +183,26 @@ describe("booking payment link: a deadline for the booking fee, with automatic c
       assert.deepEqual([meta["reason"], meta["fee"], meta["paid"]], [AUTO_CANCEL_REASON, "300.00", "0.00"]);
       assert.equal((await links.runDue(new Date(row.dueBy.getTime() + 5 * MIN), new FakeProvider())).cancelled, 0, "nothing to do the second time");
       assert.equal(await t.prisma.auditEvent.count({ where: { tenantId: a.tenantId, action: "APPOINTMENT_AUTO_CANCELLED", entityId: appt.id } }), 1);
+      // Reception is told once, and the second run adds nothing (notifications.md); another hospital's reception is not.
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: rec.id, type: "BOOKING_AUTO_CANCELLED", entityId: appt.id } }), 1);
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: b.tenantId, recipientUserId: bRec.id, entityId: appt.id } }), 0);
+    });
+    it("an automatic cancellation also emails the patient that the appointment was cancelled (with their agreement)", async () => {
+      await turnOn();
+      assert.equal((await t.api("put", "/settings/EMAIL_ENABLED", a.admin.token).send({ value: true })).status, 200);
+      try {
+        const address = `auto${Date.now()}@example.org`;
+        const { patient, appt } = await booked(a, { email: address });
+        await t.prisma.patientConsent.create({ data: { tenantId: a.tenantId, patientId: patient.id, purpose: "EMAIL_MESSAGES", status: "GRANTED", method: "VERBAL", recordedById: rec.id } });
+        const row = await link(appt.id);
+        await links.runDue(new Date(row.dueBy.getTime() + MIN), new FakeProvider());
+        assert.equal((await get(appt.id)).status, "CANCELLED");
+        const cancelled = await t.prisma.emailOutbox.findMany({ where: { tenantId: a.tenantId, patientId: patient.id, templateKey: "APPOINTMENT_CANCELLED" } });
+        assert.equal(cancelled.length, 1);
+        assert.equal(cancelled[0]!.toAddress, address);
+      } finally {
+        await t.api("put", "/settings/EMAIL_ENABLED", a.admin.token).send({ value: false });
+      }
     });
     it("a fee paid before the deadline is never cancelled, even long after it", async () => {
       await turnOn();

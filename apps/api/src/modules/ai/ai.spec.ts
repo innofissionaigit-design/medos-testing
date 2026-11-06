@@ -1,6 +1,6 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomInt } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { makeDoctor, registerPatient, startApp, startVisit, uniqueWord, type TestApp, type TestDoctor, type TestTenant } from "../../test/harness";
@@ -86,7 +86,9 @@ describe("AI assistant: connection, readiness, drafts and the doctor's review", 
 
   /** A patient with a signed earlier visit and a second, current visit with the doctor. */
   const patientWithHistory = async (first = "Zubeida", last = "Quraishi") => {
-    const p = await registerPatient(t, rec.token, { firstName: `${first}${uniqueWord(3)}`, lastName: `${last}${uniqueWord(4)}` });
+    // The names are chosen (the helper cannot retry them) and every test patient shares a birth date by default, so two of these could look like the same person. A birth date of its own per patient keeps them apart.
+    const dateOfBirth = new Date(Date.UTC(1940, 0, 1) + randomInt(0, 20_000) * 86_400_000).toISOString().slice(0, 10);
+    const p = await registerPatient(t, rec.token, { firstName: `${first}${uniqueWord(3)}`, lastName: `${last}${uniqueWord(4)}`, dateOfBirth });
     const row = await t.prisma.patient.findFirstOrThrow({ where: { id: p.id } });
     const mobile = row.mobile!;
     const named = row.firstName;

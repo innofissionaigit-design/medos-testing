@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { T } from "@/lib/i18n";
 import { useQuery } from "@tanstack/react-query";
 import { Badge, Button, Card, Spinner, Table, Td } from "@/components/ui";
 import { api } from "@/lib/api";
@@ -25,11 +26,11 @@ export function LedgerCard({ patientId }: { patientId: string }) {
       {q.isLoading ? <Spinner /> : !d || d.entries.length === 0 ? <p className="text-sm text-slate-500">No money movements yet.</p> : (
         <>
           <div className="mb-2 flex flex-wrap items-center gap-2 text-sm">
-            Balance <b>{money(Math.abs(balance).toFixed(2))}</b>
+            <T>Balance</T> <b>{money(Math.abs(balance).toFixed(2))}</b>
             <Badge tone={d.position === "PATIENT_OWES" ? "red" : d.position === "HELD_FOR_PATIENT" ? "blue" : "green"}>
               {d.position === "PATIENT_OWES" ? "patient owes" : d.position === "HELD_FOR_PATIENT" ? "held for the patient (advance)" : "settled"}
             </Badge>
-            <span className="text-slate-500">Debits {money(d.totals.debit)} · Credits {money(d.totals.credit)}</span>
+            <span className="text-slate-500"><T>Debits</T> {money(d.totals.debit)} · <T>Credits</T> {money(d.totals.credit)}</span>
           </div>
           <Table head={["Date", "Reference", "Details", "Debit", "Credit", "Balance"]}>
             {shown.map((e, i) => (

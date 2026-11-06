@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { T } from "@/lib/i18n";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
@@ -10,7 +11,7 @@ import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Select, Spinner, S
 // answered are legal decisions that are still pending (docs/privacy.md, docs/reviews/pending-decisions.md).
 
 interface Consent { id: string; purpose: string; status: "GRANTED" | "WITHDRAWN"; method: string; noticeVersion: string | null; recordedAt: string }
-const PURPOSE: Record<string, string> = { PRIVACY_NOTICE_ACKNOWLEDGED: "Privacy notice acknowledged", APPOINTMENT_REMINDERS: "Appointment reminders by SMS" };
+const PURPOSE: Record<string, string> = { PRIVACY_NOTICE_ACKNOWLEDGED: "Privacy notice acknowledged", APPOINTMENT_REMINDERS: "Appointment reminders by SMS", EMAIL_MESSAGES: "Appointment, receipt and report emails" };
 const TYPE: Record<string, string> = { ACCESS: "Copy of records", CORRECTION: "Correction", ERASURE: "Erasure", GRIEVANCE: "Complaint" };
 
 function DataRequestModal({ patientId, onClose }: { patientId: string; onClose: () => void }) {
@@ -52,7 +53,7 @@ export function ConsentCard({ patientId }: { patientId: string }) {
             const s = stateOf(purpose);
             return (
               <div key={purpose} className="flex items-center justify-between gap-2 text-sm">
-                <div>{label}<div className="text-xs text-slate-500">{s ? `${s.status === "GRANTED" ? "Agreed" : "Withdrawn"} · ${s.method.toLowerCase()} · ${dateTime(s.recordedAt)}${s.noticeVersion ? ` · notice ${s.noticeVersion}` : ""}` : "Nothing recorded"}</div></div>
+                <div><T>{label}</T><div className="text-xs text-slate-500">{s ? `${s.status === "GRANTED" ? "Agreed" : "Withdrawn"} · ${s.method.toLowerCase()} · ${dateTime(s.recordedAt)}${s.noticeVersion ? ` · notice ${s.noticeVersion}` : ""}` : <T>Nothing recorded</T>}</div></div>
                 <div className="flex items-center gap-2">
                   {s ? <StatusBadge value={s.status} /> : <Badge>not recorded</Badge>}
                   {can("PATIENT_UPDATE") && (

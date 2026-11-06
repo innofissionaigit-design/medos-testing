@@ -314,6 +314,9 @@ describe("laboratory (LIMS): tests, samples, results, verification and critical 
       assert.ok(list.some((c) => c.resultId === x.resultId && c.doctor === d1.token.slice(0, 0) + (list.find((y) => y.resultId === x.resultId)?.doctor ?? "")));
       assert.ok(((await t.api("get", "/lab/worklist?state=CRITICAL&pageSize=100", tech.token)).body.data.items as { testOrderId: string; critical: boolean }[]).some((i) => i.testOrderId === x.orderId && i.critical));
       assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "LAB_CRITICAL_RESULT", entityId: x.resultId } }));
+      // The doctor of the visit is told once (notifications.md); another doctor is not.
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: d1.userId, type: "CRITICAL_LAB_RESULT", entityId: x.resultId } }), 1);
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: d2.userId, entityId: x.resultId } }), 0);
       assert.equal((await t.api("post", `/lab/results/${x.resultId}/acknowledge`, d2.token)).status, 404, "another doctor's patient");
       assert.equal((await t.api("post", `/lab/results/${x.resultId}/acknowledge`, rec.token)).status, 403);
       assert.equal((await t.api("post", `/lab/results/${x.resultId}/acknowledge`, bPath.token)).status, 404);
@@ -443,4 +446,26 @@ describe("laboratory (LIMS): tests, samples, results, verification and critical 
       assert.ok((me.body.data.permissions as string[]).includes("LAB_VERIFY"));
     });
   });
+
+  it("releasing a report emails the patient that one is ready (never what it says), once, and only with their agreement", async () => {
+    assert.equal((await t.api("put", "/settings/EMAIL_ENABLED", a.admin.token).send({ value: true })).status, 200);
+    try {
+      const x = await ready(normalValues());
+      const patientId = (await t.prisma.testOrder.findFirstOrThrow({ where: { id: x.orderId }, select: { encounter: { select: { patientId: true } } } })).encounter.patientId;
+      const address = `lab${uniqueWord(6)}@example.org`.toLowerCase();
+      await t.prisma.patient.update({ where: { id: patientId }, data: { email: address } });
+      await t.prisma.patientConsent.create({ data: { tenantId: a.tenantId, patientId, purpose: "EMAIL_MESSAGES", status: "GRANTED", method: "VERBAL", recordedById: rec.id } });
+      assert.equal((await verify(x.resultId, x.version)).status, 200);
+      const mail = await t.prisma.emailOutbox.findMany({ where: { tenantId: a.tenantId, patientId } });
+      assert.equal(mail.length, 1);
+      assert.deepEqual([mail[0]!.templateKey, mail[0]!.toAddress, mail[0]!.entityType, mail[0]!.entityId], ["REPORT_READY", address, "LabResult", x.resultId]);
+      assert.ok(!/haemoglobin|platelet|13\.0|normocytic/i.test(mail[0]!.bodyText + mail[0]!.subject), "no test name or value in the email");
+      const amend = await t.api("post", `/lab/results/${x.resultId}/amend`, path.token).send({ expectedVersion: 1, reason: "Corrected a value", values: Object.entries(normalValues()).map(([parameterId, value]) => ({ parameterId, value })) });
+      assert.equal(amend.status, 200, JSON.stringify(amend.body));
+      assert.equal(await t.prisma.emailOutbox.count({ where: { tenantId: a.tenantId, patientId } }), 1, "an amendment does not email again");
+    } finally {
+      await t.api("put", "/settings/EMAIL_ENABLED", a.admin.token).send({ value: false });
+    }
+  });
+
 });

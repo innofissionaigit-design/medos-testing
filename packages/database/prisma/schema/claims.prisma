@@ -57,6 +57,11 @@ model PatientPolicy {
   validFrom    DateTime    @db.Date
   validTo      DateTime    @db.Date
   sumInsured   Decimal?    @db.Decimal(14, 2)
+  /// What the patient pays of the covered amount, in percent. Empty means the policy has no co-pay rule and the claimed amount is entered by hand.
+  copayPercent Decimal?    @db.Decimal(5, 2)
+  /// Fixed amount the patient bears first, and how much of it earlier claims have already used.
+  deductible     Decimal   @default(0) @db.Decimal(14, 2)
+  deductibleUsed Decimal   @default(0) @db.Decimal(14, 2)
   status       PayerStatus @default(ACTIVE)
   createdById  String      @db.Uuid
   createdAt    DateTime    @default(now()) @db.Timestamptz(3)
@@ -88,6 +93,13 @@ model Claim {
   claimedAmount    Decimal?    @db.Decimal(14, 2)
   approvedAmount   Decimal?    @db.Decimal(14, 2)
   settledAmount    Decimal     @default(0) @db.Decimal(14, 2)
+  /// The co-pay calculation used when the claim was submitted (a snapshot: later changes to the policy do not touch it).
+  calculatedAmount     Decimal? @db.Decimal(14, 2)
+  patientShare         Decimal? @db.Decimal(14, 2)
+  copayPercentApplied  Decimal? @db.Decimal(5, 2)
+  deductibleApplied    Decimal? @db.Decimal(14, 2)
+  /// Why the claimed amount differs from the calculated one.
+  amountOverrideReason String?
   /// Why the insurer rejected it, or why it was closed without full payment.
   closeReason      String?
   createdById      String      @db.Uuid
@@ -100,6 +112,7 @@ model Claim {
   invoice     Invoice?          @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
   events      ClaimEvent[]
   settlements ClaimSettlement[]
+  documents   ClaimDocument[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, claimNumber])
@@ -141,4 +154,31 @@ model ClaimSettlement {
 
   @@unique([tenantId, id])
   @@index([tenantId, claimId])
+}
+
+/// A supporting document attached to a claim (docs/claims.md): the discharge summary, the policy card, an ID, reports, the bill. The insurer or TPA asks for these with a
+/// claim. Bytes live in file storage; this row is the record. Never deleted: a wrong document is marked REMOVED with a reason.
+model ClaimDocument {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  facilityId   String            @db.Uuid
+  patientId    String            @db.Uuid
+  claimId      String            @db.Uuid
+  label        String
+  fileName     String
+  contentType  String
+  sizeBytes    Int
+  sha256       String
+  storageKey   String
+  status       PatientFileStatus @default(ACTIVE)
+  uploadedById String            @db.Uuid
+  uploadedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  removedById  String?           @db.Uuid
+  removedAt    DateTime?         @db.Timestamptz(3)
+  removeReason String?
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId, status, uploadedAt])
 }

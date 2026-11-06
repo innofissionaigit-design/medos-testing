@@ -1,7 +1,7 @@
 "use client";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
@@ -22,6 +22,7 @@ const schema = z.object({
   age: z.string().optional(),
   dob: z.string().optional(),
   mobile: z.string().trim().optional(),
+  email: z.string().trim().optional().refine((v) => !v || /^[^@\s]+@[^@\s]+[.][^@\s]+$/.test(v), "Enter a valid email address"),
   addressLine: z.string().trim().optional(),
   city: z.string().trim().optional(),
   postalCode: z.string().trim().optional(),
@@ -54,7 +55,7 @@ function RegisterPatient({ onClose }: { onClose: () => void }) {
   const body = (v: Form, override: boolean) => ({
     firstName: v.firstName, ...(v.lastName ? { lastName: v.lastName } : {}), gender: v.gender,
     ...(v.ageMode === "age" ? { estimatedAgeYears: Number(v.age) } : { dateOfBirth: v.dob }),
-    ...(v.mobile ? { mobile: v.mobile } : {}), ...(v.addressLine ? { addressLine: v.addressLine } : {}), ...(v.city ? { city: v.city } : {}), ...(v.postalCode ? { postalCode: v.postalCode } : {}),
+    ...(v.mobile ? { mobile: v.mobile } : {}), ...(v.email ? { email: v.email } : {}), ...(v.addressLine ? { addressLine: v.addressLine } : {}), ...(v.city ? { city: v.city } : {}), ...(v.postalCode ? { postalCode: v.postalCode } : {}),
     ...(override ? { duplicateOverride: { confirmedDistinct: true, reason: "Confirmed as a different person at registration" } } : {}),
     ...(feeOn && feeChoice ? { registration: feePayload(feeChoice) } : {}),
   });
@@ -113,6 +114,7 @@ function RegisterPatient({ onClose }: { onClose: () => void }) {
         <Field label="Last name" error={errors.lastName?.message}><Input {...register("lastName")} /></Field>
         <Field label="Gender"><Select {...register("gender")}><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="OTHER">Other</option><option value="UNKNOWN">Unknown</option></Select></Field>
         <Field label="Mobile" hint="10-digit Indian number" error={errors.mobile?.message}><Input inputMode="tel" {...register("mobile")} /></Field>
+        <Field label="Email (optional)" hint="Used only if the patient agrees to be emailed" error={errors.email?.message}><Input type="email" autoComplete="off" {...register("email")} /></Field>
         <div>
           <div className="mb-1 flex gap-3 text-sm font-medium text-slate-700">
             <label className="flex items-center gap-1"><input type="radio" value="age" {...register("ageMode")} /> Age</label>
@@ -142,6 +144,8 @@ export default function PatientsPage() {
   const { can, date } = useMe();
   const [q, setQ] = useState("");
   const [adding, setAdding] = useState(false);
+  // "Register a new patient" in the appointment booking search opens this page with the form already open.
+  useEffect(() => { if (can("PATIENT_CREATE") && new URLSearchParams(window.location.search).get("register") === "1") setAdding(true); }, [can]);
   const term = useDebounced(q.trim(), 250);
   const res = useQuery({ queryKey: ["patients", term], queryFn: () => api.page<PatientRow & { createdAt: string }>("/patients", { q: term, pageSize: 25 }), enabled: term.length >= 2 });
   return (

@@ -38,6 +38,8 @@ const demographics = {
   dateOfBirth: isoDate,
   estimatedAgeYears: z.number().int().min(0).max(130),
   mobile,
+  /** For appointment, receipt and report-ready emails, used only with the patient's agreement (docs/email.md). */
+  email: z.string().trim().toLowerCase().max(254).regex(/^[^@\s]+@[^@\s]+[.][^@\s]+$/, "Enter a valid email address"),
   addressLine: text(200), city: text(80), district: text(80), state: text(80),
   postalCode: z.string().trim().regex(/^[0-9]{6}$/, "Postal code must be 6 digits"),
   guardianName: personName, guardianRelation: text(40), guardianMobile: mobile,
@@ -46,7 +48,7 @@ const demographics = {
 };
 
 const optionalFields = [
-  "lastName", "dateOfBirth", "estimatedAgeYears", "mobile", "addressLine", "city", "district", "state", "postalCode",
+  "lastName", "dateOfBirth", "estimatedAgeYears", "mobile", "email", "addressLine", "city", "district", "state", "postalCode",
   "guardianName", "guardianRelation", "guardianMobile", "emergencyContactName", "emergencyContactMobile", "bloodGroup",
 ] as const;
 
@@ -79,6 +81,7 @@ export const updatePatientSchema = z.object({
   dateOfBirth: demographics.dateOfBirth.optional(),
   estimatedAgeYears: demographics.estimatedAgeYears.optional(),
   mobile: demographics.mobile.nullable().optional(),
+  email: demographics.email.nullable().optional(),
   addressLine: demographics.addressLine.nullable().optional(),
   city: demographics.city.nullable().optional(),
   district: demographics.district.nullable().optional(),
@@ -122,7 +125,7 @@ export function toPatientView(p: PatientRow) {
     id: p.id, mrn: p.identifiers[0]?.value ?? null,
     firstName: p.firstName, lastName: p.lastName, gender: p.gender,
     dateOfBirth: isoDay(p.dateOfBirth), age: currentAge(p),
-    mobile: p.mobile, addressLine: p.addressLine, city: p.city, district: p.district, state: p.state, postalCode: p.postalCode,
+    mobile: p.mobile, email: p.email, addressLine: p.addressLine, city: p.city, district: p.district, state: p.state, postalCode: p.postalCode,
     guardianName: p.guardianName, guardianRelation: p.guardianRelation, guardianMobile: p.guardianMobile,
     emergencyContactName: p.emergencyContactName, emergencyContactMobile: p.emergencyContactMobile,
     bloodGroup: p.bloodGroup, status: p.status, version: p.version, registeredFacilityId: p.registeredFacilityId, createdAt: p.createdAt,
@@ -153,7 +156,7 @@ export class PatientsService {
     const text = q.q.trim();
     const digits = text.replace(/\D/g, "");
     const normalized = normalizeName(text);
-    const idMatch: Prisma.PatientIdentifierWhereInput = { tenantId: ctx.tenantId, value: { contains: text, mode: "insensitive" } };
+    const idMatch: Prisma.PatientIdentifierWhereInput = { tenantId: ctx.tenantId, removedAt: null, value: { contains: text, mode: "insensitive" } };
     // A merged duplicate is not offered; searching its old number finds the real patient instead.
     const or: Prisma.PatientWhereInput[] = [{ identifiers: { some: idMatch } }, { mergedFrom: { some: { identifiers: { some: idMatch } } } }];
     // Only a letter-free query is read as a phone number: an MRN such as "DEMO-000992" must not also match

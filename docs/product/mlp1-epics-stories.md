@@ -6,24 +6,24 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 ## E1 Platform, authentication and authorization
 | ID | Story | Acceptance criteria | Status |
 |---|---|---|---|
-| 1.1 | As any user I log in with hospital code, username or email, and password | Wrong credentials give a generic error; inactive users cannot log in; lockout after repeated failures | Done |
-| 1.2 | As a user my session stays alive and can be ended | 15-min access token, rotating refresh token, reuse revokes the family, logout revokes | Done |
+| 1.1 | As any user I log in with hospital code, username or email, and password | Wrong credentials give a generic error (the same for a wrong code, user, password, locked or inactive account); inactive users cannot log in; lockout after 5 wrong tries within 15 minutes, which an administrator can end at once (docs/authentication.md) | Done |
+| 1.2 | As a user my session stays alive and can be ended | 15-min access token, rotating refresh token, reuse revokes the family, logout revokes; a logout, password reset or password change ends the session at once, not when the access token runs out (docs/authentication.md) | Done |
 | 1.3 | As a user I change my password | Old password required; other sessions revoked | Done |
 | 1.4 | As ADM I manage users and roles | Create, deactivate, assign roles; change takes effect on the next request | Done |
 | 1.5 | As ADM I use custom roles | Create a role and choose its permissions in Administration (roles card) | Done (UI untested) |
 | 1.6 | As the system I enforce permissions server-side | Every route declares a permission; 403 with stable code otherwise | Done |
-| 1.7 | As the system I isolate tenants | Cross-tenant id sweep returns 404 on every route | Done |
-| 1.8 | As the system I rate-limit auth endpoints | 429 after threshold (per instance) | Done / Deferred (shared limiter) |
+| 1.7 | As the system I isolate tenants | A user of another hospital holding every permission tries every route that takes an id, with real ids of other hospitals' records: nothing succeeds, nothing crashes, reads answer 404 and writes reach their lookup and answer 404 (`common/tenant-sweep.spec.ts`; `docs/rls.md`) | Done |
+| 1.8 | As the system I rate-limit auth endpoints | Sign-in 10 a minute per client address; refresh, logout, switch facility 30 a minute per session; password change 10 a minute per session; patient-app code and verify per address. Over the limit: 429 `RATE_LIMITED` with `Retry-After`. The counters are in PostgreSQL, so two API instances share one allowance (`docs/authentication.md`) | Done |
 
 ## E2 Tenant, facility and master data
 | ID | Story | Acceptance | Status |
 |---|---|---|---|
-| 2.1 | ADM maintains facility, departments | Create, edit, inactivate | Done |
-| 2.2 | ADM maintains wards, rooms, beds | Hierarchy; bed status explicit | Done |
-| 2.3 | ADM maintains practitioners and their weekly schedules | Schedule editor changes bookable slots | Done |
-| 2.4 | ADM maintains the service catalogue and prices | Used for charges and invoices | Done |
+| 2.1 | ADM maintains facility, departments | Facilities: add, edit details, switch off (refused while patients are admitted) and on; departments: add, rename, switch off (refused while working doctors are in them) and on; screens under Administration; other hospitals' records are "not found" (`docs/wards-and-doctors.md`) | Done |
+| 2.2 | ADM maintains wards, rooms, beds | Add, rename, set the bed rate, switch off and on, retire; a bed is in service only while its room and ward are on; bed status explicit (`docs/wards-and-doctors.md`) | Done |
+| 2.3 | ADM maintains practitioners and their weekly schedules | Add, edit, switch off and on; a saved schedule (even an empty one) is the only bookable time; the editor changes the bookable slots (`docs/wards-and-doctors.md`). Anyone who can read appointments sees every doctor's weekly schedule, read-only, on the Appointments page; the patient search in the booking window offers "Register a new patient" when nobody matches | Done |
+| 2.4 | ADM maintains the service catalogue and prices | Administration → Price list: search, filter, add, edit (name, category, price, tax, SAC/HSN), switch off and on (no delete, so history stays complete); price changes audited and apply to new invoices only (`docs/service-catalogue.md`) | Done |
 | 2.5 | ADM sets print header/footer, GST details, feature flags | Prints reflect settings; flags hide menus | Done |
-| 2.6 | ADM configures numbering | Concurrency-safe sequences for MRN, visit, admission, invoice, receipt, prescription | Done |
+| 2.6 | ADM configures numbering | Concurrency-safe, gap-free sequences issued in the record's own transaction (MRN, visit, admission, invoice, receipt, prescription and the rest); formats that restart every January, every April (financial year) or never; a changed restart rule never re-issues a number; the next number can be raised to continue an old series; GST bill numbers kept to 16 characters of letters, digits, - and / (`docs/numbering.md`) | Done |
 | 2.7 | Supplier management screen | Create, activate and deactivate suppliers (Pharmacy → Suppliers) | Done (UI untested) |
 
 ## E3 Patient registration and identity
@@ -35,25 +35,25 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 3.4 | Any clinician searches patients | By MRN, mobile or name; tenant-scoped; indexed | Done |
 | 3.5 | REC edits demographics | Optimistic version check; audited | Done |
 | 3.6 | REC uploads a photo and scanned documents | PNG/JPEG/PDF ≤ 5 MB, content-checked; one active photo; remove keeps history | Done |
-| 3.7 | Patient identifiers beyond MRN | Separate identifier model | Done (model) |
+| 3.7 | Patient identifiers beyond MRN | Separate identifier table; staff add an old hospital number or another ID (issuer required, Aadhaar refused) from the patient page, one number per patient in the hospital, never edited or deleted (a wrong one is removed with a reason and kept); search finds a patient by any number, including a merged duplicate's (`docs/patient-identifiers.md`). ABHA is recorded on the ABDM screen | Done |
 | 3.8 | Patient merge tool | Link a duplicate to the real patient; history kept (`docs/patient-merge.md`) | Done |
 
 ## E4 Appointments and OPD queue
 | ID | Story | Acceptance | Status |
 |---|---|---|---|
-| 4.1 | REC books an appointment against a doctor schedule | Only free slots; no double booking even under race | Done |
+| 4.1 | REC books an appointment against a doctor schedule | Only free slot times offered on the screen, inside the doctor's sessions; the appointment takes the slot's length; no double booking even under race (database locks plus an exclusion constraint, 12 simultaneous requests: one wins); a repeated Book press returns the first booking; the screen refreshes the times when one was just taken (`docs/appointment-booking.md`) | Done |
 | 4.2 | REC reschedules and cancels | Reason on cancel; state rules enforced | Done |
 | 4.3 | REC marks no-show | Allowed only from BOOKED | Done |
 | 4.4 | REC checks a patient in | Token issued per doctor per day | Done |
 | 4.5 | REC creates a walk-in | Idempotent; queue entry created | Done |
 | 4.6 | DOC calls next or a chosen patient | SKIP LOCKED; one doctor, one consultation at a time | Done |
-| 4.7 | REC/DOC changes queue priority or emergency | Order changes; audited | Done |
-| 4.8 | Overbooking by exception | Needs APPOINTMENT_OVERBOOK | Done |
+| 4.7 | REC/DOC changes queue priority or emergency | New permission QUEUE_PRIORITY: reception changes any queue, a doctor only their own waiting patients (another doctor's or a nurse's is refused); the queue order changes (emergency, then priority, then arrival) and every change is audited with who made it (`QUEUE_PRIORITY_CHANGED`) | Done |
+| 4.8 | Overbooking by exception | Server refuses it without APPOINTMENT_OVERBOOK and without a reason; the Book dialog now has a "Book outside the free times (exception)" option (time, minutes, reason) shown only to people who hold the permission; audited as APPOINTMENT_OVERBOOKED; an overbooked visit never blocks the regular slot. No built-in role holds the permission: give it to a trusted role (Administration -> Staff -> roles) (`docs/appointment-booking.md`) | Done |
 
 ## E5 Clinical: vitals, allergies, consultation, prescription
 | ID | Story | Acceptance | Status |
 |---|---|---|---|
-| 5.1 | DOC/NUR records vitals against an encounter | Append-only; wrong entry marked "entered in error" | Done |
+| 5.1 | DOC/NUR records vitals against an encounter | Append-only; wrong entry marked "entered in error". A doctor records on the visit page; a nurse (who cannot open the doctor's visit page) uses "Record vitals" next to the patient on the OPD queue, and on the admission page for inpatients | Done |
 | 5.2 | DOC/NUR records allergies | Severity; status history | Done |
 | 5.3 | DOC records diagnoses | Add and remove with history | Done |
 | 5.4 | DOC writes a consultation note as draft | Draft persists; unsaved text survives prescription save | Done |
@@ -72,7 +72,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | 6.4 | CSH opens and closes a cashier shift | Cash needs an open shift; expected vs counted shown | Done |
 | 6.5 | CSH issues a refund | Confirmation; cannot exceed paid; audited | Done |
 | 6.6 | MGR applies a discount | INVOICE_DISCOUNT; audited | Done |
-| 6.7 | MGR cancels an invoice or issues a credit note | Reason required; original preserved | Done |
+| 6.7 | MGR cancels an invoice or issues a credit note | Reason required; original preserved. For a paid bill the Cashier refunds first, then the Manager cancels (two people on purpose, `docs/billing-roles.md`, decision 6 Nov 2026) | Done |
 | 6.8 | Receipts and invoices print | HTML and PDF; reprints stamped DUPLICATE COPY | Done |
 | 6.9 | Advance payments and deposits | Take an advance, apply it to a bill, give it back (`docs/advance-payments.md`) | Done |
 | 6.10 | GST/tax review | Per-line tax, MRP-inclusive medicines | Deferred (external review) |
@@ -84,7 +84,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 |---|---|---|---|
 | 7.1 | PHM sees signed prescriptions first | Drafts never appear | Done |
 | 7.2 | PHM dispenses with FEFO batch selection | No expired or blocked batch; no oversell under concurrency | Done |
-| 7.3 | PHM takes payment while dispensing | Opens shift if needed; idempotent | Done |
+| 7.3 | PHM dispenses and the bill goes to the Cashier | Dispensing issues the pharmacy bill (issued, unpaid) and tells the pharmacist it has gone to the Cashier, who takes the payment and owns the cash shift (`docs/billing-roles.md`); dispensing is idempotent: an Idempotency-Key is required and a repeat returns the first dispense. Decision 5 Nov 2026: payment is not taken at the pharmacy | Done |
 | 7.4 | PHM handles patient returns | Stock restored to ledger | Done |
 | 7.5 | PHM receives purchases | Batch and expiry recorded; ledger PURCHASE | Done |
 | 7.6 | PHM returns stock to supplier | Ledger PURCHASE_RETURN | Done |
@@ -100,7 +100,7 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 | ID | Story | Acceptance | Status |
 |---|---|---|---|
 | 8.1 | REC admits a patient under a consultant | One active admission per patient | Done |
-| 8.2 | REC/NUR allocates and transfers beds | Full assignment history; Ward A → ICU → Ward B reconstructable | Done |
+| 8.2 | REC/NUR allocates and transfers beds | Full assignment history; Ward A → ICU → Ward B reconstructable. The transfer reason is shown with the bed moved to, labelled "Moved here" | Done |
 | 8.3 | Bed status is explicit | AVAILABLE, OCCUPIED, RESERVED, CLEANING, MAINTENANCE | Done |
 | 8.4 | Staff post charges to an admission | Catalogue or free-price (needs billing rights); void keeps record | Done |
 | 8.5 | Bed-day charges accrue per assignment | Posted from history | Done |
@@ -132,12 +132,12 @@ Roles: REC reception, DOC doctor, NUR nurse, CSH cashier, PHM pharmacist, MGR ma
 |---|---|---|---|
 | 11.1 | MGR runs 13 operational reports | OPD counts (daily, doctor, department), collections, payment modes, cashier shifts, current and daily admissions, discharges, occupancy, pharmacy sales, stock, low stock, near-expiry, outstanding | Done |
 | 11.2 | Ranges are bounded and facility-scoped | ≤ 93 days | Done |
-| 11.3 | MGR exports a report to CSV | Formula-injection safe | Done |
+| 11.3 | MGR exports a report to CSV | Formula-injection safe; the file is built from the server data, not the screen; every export is recorded in the audit trail (`REPORT_EXPORTED`: who, report, dates, row count) and the file is not saved if that record fails | Done |
 
 ## E12 Audit
 | ID | Story | Acceptance | Status |
 |---|---|---|---|
-| 12.1 | Every important mutation writes an audit event | Same transaction; actor, entity, request id | Done |
+| 12.1 | Every important mutation writes an audit event | Same transaction; actor, entity, request id. The audit screen shows ids, not patient names (decision 6 Nov 2026); a report export is also recorded | Done |
 | 12.2 | ADM/MGR views and filters the audit log | Read-only; append-only at DB level | Done |
 
 ## E13 Printing and documents

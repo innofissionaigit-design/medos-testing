@@ -6,6 +6,7 @@ process.env["DB_SESSION_ROLE"] = "medos_app";
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import * as jwt from "jsonwebtoken";
+import { randomUUID } from "node:crypto";
 import { loadConfig } from "./config";
 import { PrismaService, TenantContextMissingError } from "./prisma.service";
 import { tenantScope } from "./tenant-scope";
@@ -97,10 +98,10 @@ describe("row-level security: tenant context, and the explicit paths that have n
     assert.equal((await t.api("get", `/patients/${patientB}`, tokens.a)).status, 404, "another hospital's patient is not found");
     // A token that names hospital B but belongs to a user of hospital A: signed validly, so only the tenant scope stops it.
     const secret = process.env["JWT_ACCESS_SECRET"]!;
-    const forged = jwt.sign({ sub: a.admin.id, tid: b.tenantId, fid: a.facilityId, typ: "access" }, secret, { algorithm: "HS256", expiresIn: 300 });
+    const forged = jwt.sign({ sub: a.admin.id, tid: b.tenantId, fid: a.facilityId, sid: randomUUID(), typ: "access" }, secret, { algorithm: "HS256", expiresIn: 300 });
     assert.equal((await t.api("get", `/patients/${patientB}`, forged)).status, 401, "the user is not found under the claimed hospital");
     assert.equal((await t.api("get", `/patients/${patientA}`, forged)).status, 401);
-    const noTenant = jwt.sign({ sub: a.admin.id, fid: a.facilityId, typ: "access" }, secret, { algorithm: "HS256", expiresIn: 300 });
+    const noTenant = jwt.sign({ sub: a.admin.id, fid: a.facilityId, sid: randomUUID(), typ: "access" }, secret, { algorithm: "HS256", expiresIn: 300 });
     assert.equal((await t.api("get", `/patients/${patientA}`, noTenant)).status, 401, "a token without a hospital is refused");
   });
 

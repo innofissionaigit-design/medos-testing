@@ -6,6 +6,7 @@ import { z } from "zod";
 import { AuditService } from "../../common/audit.service";
 import { CONFIG, type AppConfig } from "../../common/config";
 import { logJson } from "../../common/logger";
+import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService } from "../../common/prisma.service";
 import type { AuthedRequest, RequestContext } from "../../common/request-context";
 import { tenantScope } from "../../common/tenant-scope";
@@ -13,6 +14,7 @@ import { balanceDue, fmt } from "../billing/billing.domain";
 import { SettingsService } from "../settings/settings.service";
 import { joinWindow, LIVE_APPOINTMENT } from "../telemedicine/telemedicine.domain";
 import { indianMobile, MESSAGE_PROVIDER, type MessageProvider } from "../prescriptions/message.provider";
+import { assertUnlocked, makeProof, type PortalSession, readProofs } from "./portal.access";
 
 export const OTP_MINUTES = 5;
 export const OTP_MAX_ATTEMPTS = 5;
@@ -22,7 +24,9 @@ export const SESSION_HOURS = 12;
 const TOKEN_PREFIX = "mdp_";
 const MAX_PENDING_REQUESTS = 3;
 
-export interface PortalSession { tenantId: string; facilityId: string; mobile: string; sessionId: string }
+export const UNLOCK_MAX_FAILURES = 5;
+export const UNLOCK_FAILURE_WINDOW_MINUTES = 60;
+export type { PortalSession };
 export interface PortalRequest extends AuthedRequest { portal?: PortalSession }
 
 const sha256 = (v: string) => createHash("sha256").update(v).digest("hex");
@@ -35,6 +39,7 @@ export const requestSchema = z.object({
   patientId: uuid, practitionerId: uuid.optional(), preferredDate: day, timeOfDay: z.enum(["MORNING", "AFTERNOON", "EVENING", "ANY"]).default("ANY"), reason: z.string().trim().min(3).max(300),
 }).strict();
 export const patientQuerySchema = z.object({ patientId: uuid }).strict();
+export const unlockSchema = z.object({ patientId: uuid, dateOfBirth: day }).strict();
 export const handleRequestSchema = z.object({ decision: z.enum(["BOOKED", "DECLINED"]), note: z.string().trim().max(300).optional(), appointmentId: uuid.optional() }).strict();
 export const listRequestsSchema = z.object({ status: z.enum(["PENDING", "BOOKED", "DECLINED", "CANCELLED"]).optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25) }).strict();
 
@@ -48,7 +53,7 @@ const iso = (d: Date) => d.toISOString().slice(0, 10);
 /** The patient app's guard: a patient's own session token (never a staff token), checked against the database on every request. */
 @Injectable()
 export class PortalGuard implements CanActivate {
-  constructor(private readonly prisma: PrismaService, private readonly settings: SettingsService) {}
+  constructor(private readonly prisma: PrismaService, private readonly settings: SettingsService, @Inject(CONFIG) private readonly config: AppConfig) {}
 
   async canActivate(ec: ExecutionContext): Promise<boolean> {
     const req = ec.switchToHttp().getRequest<PortalRequest>();
@@ -66,7 +71,7 @@ export class PortalGuard implements CanActivate {
     if (!facility) throw fail();
     if (!(await this.settings.get(this.prisma, tenantId, facility.id, "PATIENT_PORTAL_ENABLED"))) throw fail();
     if (!s.lastUsedAt || now.getTime() - s.lastUsedAt.getTime() > 60_000) await this.prisma.patientSession.updateMany({ where: { id: s.id, tenantId }, data: { lastUsedAt: now } });
-    req.portal = { tenantId, facilityId: facility.id, mobile: s.mobile, sessionId: s.id };
+    req.portal = { tenantId, facilityId: facility.id, mobile: s.mobile, sessionId: s.id, unlocked: readProofs(this.config.JWT_ACCESS_SECRET, tenantId, s.id, req.headers["x-patient-proofs"], now.getTime()) };
     return true;
   }
 }
@@ -141,6 +146,32 @@ export class PortalAuthService {
     });
   }
 
+  /**
+   * Opens one patient's records for this session after the date of birth is confirmed. The code proves the phone, not the person: on a shared number each
+   * patient is confirmed separately. A patient with no date of birth on file cannot be opened this way (the hospital must add it). Wrong tries are counted per
+   * patient, across sessions, so a new sign-in does not reset them; every try is audited.
+   */
+  async unlock(p: PortalSession, input: z.infer<typeof unlockSchema>) {
+    const outcome = await this.prisma.$transaction(async (tx) => {
+      const patient = await tx.patient.findFirst({ where: { id: input.patientId, tenantId: p.tenantId, mobile: p.mobile, status: "ACTIVE", mergedIntoId: null }, select: { id: true, dateOfBirth: true } });
+      if (!patient) return { kind: "NOT_FOUND" as const };
+      if (!patient.dateOfBirth) return { kind: "NO_DOB" as const };
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`portal-unlock:${p.tenantId}:${patient.id}`}, 0))`;
+      const since = new Date(Date.now() - UNLOCK_FAILURE_WINDOW_MINUTES * 60_000);
+      const failures = await tx.auditEvent.count({ where: { tenantId: p.tenantId, action: "PATIENT_APP_UNLOCK_FAILED", entityType: "Patient", entityId: patient.id, createdAt: { gt: since } } });
+      if (failures >= UNLOCK_MAX_FAILURES) return { kind: "LOCKED_OUT" as const };
+      const ok = iso(patient.dateOfBirth) === input.dateOfBirth;
+      await this.audit.record(tx, { tenantId: p.tenantId, facilityId: p.facilityId }, { action: ok ? "PATIENT_APP_PROFILE_UNLOCKED" : "PATIENT_APP_UNLOCK_FAILED", entityType: "Patient", entityId: patient.id, metadata: { actor: "PATIENT", sessionId: p.sessionId } });
+      return { kind: ok ? ("OK" as const) : ("WRONG" as const) };
+    });
+    // The failed try is saved above; the error is raised only after the transaction has committed.
+    if (outcome.kind === "NOT_FOUND") throw new DomainError("NOT_FOUND", "Resource not found", 404);
+    if (outcome.kind === "NO_DOB") throw new DomainError("PROFILE_NOT_VERIFIABLE", "The hospital has no date of birth on file for this patient. Please ask the front desk to add it", 409);
+    if (outcome.kind === "LOCKED_OUT") throw new DomainError("RATE_LIMITED", "Too many wrong tries. Please try again later or ask the front desk", 429);
+    if (outcome.kind === "WRONG") throw new DomainError("PROFILE_VERIFICATION_FAILED", "That date of birth does not match our records", 403);
+    return { patientId: input.patientId, ...makeProof(this.config.JWT_ACCESS_SECRET, p.tenantId, p.sessionId, input.patientId) };
+  }
+
   async logout(p: PortalSession): Promise<{ signedOut: true }> {
     await this.prisma.patientSession.updateMany({ where: { id: p.sessionId, tenantId: p.tenantId, revokedAt: null }, data: { revokedAt: new Date() } });
     await this.audit.recordStandalone({ tenantId: p.tenantId }, { action: "PATIENT_APP_SIGNED_OUT", entityType: "PatientSession", entityId: p.sessionId, metadata: { actor: "PATIENT" } });
@@ -149,23 +180,36 @@ export class PortalAuthService {
 }
 
 /**
- * What a signed-in patient may see (docs/patient-app.md): only the records of patients registered with their mobile number (a family sharing one phone sees each
- * other), only signed or verified clinical content, never drafts, and a critical report only after the doctor has seen it. Every query names the hospital and the patient.
+ * What a signed-in patient may see (docs/patient-app.md): only the records of patients registered with their mobile number, and, when several people share the
+ * number, only those whose date of birth this session has confirmed (portal.access.ts). Only signed or verified clinical content, never drafts, and a critical report only after the doctor has seen it. Every query names the hospital and the patient.
  */
 @Injectable()
 export class PortalService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly notifications: NotificationsService) {}
 
   private async patient(p: PortalSession, patientId: string) {
     const x = await this.prisma.patient.findFirst({ where: { id: patientId, tenantId: p.tenantId, mobile: p.mobile, status: "ACTIVE", mergedIntoId: null }, select: { id: true, firstName: true, lastName: true, gender: true, dateOfBirth: true, estimatedAgeYears: true } });
     if (!x) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+    await assertUnlocked(this.prisma, p, patientId);
     return x;
   }
 
+  /**
+   * The people on this number. A person who has not been confirmed in this session shows only a first name (so a family can pick who they are), with no
+   * record number, age or gender, and the app asks for the date of birth before it shows anything else.
+   */
   async profiles(p: PortalSession) {
     const rows = await this.prisma.patient.findMany({ where: { tenantId: p.tenantId, mobile: p.mobile, status: "ACTIVE", mergedIntoId: null }, orderBy: { createdAt: "asc" }, take: 20, select: { id: true, firstName: true, lastName: true, gender: true, dateOfBirth: true, estimatedAgeYears: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } });
     const hospital = await this.prisma.tenant.findFirst({ where: { id: p.tenantId }, select: { name: true } });
-    return { hospital: hospital?.name ?? null, patients: rows.map((r) => ({ id: r.id, name: nameOf(r), mrn: r.identifiers[0]?.value ?? null, gender: r.gender, age: ageOf(r) })) };
+    return {
+      hospital: hospital?.name ?? null,
+      patients: rows.map((r) => {
+        const open = rows.length === 1 || p.unlocked.has(r.id);
+        return open
+          ? { id: r.id, name: nameOf(r), mrn: r.identifiers[0]?.value ?? null, gender: r.gender, age: ageOf(r), locked: false, canUnlock: true }
+          : { id: r.id, name: r.firstName, mrn: null, gender: null, age: null, locked: true, canUnlock: r.dateOfBirth !== null };
+      }),
+    };
   }
 
   async doctors(p: PortalSession) {
@@ -201,7 +245,7 @@ export class PortalService {
         id: true, encounterNumber: true, startedAt: true, practitioner: { select: { displayName: true, specialty: true } },
         diagnoses: { where: { status: "ACTIVE", supersededAtVersion: null }, orderBy: { recordedAt: "asc" }, select: { text: true, type: true } },
         documents: { where: { kind: "CONSULTATION", status: { in: ["SIGNED", "AMENDED"] } }, select: { signedAt: true, versions: { orderBy: { version: "desc" }, take: 1, select: { content: true } } } },
-        medicationOrders: { where: { status: "SIGNED" }, orderBy: { signedAt: "desc" }, take: 1, select: { orderNumber: true, signedAt: true, items: { where: { status: "ACTIVE" }, orderBy: { lineNo: "asc" }, select: { genericName: true, brandName: true, strength: true, dosage: true, frequency: true, frequencyText: true, durationDays: true, foodRelation: true, instructions: true } } } },
+        medicationOrders: { where: { status: "SIGNED" }, orderBy: { signedAt: "asc" }, take: 20, select: { orderNumber: true, signedAt: true, items: { where: { status: "ACTIVE" }, orderBy: { lineNo: "asc" }, select: { genericName: true, brandName: true, strength: true, dosage: true, frequency: true, frequencyText: true, durationDays: true, foodRelation: true, instructions: true } } } },
       },
     });
     return rows.filter((e) => e.documents.length > 0).map((e) => {
@@ -211,7 +255,7 @@ export class PortalService {
       return {
         id: e.id, visitNumber: e.encounterNumber, date: e.startedAt, doctor: e.practitioner?.displayName ?? null, specialty: e.practitioner?.specialty ?? null,
         diagnoses: e.diagnoses.map((d) => d.text), advice,
-        prescription: rx ? { number: rx.orderNumber, signedAt: rx.signedAt, medicines: rx.items.map((i) => ({ name: [i.brandName ?? i.genericName, i.strength].filter(Boolean).join(" "), dose: i.dosage, frequency: i.frequencyText ?? i.frequency, days: i.durationDays, food: i.foodRelation, note: i.instructions })) } : null,
+        prescription: rx ? { number: rx.orderNumber, signedAt: rx.signedAt, medicines: e.medicationOrders.flatMap((o) => o.items).map((i) => ({ name: [i.brandName ?? i.genericName, i.strength].filter(Boolean).join(" "), dose: i.dosage, frequency: i.frequencyText ?? i.frequency, days: i.durationDays, food: i.foodRelation, note: i.instructions })) } : null,
       };
     });
   }
@@ -256,6 +300,7 @@ export class PortalService {
     return this.prisma.$transaction(async (tx) => {
       const pat = await tx.patient.findFirst({ where: { id: input.patientId, tenantId: p.tenantId, mobile: p.mobile, status: "ACTIVE", mergedIntoId: null }, select: { id: true } });
       if (!pat) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      await assertUnlocked(tx, p, input.patientId);
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`portal-req:${p.tenantId}:${input.patientId}`}, 0))`;
       const today = new Date(iso(new Date()));
       const date = new Date(input.preferredDate);
@@ -267,6 +312,7 @@ export class PortalService {
       if (await tx.appointmentRequest.count({ where: { tenantId: p.tenantId, patientId: input.patientId, status: "PENDING" } }) >= MAX_PENDING_REQUESTS) throw new DomainError("CONFLICT", "You already have requests waiting. Please wait for the hospital to answer them", 409);
       const r = await tx.appointmentRequest.create({ data: { tenantId: p.tenantId, facilityId: p.facilityId, patientId: input.patientId, practitionerId: input.practitionerId ?? null, preferredDate: date, timeOfDay: input.timeOfDay, reason: input.reason }, select: { id: true } });
       await this.audit.record(tx, { tenantId: p.tenantId, facilityId: p.facilityId }, { action: "APPOINTMENT_REQUESTED", entityType: "AppointmentRequest", entityId: r.id, metadata: { actor: "PATIENT", patientId: input.patientId } });
+      await this.notifications.notifyPermission(tx, ["APPOINTMENT_CREATE"], { tenantId: p.tenantId, facilityId: p.facilityId, type: "BOOKING_FROM_OUTSIDE", entityType: "AppointmentRequest", entityId: r.id, dedupeKey: `BOOKING_FROM_OUTSIDE:${r.id}` });
       return { id: r.id, status: "PENDING" as const };
     });
   }
@@ -275,6 +321,7 @@ export class PortalService {
     return this.prisma.$transaction(async (tx) => {
       const r = await tx.appointmentRequest.findFirst({ where: { id, tenantId: p.tenantId, patient: { mobile: p.mobile, mergedIntoId: null } }, select: { id: true, patientId: true } });
       if (!r) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      await assertUnlocked(tx, p, r.patientId);
       const res = await tx.appointmentRequest.updateMany({ where: { id, tenantId: p.tenantId, status: "PENDING" }, data: { status: "CANCELLED", handledAt: new Date() } });
       if (res.count !== 1) throw new DomainError("INVALID_STATE", "This request has already been answered", 409);
       await this.audit.record(tx, { tenantId: p.tenantId, facilityId: p.facilityId }, { action: "APPOINTMENT_REQUEST_CANCELLED", entityType: "AppointmentRequest", entityId: id, metadata: { actor: "PATIENT", patientId: r.patientId } });

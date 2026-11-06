@@ -8,7 +8,7 @@ import { AppointmentsService, toAppointmentView, VIEW } from "../appointments/ap
 
 export const scheduleFollowUpSchema = z.object({
   startAt: z.string().datetime({ offset: true }).transform((s) => new Date(s)),
-  durationMinutes: z.number().int().min(5).max(240).default(15),
+  durationMinutes: z.number().int().min(5).max(240).optional(),
   /** Defaults to the doctor who saw the patient; another doctor at the facility may be chosen (e.g. a specialist). */
   practitionerId: z.string().uuid().optional(),
   notes: z.string().trim().max(500).optional(),
@@ -36,7 +36,7 @@ export class FollowUpsService {
     }
     return this.appointments.create(ctx, {
       patientId: enc.patientId, practitionerId: input.practitionerId ?? enc.practitionerId, startAt: input.startAt,
-      durationMinutes: input.durationMinutes, type: "FOLLOW_UP", ...(input.notes ? { notes: input.notes } : {}),
+      ...(input.durationMinutes ? { durationMinutes: input.durationMinutes } : {}), type: "FOLLOW_UP", ...(input.notes ? { notes: input.notes } : {}),
     }, { followUpOfEncounterId: enc.id });
   }
 

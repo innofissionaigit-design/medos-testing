@@ -63,7 +63,7 @@ Found earlier on the API side (each has a regression test): trigger bugs in invo
 
 **Not production-approved.** This is a release candidate for review. Deferred items are tracked in [`../REMINDER.md`](../REMINDER.md). Summary:
 
-- Docker images, compose stack and the CI workflow were written but **never run** (no Docker here).
+- Docker images, compose stack and the CI workflow were written but **never run**. On 5 Nov 2026 the Docker command-line tool was found on the development machine but its engine was not started: `docker compose config` accepts both `docker-compose.yml` and the secrets overlay (a static check only). No image was built and no container started; that needs the engine running and downloads the base images.
 - PostgreSQL row-level security (G5) is implemented and verified in development only; staging and production still have to be switched with the documented procedure and evidence. Its limits are in `rls.md` (owner and superuser bypass by design; no automated check against building SQL from strings; hospital-level isolation only, not facility-level). Rate limiting is shared across API instances through PostgreSQL; the web server's refresh cache is still per instance.
 - `pnpm audit`: 1 moderate advisory in `@nestjs/core`, fixed only by a Nest 11 upgrade.
 - Backups: encrypted backup, restore, restore drill, alerts, a point-in-time-recovery rehearsal and schedule templates are built and verified in development (`backup.md`). Not yet done on staging/production: WAL archiving, installed schedules, off-host storage (only the upload hook is verified), a first real drill; the schedule files and Windows scripts were not run here.

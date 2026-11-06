@@ -158,6 +158,8 @@ describe("integration API: keys for outside systems and bots, booking through th
       assert.equal(replay.status, 200);
       assert.equal(replay.headers["idempotent-replayed"], "true");
       assert.equal(replay.body.data.id, booked.body.data.id);
+      // Reception is told about a booking made by another system, once even though the request was repeated (notifications.md).
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: rec.id, type: "BOOKING_FROM_OUTSIDE", entityId: booked.body.data.id } }), 1);
       assert.equal(await t.prisma.appointment.count({ where: { tenantId: a.tenantId, patientId: reg.body.data.id } }), 1, "a retry never books twice");
       const differs = await t.api("post", "/appointments", apiKey).set("Idempotency-Key", k).send({ patientId: reg.body.data.id, practitionerId: doc.practitionerId, startAt: mine.nextFreeTimes[1].startAt });
       assert.equal(differs.status, 422, "the same key for a different request is refused");

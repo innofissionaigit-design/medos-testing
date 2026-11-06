@@ -93,9 +93,9 @@ export class PrintService {
         { t: "title", text: `Invoice ${str(inv.invoiceNumber)}` },
         { t: "kv", rows: [["Patient", inv.patientName], ["MRN", inv.mrn], ["Date", e.at(inv.issuedAt)], ["Status", inv.status]] },
         // The HSN/SAC column appears only when at least one line carries a code (nothing is invented for lines without one).
-        { t: "table", head: [{ label: "#" }, { label: "Description" }, ...(inv.lines.some((l) => l.hsnSac) ? [{ label: "HSN/SAC" }] : []), { label: "Qty", numeric: true }, { label: "Rate", numeric: true }, { label: "Disc.", numeric: true }, { label: "Tax %", numeric: true }, { label: "Amount", numeric: true }],
-          rows: inv.lines.map((l) => [str(l.lineNo), l.description, ...(inv.lines.some((x) => x.hsnSac) ? [l.hsnSac ?? ""] : []), l.quantity, l.unitPrice, l.discountAmount, l.taxPercent, l.lineTotal]) },
-        { t: "table", head: [{ label: "Summary" }, { label: "INR", numeric: true }], rows: [["Subtotal", inv.subtotal], ["Discount", inv.discountTotal], ["Tax", inv.taxTotal], ["Total", inv.total], ["Paid", inv.paidTotal], ["Refunded", inv.refundedTotal], ["Credit notes", inv.creditedTotal], ["Balance due", inv.balanceDue]] },
+        { t: "table", head: [{ label: "#" }, { label: "Description" }, ...(inv.lines.some((l) => l.hsnSac) ? [{ label: "HSN/SAC" }] : []), { label: "Qty", numeric: true }, { label: "Rate", numeric: true }, { label: "Disc.", numeric: true }, { label: "Tax %", numeric: true }, ...(inv.taxSplit ? [{ label: "CGST", numeric: true }, { label: "SGST", numeric: true }] : []), { label: "Amount", numeric: true }],
+          rows: inv.lines.map((l) => [str(l.lineNo), l.description, ...(inv.lines.some((x) => x.hsnSac) ? [l.hsnSac ?? ""] : []), l.quantity, l.unitPrice, l.discountAmount, l.taxPercent, ...(inv.taxSplit ? [str(l.cgstAmount), str(l.sgstAmount)] : []), l.lineTotal]) },
+        { t: "table", head: [{ label: "Summary" }, { label: "INR", numeric: true }], rows: [["Subtotal", inv.subtotal], ["Discount", inv.discountTotal], ...(inv.taxSplit ? [["CGST", str(inv.cgstTotal)], ["SGST", str(inv.sgstTotal)]] : [["Tax", inv.taxTotal]]), ...(inv.roundsToRupee ? [["Round off", inv.roundOff]] : []), ["Total", inv.total], ["Paid", inv.paidTotal], ["Refunded", inv.refundedTotal], ["Credit notes", inv.creditedTotal], ["Balance due", inv.balanceDue]] },
         ...(inv.notes ? [{ t: "para", text: inv.notes } as Block] : []),
       ],
     }));
@@ -130,6 +130,41 @@ export class PrintService {
     }));
   }
 
+  /** True when the patient actually joined the video call for this visit (a video consultation that was booked but never took place is not "by video"). */
+  private async consultedByVideo(ctx: RequestContext, encounterId: string): Promise<boolean> {
+    return (await this.prisma.teleconsult.count({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, appointment: { encounterId }, status: { not: "CANCELLED" }, patientJoinedAt: { not: null } } })) > 0;
+  }
+
+  /**
+   * Verified lab results and signed radiology reports of one encounter, for the printed prescription and discharge summary. A result with a critical value is
+   * left out until a doctor has acknowledged it (the same rule as the patient app), and the page says that some are with the doctor. Reports are never edited
+   * here: this prints what the lab and radiology signed.
+   */
+  private async resultBlocks(ctx: RequestContext, encounterId: string, at: (d: Date | null | undefined) => string): Promise<Block[]> {
+    const base = { tenantId: ctx.tenantId, facilityId: ctx.facilityId, encounterId };
+    const released = { OR: [{ hasCritical: false }, { criticalAckAt: { not: null } }] };
+    const [labs, rads, heldLab, heldRad] = await Promise.all([
+      this.prisma.labResult.findMany({ where: { ...base, status: "VERIFIED", ...released }, orderBy: { updatedAt: "asc" }, take: 50, select: { name: true, versions: { orderBy: { version: "desc" }, take: 1, select: { values: true, comment: true, verifiedAt: true } } } }),
+      this.prisma.radStudy.findMany({ where: { ...base, status: "REPORTED", ...released }, orderBy: { updatedAt: "asc" }, take: 50, select: { bodyPart: true, testOrder: { select: { name: true } }, reports: { orderBy: { version: "desc" }, take: 1, select: { findings: true, impression: true, signedAt: true } } } }),
+      this.prisma.labResult.count({ where: { ...base, status: "VERIFIED", hasCritical: true, criticalAckAt: null } }),
+      this.prisma.radStudy.count({ where: { ...base, status: "REPORTED", hasCritical: true, criticalAckAt: null } }),
+    ]);
+    type Value = { name: string; unit: string | null; value: string; flag: string; rangeText: string };
+    const labRows = labs.flatMap((l) => {
+      const v = l.versions[0];
+      if (!v) return [];
+      const rows = ((v.values ?? []) as unknown as Value[]).map((x) => [l.name, x.name, [x.value, x.unit].filter(Boolean).join(" "), x.rangeText ?? "", x.flag === "NORMAL" ? "" : x.flag.replace(/_/g, " ").toLowerCase()]);
+      return rows.length ? [{ rows, comment: v.comment ? `${l.name}: ${v.comment}` : "", at: v.verifiedAt }] : [];
+    });
+    const radRows = rads.flatMap((r) => (r.reports[0] ? [[`${r.testOrder.name} (${r.bodyPart})`, r.reports[0].findings, r.reports[0].impression, at(r.reports[0].signedAt)]] : []));
+    const held = heldLab + heldRad;
+    return [
+      ...(labRows.length ? [{ t: "heading", text: "Laboratory results" } as Block, { t: "table", head: [{ label: "Test" }, { label: "Parameter" }, { label: "Result" }, { label: "Reference range" }, { label: "Flag" }], rows: labRows.flatMap((l) => l.rows) } as Block, ...labRows.filter((l) => l.comment).map((l) => ({ t: "para", text: l.comment }) as Block)] : []),
+      ...(radRows.length ? [{ t: "heading", text: "Radiology reports" } as Block, { t: "table", head: [{ label: "Study" }, { label: "Findings" }, { label: "Impression" }, { label: "Reported" }], rows: radRows } as Block] : []),
+      ...(held ? [{ t: "note", text: `${held === 1 ? "One report is" : `${held} reports are`} with the doctor for review and not shown here.` } as Block] : []),
+    ];
+  }
+
   /** Prints the doctor's signed prescription for an OPD or IPD encounter. Drafts are never printable. */
   async prescription(ctx: RequestContext, encounterId: string, format: PrintFormat = "html", opts: { quiet?: boolean } = {}): Promise<Rendered> {
     const enc = await this.prisma.encounter.findFirst({
@@ -137,7 +172,11 @@ export class PrintService {
       include: { patient: { include: { identifiers: { where: { type: "MRN" } } } }, practitioner: { select: { displayName: true, specialty: true, registrationNo: true } } },
     });
     if (!enc) throw notFound();
-    const order = await this.prisma.medicationOrder.findFirst({ where: { tenantId: ctx.tenantId, encounterId, status: "SIGNED", source: "DIGITAL" }, include: { items: { orderBy: { lineNo: "asc" } } }, orderBy: { signedAt: "desc" } });
+    const orders = await this.prisma.medicationOrder.findMany({ where: { tenantId: ctx.tenantId, encounterId, status: "SIGNED", source: "DIGITAL" }, include: { items: { orderBy: { lineNo: "asc" } } }, orderBy: { signedAt: "asc" }, take: 20 });
+    // The first signed prescription of the visit is the document. Any later one only holds a medicine that replaced one of its medicines (docs/prescriptions.md).
+    const order = orders[0] ?? null;
+    const rxItems = orders.flatMap((o) => o.items);
+    const replaced = new Set(rxItems.flatMap((i) => (i.amendsItemId ? [i.amendsItemId] : [])));
     // The signed consultation is what the prescription is printed from: its complaint, diagnosis, tests, advice and follow-up as they were signed.
     const doc = await this.prisma.clinicalDocument.findFirst({ where: { tenantId: ctx.tenantId, encounterId, kind: "CONSULTATION", status: { not: "DRAFT" } } });
     if (!order && !doc) throw new DomainError("INVALID_STATE", "There is no signed prescription to print", 409);
@@ -152,23 +191,26 @@ export class PrintService {
     const paragraph = (title: string, text: string | undefined): Block[] => (text?.trim() ? [{ t: "heading", text: title } as Block, { t: "para", text: text } as Block] : []);
     const allergies = await this.prisma.allergy.findMany({ where: { tenantId: ctx.tenantId, patientId: { in: (await chartPatientIds(this.prisma, ctx.tenantId, enc.patientId)) ?? [enc.patientId] }, status: "ACTIVE" }, select: { allergen: true } });
     const e = await this.env(ctx);
+    const [byVideo, results] = await Promise.all([this.consultedByVideo(ctx, encounterId), this.resultBlocks(ctx, encounterId, e.at)]);
     const p = enc.patient;
     const follow = note.followUp?.date ? e.day(new Date(`${note.followUp.date}T00:00:00Z`)) : note.followUp?.afterDays && signedAt ? e.day(new Date(signedAt.getTime() + note.followUp.afterDays * 86_400_000)) : null;
     return this.finish(ctx, "PRESCRIPTION", "MedicationOrder", order?.id ?? doc!.id, format, (banner) => ({
       title: `Prescription ${rxNumber}`, fileBase: `prescription-${slug(str(rxNumber))}`, header: e.header, footer: e.footer.prescription, printedBy: e.printedBy, printedAt: e.now, banner,
       blocks: [
         { t: "title", text: `Prescription ${str(rxNumber)}` },
-        { t: "kv", rows: [["Patient", fullName(p)], ["MRN", p.identifiers[0]?.value], ["Gender", p.gender], ["Age/DOB", p.dateOfBirth ? e.day(p.dateOfBirth) : p.estimatedAgeYears ? `~${p.estimatedAgeYears} y` : ""], ["Encounter", enc.encounterNumber], ["Date", e.at(signedAt)], ["Doctor", [enc.practitioner?.displayName ?? signer?.fullName, enc.practitioner?.specialty].filter(Boolean).join(", ")], ["Registration no.", enc.practitioner?.registrationNo]] },
+        { t: "kv", rows: [["Patient", fullName(p)], ["MRN", p.identifiers[0]?.value], ["Gender", p.gender], ["Age/DOB", p.dateOfBirth ? e.day(p.dateOfBirth) : p.estimatedAgeYears ? `~${p.estimatedAgeYears} y` : ""], ["Encounter", enc.encounterNumber], ["Date", e.at(signedAt)], ["Doctor", [enc.practitioner?.displayName ?? signer?.fullName, enc.practitioner?.specialty].filter(Boolean).join(", ")], ["Registration no.", enc.practitioner?.registrationNo], ...(byVideo ? [["Consultation", "Consulted by video"] as [string, string]] : [])] },
         ...(allergies.length ? [{ t: "note", text: `Known allergies: ${allergies.map((a) => a.allergen).join(", ")}` } as Block] : []),
         ...(latestVitals.length ? [{ t: "para", text: `Vitals: ${latestVitals.map((v) => `${v.type.replace(/_/g, " ").toLowerCase()} ${new Decimal(v.value.toString()).toFixed(v.unit === "°C" || v.unit === "kg" ? 1 : 0)} ${v.unit}`).join(" · ")}` } as Block] : []),
         ...paragraph("Complaint", note.chiefComplaint), ...paragraph("History", note.historyOfPresentIllness), ...paragraph("Past history", note.pastHistory), ...paragraph("Examination", note.examination),
         ...(diagnoses.length ? [{ t: "heading", text: "Diagnosis" } as Block, { t: "table", head: [{ label: "Diagnosis" }, { label: "Code" }, { label: "Type" }], rows: diagnoses.map((d) => [d.text, d.code ?? "", d.type.toLowerCase()]) } as Block] : []),
-        ...(order && order.items.length ? [{ t: "heading", text: "Medicines" } as Block, { t: "table", head: [{ label: "#" }, { label: "Medicine" }, { label: "Dose" }, { label: "Route" }, { label: "Frequency" }, { label: "Food" }, { label: "Days", numeric: true }, { label: "Instructions" }],
-          rows: order.items.map((i) => [str(i.lineNo), [i.brandName ?? i.genericName, i.brandName ? `(${i.genericName})` : "", i.strength ?? ""].filter(Boolean).join(" ") + (i.status === "STOPPED" ? " [STOPPED]" : ""), i.dosage, i.route, i.frequency === "OTHER" && i.frequencyText ? i.frequencyText : FREQ[i.frequency] ?? i.frequency, i.foodRelation ? FOOD[i.foodRelation] ?? "" : "", str(i.durationDays), i.instructions ?? ""]) } as Block] : []),
+        ...(rxItems.length ? [{ t: "heading", text: "Medicines" } as Block, { t: "table", head: [{ label: "#" }, { label: "Medicine" }, { label: "Dose" }, { label: "Route" }, { label: "Frequency" }, { label: "Food" }, { label: "Days", numeric: true }, { label: "Instructions" }],
+          rows: rxItems.map((i, n) => [str(n + 1), [i.brandName ?? i.genericName, i.brandName ? `(${i.genericName})` : "", i.strength ?? ""].filter(Boolean).join(" ") + (i.status === "STOPPED" ? (replaced.has(i.id) ? " [REPLACED]" : " [STOPPED]") : "") + (i.amendsItemId ? " [AMENDED]" : ""), i.dosage, i.route, i.frequency === "OTHER" && i.frequencyText ? i.frequencyText : FREQ[i.frequency] ?? i.frequency, i.foodRelation ? FOOD[i.foodRelation] ?? "" : "", str(i.durationDays), i.instructions ?? ""]) } as Block] : []),
+        ...orders.filter((o) => o.items.some((i) => i.amendsItemId)).map((o) => ({ t: "para", text: `Amended ${e.at(o.signedAt)}: ${o.notes ?? ""}` } as Block)),
         ...(note.investigationsAdvised?.length ? [{ t: "heading", text: "Laboratory investigations" } as Block, { t: "table", head: [{ label: "#" }, { label: "Test" }], rows: note.investigationsAdvised.map((t, n) => [str(n + 1), t]) } as Block] : []),
         ...(note.otherTestsAdvised?.length ? [{ t: "heading", text: "Radiology / imaging" } as Block, { t: "table", head: [{ label: "#" }, { label: "Test" }], rows: note.otherTestsAdvised.map((t, n) => [str(n + 1), t]) } as Block] : []),
         ...(note.cardiologyAdvised?.length ? [{ t: "heading", text: "Cardiology investigations" } as Block, { t: "table", head: [{ label: "#" }, { label: "Test" }], rows: note.cardiologyAdvised.map((t, n) => [str(n + 1), t]) } as Block] : []),
         ...(note.proceduresAdvised?.length ? [{ t: "heading", text: "Other diagnostic procedures" } as Block, { t: "table", head: [{ label: "#" }, { label: "Procedure" }], rows: note.proceduresAdvised.map((t, n) => [str(n + 1), t]) } as Block] : []),
+        ...results,
         ...paragraph("Advice", note.advice), ...paragraph("Diet", note.dietAdvice), ...paragraph("Referral", note.referral),
         ...(follow || note.followUp?.notes ? [{ t: "para", text: `Follow-up: ${[follow ? `on or after ${follow}` : "", note.followUp?.notes ?? ""].filter(Boolean).join(". ")}` } as Block] : []),
         { t: "signature", lines: [signer?.fullName ?? "", `Signed ${e.at(signedAt)}`] },
@@ -184,6 +226,8 @@ export class PrintService {
     const c = doc.content as SummaryContent;
     const a = s.admission;
     const e = await this.env(ctx);
+    const admRow = await this.prisma.admission.findFirstOrThrow({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { encounterId: true } });
+    const results = await this.resultBlocks(ctx, admRow.encounterId, e.at);
     const section = (t: string, v: string | undefined): Block[] => (v ? [{ t: "heading", text: t }, { t: "para", text: v }] : []);
     return this.finish(ctx, "DISCHARGE_SUMMARY", "ClinicalDocument", doc.id, format, (banner) => ({
       title: "Discharge Summary", fileBase: `discharge-summary-${slug(a.admissionNumber)}`, header: e.header, footer: e.footer.dischargeSummary, printedBy: e.printedBy, printedAt: e.now, banner,
@@ -193,7 +237,7 @@ export class PrintService {
         ...(c.finalDiagnoses.length ? [{ t: "heading", text: "Final diagnoses" } as Block, { t: "table", head: [{ label: "Diagnosis" }, { label: "Code" }], rows: c.finalDiagnoses.map((d) => [d.text, d.code ?? ""]) } as Block] : []),
         ...section("Hospital course", c.hospitalCourse),
         ...(c.procedures.length ? [{ t: "heading", text: "Procedures" } as Block, { t: "table", head: [{ label: "Procedure" }, { label: "Date" }, { label: "Notes" }], rows: c.procedures.map((p) => [p.name, p.date ?? "", p.notes ?? ""]) } as Block] : []),
-        ...section("Investigations", c.investigationSummary), ...section("Condition at discharge", c.conditionAtDischarge),
+        ...section("Investigations", c.investigationSummary), ...results, ...section("Condition at discharge", c.conditionAtDischarge),
         ...(c.dischargeMedications.length ? [{ t: "heading", text: "Discharge medications" } as Block, { t: "table", head: [{ label: "Medicine" }, { label: "Dose" }, { label: "Route" }, { label: "Frequency" }, { label: "Days", numeric: true }, { label: "Instructions" }],
           rows: c.dischargeMedications.map((m) => [[m.brandName ?? m.genericName, m.strength ?? ""].filter(Boolean).join(" "), m.dosage, m.route, FREQ[m.frequency] ?? m.frequency, str(m.durationDays), m.instructions ?? ""]) } as Block] : []),
         ...section("Advice", c.advice),
@@ -322,7 +366,7 @@ export class PrintService {
       title: `Claim ${c.claimNumber}`, fileBase: `claim-${slug(c.claimNumber)}`, header: e.header, printedBy: e.printedBy, printedAt: e.now,
       blocks: [
         { t: "title", text: `Insurance claim ${c.claimNumber}` },
-        { t: "kv", rows: [["Patient", c.patient.name], ["MRN", c.patient.mrn], ["Insurer", c.policy.insurer.name], ["Policy no.", c.policy.policyNumber], ["Member id", c.policy.memberId], ["Policy holder", c.policy.holderName], ["Valid", `${c.policy.validFrom} to ${c.policy.validTo}`], ["Type", c.type], ["Status", c.status], ["Diagnosis", c.diagnosis], ["Invoice", c.invoice?.invoiceNumber ?? ""], ["Pre-authorised", c.preauthApproved ?? ""], ["Claimed", c.claimedAmount ?? ""], ["Approved", c.approvedAmount ?? ""], ["Received", c.settledAmount ?? ""]] },
+        { t: "kv", rows: [["Patient", c.patient.name], ["MRN", c.patient.mrn], ["Insurer", c.policy.insurer.name], ["Policy no.", c.policy.policyNumber], ["Member id", c.policy.memberId], ["Policy holder", c.policy.holderName], ["Valid", `${c.policy.validFrom} to ${c.policy.validTo}`], ["Type", c.type], ["Status", c.status], ["Diagnosis", c.diagnosis], ["Invoice", c.invoice?.invoiceNumber ?? ""], ["Pre-authorised", c.preauthApproved ?? ""], ["Claimed", c.claimedAmount ?? ""], ...(c.copay?.patientShare ? [["Patient pays", c.copay.patientShare] as [string, string]] : []), ["Approved", c.approvedAmount ?? ""], ["Received", c.settledAmount ?? ""]] },
         { t: "table", head: [{ label: "When" }, { label: "Step" }, { label: "Amount", numeric: true }, { label: "Note" }, { label: "By" }], rows: c.events.map((x) => [e.at(x.at), `${x.from ?? ""} ${x.from ? "→ " : ""}${x.to}`.trim(), x.amount ?? "", x.note ?? "", x.by ?? ""]) },
       ],
     }));
@@ -339,10 +383,11 @@ export class PrintService {
         { t: "kv", rows: [["Employee", p.employee.name], ["Employee code", p.employee.code], ["Designation", p.employee.designation], ["Department", p.employee.department], ["PAN", p.employee.pan], ["UAN", p.employee.uan], ["ESI no.", p.employee.esiNumber], ["Bank account", p.employee.bankAccount], ["Days in month", String(p.daysInMonth)], ["Days of loss of pay", p.lopDays]] },
         { t: "table", head: [{ label: "Earnings" }, { label: "Amount", numeric: true }, { label: "Deductions" }, { label: "Amount", numeric: true }], rows: [
           ["Basic", p.basic, "Provident fund", p.pfEmployee], ["House rent allowance", p.hra, "ESI", p.esiEmployee], ["Other allowance", p.otherAllowance, "Professional tax", p.professionalTax], ["Bonus", p.bonus, "Income tax (TDS)", p.tds],
-          ["", "", "Other deductions", p.otherDeduction], ["Gross pay", p.gross, "Total deductions", p.totalDeductions],
+          ["Arrears", p.arrears, "Other deductions", p.otherDeduction], ["Gross pay", p.gross, "Total deductions", p.totalDeductions],
         ] },
         { t: "kv", rows: [["Net pay", p.net], ["Status", p.runStatus === "PAID" && p.paidOn ? `Paid on ${p.paidOn}` : p.runStatus]] },
         ...(p.note ? [{ t: "para", text: `Note: ${p.note}` } as Block] : []),
+        ...(p.arrearsNote ? [{ t: "para", text: `Arrears: ${p.arrearsNote}` } as Block] : []),
       ],
     }));
   }

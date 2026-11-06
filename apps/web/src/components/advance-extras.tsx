@@ -1,5 +1,6 @@
 "use client";
 import { useState } from "react";
+import { T } from "@/lib/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Card, ErrorNote, Field, Input, Modal, Select, Spinner, Table, Td } from "@/components/ui";
 import { api, newKey, printUrl } from "@/lib/api";
@@ -24,7 +25,7 @@ export function AdvanceCard({ patientId }: { patientId: string }) {
   if (!can("INVOICE_READ")) return null;
   return (
     <Card title="Advance payments" actions={can("PAYMENT_CREATE") ? <Button variant="secondary" onClick={() => setTaking(true)}>Take an advance</Button> : undefined}>
-      {q.isLoading ? <Spinner /> : !q.data || q.data.items.length === 0 ? <p className="text-sm text-slate-500">No advance taken.</p> : (
+      {q.isLoading ? <Spinner /> : !q.data || q.data.items.length === 0 ? <p className="text-sm text-slate-500"><T>No advance taken.</T></p> : (
         <>
           <p className="mb-2 text-sm">Available to use: <b>{money(q.data.balance)}</b></p>
           <Table head={["Receipt", "Date", "Paid in", "Left", ""]}>

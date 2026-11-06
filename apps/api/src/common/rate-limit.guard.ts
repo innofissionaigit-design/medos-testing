@@ -47,13 +47,14 @@ export class RateLimitGuard implements CanActivate {
     const auth = req.headers["authorization"];
     if (this.config.RATE_LIMIT_ENABLED && typeof auth === "string" && auth.startsWith(`Bearer ${API_KEY_PREFIX}`)) {
       const used = await this.hit(`apikey:${createHash("sha256").update(auth).digest("hex")}`, 60_000);
-      if (used > this.config.API_CLIENT_RATE_LIMIT_PER_MINUTE) throw new DomainError("RATE_LIMITED", "Too many requests for this API key. Slow down and retry shortly.", 429);
+      if (used > this.config.API_CLIENT_RATE_LIMIT_PER_MINUTE) throw new DomainError("RATE_LIMITED", "Too many requests for this API key. Slow down and retry shortly.", 429, { retryAfterSeconds: 60 });
     }
     const opts = this.reflector.getAllAndOverride<RateLimitOptions | undefined>(RATE_LIMIT, [ec.getHandler(), ec.getClass()]);
     if (!opts || !this.config.RATE_LIMIT_ENABLED) return true;
     const key = `${subjectOf(req, opts.by ?? "ip")}|${req.method}|${req.route?.path ?? ""}`;
     const count = await this.hit(key, opts.windowMs);
-    if (count > opts.limit) throw new DomainError("RATE_LIMITED", "Too many requests. Try again later.", 429);
+    // Fixed window: the allowance is back by the end of the window at the latest, so the window length is a safe "retry after".
+    if (count > opts.limit) throw new DomainError("RATE_LIMITED", "Too many requests. Try again later.", 429, { retryAfterSeconds: Math.ceil(opts.windowMs / 1000) });
     return true;
   }
 }

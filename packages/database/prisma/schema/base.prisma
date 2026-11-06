@@ -59,6 +59,8 @@ model Facility {
   apiClients      ApiClient[]
   shareRules      DoctorShareRule[]
   shareEntries    DoctorShareEntry[]
+  notifications   Notification[]
+  emailOutbox     EmailOutbox[]
   stockLocations  StockLocation[]
   doctorPayouts   DoctorPayout[]
   labDefinitions  LabTestDefinition[]
@@ -102,6 +104,8 @@ model User {
   status            ActiveStatus @default(ACTIVE)
   failedLoginCount  Int          @default(0)
   lockedUntil       DateTime?    @db.Timestamptz(3)
+  /// When the last wrong password was entered; wrong tries older than the failure window (LOGIN_FAILURE_WINDOW_SECONDS) no longer count towards a lock.
+  lastFailedLoginAt DateTime?    @db.Timestamptz(3)
   /// The hidden user behind an API client (an outside system or a bot, docs/integration-api.md). It can never sign in with a password.
   isService         Boolean      @default(false)
   createdAt         DateTime     @default(now()) @db.Timestamptz(3)
@@ -116,6 +120,7 @@ model User {
   apiClient     ApiClient?
   prescriptionTemplates PrescriptionTemplate[]
   employees     Employee[]
+  notifications Notification[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, username])
@@ -216,6 +221,8 @@ model AuditEvent {
 enum ResetPolicy {
   NEVER
   YEARLY
+  /// Restarts on 1 April (the Indian financial year); the pattern uses {FY}.
+  FINANCIAL_YEAR
 }
 
 model NumberSequenceConfig {

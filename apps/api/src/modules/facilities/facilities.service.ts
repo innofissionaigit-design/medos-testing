@@ -74,6 +74,11 @@ export class FacilitiesService {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.facility.findFirst({ where: { id, tenantId: ctx.tenantId } });
       if (!existing) throw new DomainError("FACILITY_NOT_FOUND", "Facility not found", 404);
+      if (input.status === "INACTIVE" && existing.status === "ACTIVE") {
+        // Switching a facility off stops everybody signing in to it, so it must not be done while patients are in its beds.
+        const admitted = await tx.admission.count({ where: { tenantId: ctx.tenantId, facilityId: id, status: "ADMITTED" } });
+        if (admitted > 0) throw new DomainError("INVALID_STATE", `${admitted} patient${admitted === 1 ? ' is' : 's are'} still admitted at this facility. Discharge them first.`, 409, { admitted });
+      }
       const f = await tx.facility.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id } }, data: input, select: SELECT });
       await this.audit.record(tx, { ...actorOf(ctx), facilityId: id }, {
         action: input.status && input.status !== existing.status ? "FACILITY_STATUS_CHANGED" : "FACILITY_UPDATED",

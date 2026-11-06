@@ -9,6 +9,7 @@ import { ageText, type AgeValue } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
 import { visibleNav } from "@/lib/nav";
+import { NotificationBell } from "./notifications";
 import { useDebounced } from "./ui";
 
 export interface PatientRow { id: string; mrn: string | null; firstName: string; lastName: string | null; gender: string; age: AgeValue; mobile: string | null }
@@ -90,6 +91,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <button className="rounded border border-slate-300 px-2 py-1 text-sm md:hidden" onClick={() => setMenu((m) => !m)} aria-label="Menu">☰</button>
           <GlobalSearch />
           <div className="ml-auto flex items-center gap-3 text-sm">
+            <NotificationBell />
             {me.facilities.length > 1 ? (
               <select aria-label="Facility" value={me.facility?.id ?? ""} onChange={(e) => switchFacility(e.target.value)} className="rounded border border-slate-300 px-2 py-1 text-sm">
                 {me.facilities.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}

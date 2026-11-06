@@ -7,6 +7,7 @@ import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { chartPatientIds } from "../patients/patient-links";
 import { NumberingService } from "../numbering/numbering.service";
+import { SettingsService } from "../settings/settings.service";
 import { balanceDue, computeLine, computeTotals, fmt, netReceived, refundable, type LineAmounts } from "./billing.domain";
 import { LedgerService, type Method } from "./ledger.service";
 import { amount, percent, quantity } from "./money.schema";
@@ -63,13 +64,14 @@ export function toInvoiceView(i: InvoiceFull) {
   return {
     id: i.id, invoiceNumber: i.invoiceNumber, status: i.status, kind: i.kind, patientId: i.patientId, encounterId: i.encounterId,
     patientName: [i.patient.firstName, i.patient.lastName].filter(Boolean).join(" "), mrn: i.patient.identifiers[0]?.value ?? null,
-    subtotal: fmt(i.subtotal), discountTotal: fmt(i.discountTotal), taxTotal: fmt(i.taxTotal), total: fmt(i.total),
+    subtotal: fmt(i.subtotal), discountTotal: fmt(i.discountTotal), taxTotal: fmt(i.taxTotal), roundOff: fmt(i.roundOff), taxSplit: i.taxSplit, roundsToRupee: i.roundsToRupee,
+    cgstTotal: i.taxSplit ? fmt(i.taxTotal.div(2)) : null, sgstTotal: i.taxSplit ? fmt(i.taxTotal.div(2)) : null, total: fmt(i.total),
     paidTotal: fmt(i.paidTotal), refundedTotal: fmt(i.refundedTotal), creditedTotal: fmt(i.creditedTotal),
     netReceived: fmt(netReceived(money)), balanceDue: i.status === "DRAFT" || i.status === "CANCELLED" || i.status === "REFUNDED" ? "0.00" : fmt(balanceDue(money)), refundable: fmt(refundable(money)),
     notes: i.notes, issuedAt: i.issuedAt, cancelledAt: i.cancelledAt, cancelReason: i.cancelReason, version: i.version, createdAt: i.createdAt,
     lines: i.lines.map((l) => ({
       lineNo: l.lineNo, serviceId: l.serviceId, hsnSac: l.hsnSac, description: l.description, quantity: l.quantity.toString(), unitPrice: fmt(l.unitPrice),
-      discountAmount: fmt(l.discountAmount), taxPercent: fmt(l.taxPercent), taxAmount: fmt(l.taxAmount), lineTotal: fmt(l.lineTotal), sourceType: l.sourceType,
+      discountAmount: fmt(l.discountAmount), taxPercent: fmt(l.taxPercent), taxAmount: fmt(l.taxAmount), cgstAmount: i.taxSplit ? fmt(l.taxAmount.div(2)) : null, sgstAmount: i.taxSplit ? fmt(l.taxAmount.div(2)) : null, lineTotal: fmt(l.lineTotal), sourceType: l.sourceType,
     })),
     receipts: i.receipts.map((r) => ({ id: r.id, receiptNumber: r.receiptNumber, total: fmt(r.total), receivedAt: r.receivedAt, payments: r.payments.map((p) => ({ method: p.method, amount: fmt(p.amount), reference: p.reference })) })),
     refunds: i.refunds.map((r) => ({ id: r.id, refundNumber: r.refundNumber, method: r.method, amount: fmt(r.amount), reason: r.reason, createdAt: r.createdAt, cancelsInvoice: r.cancelsInvoice })),
@@ -84,7 +86,16 @@ export class InvoicesService {
     private readonly audit: AuditService,
     private readonly numbering: NumberingService,
     private readonly ledger: LedgerService,
+    private readonly settings: SettingsService,
   ) {}
+
+  /** How a NEW invoice treats tax and rounding, read from the facility settings. It is recorded on the invoice, which then keeps it for life. */
+  async invoiceOptions(db: Db, ctx: RequestContext): Promise<{ taxSplit: boolean; roundsToRupee: boolean }> {
+    const [taxSplit, roundsToRupee] = await Promise.all([
+      this.settings.get(db, ctx.tenantId, ctx.facilityId, "INVOICE_TAX_SPLIT"), this.settings.get(db, ctx.tenantId, ctx.facilityId, "INVOICE_ROUND_OFF"),
+    ]);
+    return { taxSplit, roundsToRupee };
+  }
 
   // ───── queries ─────
 
@@ -119,11 +130,13 @@ export class InvoicesService {
         const enc = await tx.encounter.findFirst({ where: { id: input.encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId }, select: { id: true } });
         if (!enc) throw new DomainError("VALIDATION_FAILED", "The visit does not belong to this patient at this facility", 400);
       }
-      const resolved = await this.resolveLines(tx, ctx, input.lines);
-      const totals = computeTotals(resolved.map((l) => l.amounts));
+      const opts = await this.invoiceOptions(tx, ctx);
+      const resolved = await this.resolveLines(tx, ctx, input.lines, opts.taxSplit);
+      const totals = computeTotals(resolved.map((l) => l.amounts), { roundToRupee: opts.roundsToRupee });
       const inv = await tx.invoice.create({
         data: {
           tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId, encounterId: input.encounterId ?? null, kind: input.kind, notes: input.notes ?? null, createdById: ctx.userId,
+          taxSplit: opts.taxSplit, roundsToRupee: opts.roundsToRupee, roundOff: totals.roundOff.toFixed(2),
           subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2),
         },
       });
@@ -140,14 +153,14 @@ export class InvoicesService {
       const inv = await this.ledger.lock(tx, ctx, id);
       if (inv.status !== "DRAFT") throw new DomainError("INVOICE_ALREADY_ISSUED", "An issued invoice cannot be edited. Use a credit note, refund or cancellation.", 409);
       if (inv.version !== input.version) throw new DomainError("STALE_VERSION", "This invoice was changed by someone else. Reload and try again.", 409, { currentVersion: inv.version });
-      const resolved = await this.resolveLines(tx, ctx, input.lines);
-      const totals = computeTotals(resolved.map((l) => l.amounts));
+      const resolved = await this.resolveLines(tx, ctx, input.lines, inv.taxSplit);
+      const totals = computeTotals(resolved.map((l) => l.amounts), { roundToRupee: inv.roundsToRupee });
       await tx.invoiceLine.deleteMany({ where: { tenantId: ctx.tenantId, invoiceId: id } });
       await this.writeLines(tx, ctx, id, resolved);
       const res = await tx.invoice.updateMany({
         where: { id, tenantId: ctx.tenantId, status: "DRAFT", version: input.version },
         data: {
-          subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2),
+          subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2), roundOff: totals.roundOff.toFixed(2),
           ...(input.notes !== undefined ? { notes: input.notes } : {}), version: { increment: 1 },
         },
       });
@@ -175,7 +188,7 @@ export class InvoicesService {
       const computed = lines.map((l) => {
         const discount = wanted.get(l.lineNo) ?? new Decimal(l.discountAmount.toString());
         try {
-          return { line: l, discount, amounts: computeLine({ quantity: l.quantity.toString(), unitPrice: l.unitPrice.toString(), discountAmount: discount, taxPercent: l.taxPercent.toString() }) };
+          return { line: l, discount, amounts: computeLine({ quantity: l.quantity.toString(), unitPrice: l.unitPrice.toString(), discountAmount: discount, taxPercent: l.taxPercent.toString() }, { split: inv.taxSplit }) };
         } catch (e) {
           throw new DomainError("INVALID_AMOUNT", `Line ${l.lineNo}: ${e instanceof RangeError ? e.message : "invalid discount"}`, 400, [{ path: "lines", message: "Invalid discount" }]);
         }
@@ -192,10 +205,10 @@ export class InvoicesService {
       }
       if (changes.length === 0) throw new DomainError("VALIDATION_FAILED", "No discount was changed", 400, [{ path: "lines", message: "No change" }]);
 
-      const totals = computeTotals(computed.map((c) => c.amounts));
+      const totals = computeTotals(computed.map((c) => c.amounts), { roundToRupee: inv.roundsToRupee });
       const res = await tx.invoice.updateMany({
         where: { id, tenantId: ctx.tenantId, status: "DRAFT", version: input.version },
-        data: { subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2), version: { increment: 1 } },
+        data: { subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2), roundOff: totals.roundOff.toFixed(2), version: { increment: 1 } },
       });
       if (res.count !== 1) throw new DomainError("STALE_VERSION", "This invoice was changed by someone else", 409);
       await this.audit.record(tx, actorOf(ctx), { action: "INVOICE_DISCOUNT_APPLIED", entityType: "Invoice", entityId: id, metadata: { reason: input.reason, lines: changes, discount: fmt(totals.discountTotal), total: fmt(totals.total) } });
@@ -212,15 +225,15 @@ export class InvoicesService {
       if (inv.status !== "DRAFT") throw new DomainError("INVOICE_ALREADY_ISSUED", "This invoice is already issued", 409);
       const lines = await tx.invoiceLine.findMany({ where: { tenantId: ctx.tenantId, invoiceId: id }, orderBy: { lineNo: "asc" } });
       if (lines.length === 0) throw new DomainError("VALIDATION_FAILED", "Add at least one line before issuing", 400);
-      const amounts = lines.map((l) => computeLine({ quantity: l.quantity, unitPrice: l.unitPrice, discountAmount: l.discountAmount, taxPercent: l.taxPercent }));
-      const totals = computeTotals(amounts);
+      const amounts = lines.map((l) => computeLine({ quantity: l.quantity, unitPrice: l.unitPrice, discountAmount: l.discountAmount, taxPercent: l.taxPercent }, { split: inv.taxSplit }));
+      const totals = computeTotals(amounts, { roundToRupee: inv.roundsToRupee });
       if (!totals.total.gt(0)) throw new DomainError("INVALID_AMOUNT", "An invoice must have a total greater than zero", 400);
       const invoiceNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "INVOICE");
       const res = await tx.invoice.updateMany({
         where: { id, tenantId: ctx.tenantId, status: "DRAFT" },
         data: {
           status: "ISSUED", invoiceNumber, issuedAt: new Date(), issuedById: ctx.userId, version: { increment: 1 },
-          subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2),
+          subtotal: totals.subtotal.toFixed(2), discountTotal: totals.discountTotal.toFixed(2), taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2), roundOff: totals.roundOff.toFixed(2),
         },
       });
       if (res.count !== 1) throw new DomainError("INVOICE_ALREADY_ISSUED", "This invoice was issued by someone else", 409);
@@ -277,12 +290,14 @@ export class InvoicesService {
     tx: Db, ctx: RequestContext,
     input: { patientId: string; encounterId: string | null; kind: "OPD" | "IPD" | "PHARMACY" | "OTHER" | "REGISTRATION"; notes?: string; lines: { description: string; quantity: Decimal; unitPrice: Decimal; taxPercent: Decimal; sourceType: string; sourceId: string; hsnSac?: string | null }[] },
   ) {
-    const amounts = input.lines.map((l) => computeLine({ quantity: l.quantity, unitPrice: l.unitPrice, discountAmount: 0, taxPercent: l.taxPercent }));
-    const totals = computeTotals(amounts);
+    const opts = await this.invoiceOptions(tx, ctx);
+    const amounts = input.lines.map((l) => computeLine({ quantity: l.quantity, unitPrice: l.unitPrice, discountAmount: 0, taxPercent: l.taxPercent }, { split: opts.taxSplit }));
+    const totals = computeTotals(amounts, { roundToRupee: opts.roundsToRupee });
     if (!totals.total.gt(0)) throw new DomainError("INVALID_AMOUNT", "An invoice must have a total greater than zero", 400);
     const inv = await tx.invoice.create({
       data: {
         tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId, encounterId: input.encounterId, kind: input.kind, notes: input.notes ?? null, createdById: ctx.userId,
+        taxSplit: opts.taxSplit, roundsToRupee: opts.roundsToRupee, roundOff: totals.roundOff.toFixed(2),
         subtotal: totals.subtotal.toFixed(2), discountTotal: "0.00", taxTotal: totals.taxTotal.toFixed(2), total: totals.total.toFixed(2),
       },
     });
@@ -304,7 +319,7 @@ export class InvoicesService {
     return toInvoiceView(i);
   }
 
-  private async resolveLines(tx: Db, ctx: RequestContext, inputs: LineInput[]): Promise<ResolvedLine[]> {
+  private async resolveLines(tx: Db, ctx: RequestContext, inputs: LineInput[], split: boolean): Promise<ResolvedLine[]> {
     const serviceIds = [...new Set(inputs.flatMap((l) => ("serviceId" in l ? [l.serviceId] : [])))];
     const services = serviceIds.length
       ? await tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE" } })
@@ -330,7 +345,7 @@ export class InvoicesService {
       }
       let amounts: LineAmounts;
       try {
-        amounts = computeLine({ quantity: l.quantity, unitPrice, discountAmount: discount, taxPercent });
+        amounts = computeLine({ quantity: l.quantity, unitPrice, discountAmount: discount, taxPercent }, { split });
       } catch (e) {
         throw new DomainError("INVALID_AMOUNT", e instanceof RangeError ? e.message : "Invalid line amounts", 400, [{ path: `lines.${i}.discountAmount`, message: "Invalid discount" }]);
       }

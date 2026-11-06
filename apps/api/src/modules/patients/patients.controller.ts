@@ -4,12 +4,13 @@ import { Ctx, id, paginate, parse, RequirePermissions } from "../../common/http"
 import { parseIdempotencyKey } from "../../common/idempotency.service";
 import type { RequestContext } from "../../common/request-context";
 import { MergeService, mergePatientSchema } from "./merge.service";
+import { addIdentifierSchema, PatientIdentifiersService, removeIdentifierSchema } from "./patient-identifiers.service";
 import { RegistrationFeeService, registrationSettlementSchema } from "./registration-fee.service";
 import { createPatientSchema, duplicateProbeSchema, PatientsService, searchPatientsSchema, updatePatientSchema } from "./patients.service";
 
 @Controller("patients")
 export class PatientsController {
-  constructor(private readonly patients: PatientsService, private readonly merge_: MergeService, private readonly registrationFee: RegistrationFeeService) {}
+  constructor(private readonly patients: PatientsService, private readonly merge_: MergeService, private readonly registrationFee: RegistrationFeeService, private readonly identifiers: PatientIdentifiersService) {}
 
   @RequirePermissions("PATIENT_READ")
   @Get()
@@ -61,6 +62,27 @@ export class PatientsController {
   @Get(":id")
   async get(@Ctx() ctx: RequestContext, @Param("id") patientId: string) {
     return { data: await this.patients.get(ctx, id(patientId)) };
+  }
+
+  /** The patient's numbers: the MRN, and any old hospital number or other ID recorded for them (docs/patient-identifiers.md). */
+  @RequirePermissions("PATIENT_READ")
+  @Get(":id/identifiers")
+  async listIdentifiers(@Ctx() ctx: RequestContext, @Param("id") patientId: string) {
+    return { data: await this.identifiers.list(ctx, id(patientId)) };
+  }
+
+  @RequirePermissions("PATIENT_UPDATE")
+  @Post(":id/identifiers")
+  async addIdentifier(@Ctx() ctx: RequestContext, @Param("id") patientId: string, @Body() body: unknown) {
+    return { data: await this.identifiers.add(ctx, id(patientId), parse(addIdentifierSchema, body)) };
+  }
+
+  /** An identifier is never edited or deleted. One entered wrongly is retired, with a reason, and the right one added. */
+  @RequirePermissions("PATIENT_UPDATE")
+  @Post(":id/identifiers/:identifierId/remove")
+  @HttpCode(200)
+  async removeIdentifier(@Ctx() ctx: RequestContext, @Param("id") patientId: string, @Param("identifierId") identifierId: string, @Body() body: unknown) {
+    return { data: await this.identifiers.remove(ctx, id(patientId), id(identifierId), parse(removeIdentifierSchema, body)) };
   }
 
   /** Links a duplicate (this id) to the real patient. Nothing moves and there is no undo (docs/patient-merge.md). */

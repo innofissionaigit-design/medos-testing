@@ -45,6 +45,7 @@ model RadStudy {
   encounter Encounter          @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
   testOrder TestOrder          @relation(fields: [tenantId, testOrderId], references: [tenantId, id], onDelete: Restrict)
   reports   RadReportVersion[]
+  images    RadImage[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, testOrderId])
@@ -71,4 +72,31 @@ model RadReportVersion {
 
   @@unique([tenantId, id])
   @@unique([studyId, version])
+}
+
+/// An image of a study: a PNG or JPEG (a key image or a screenshot from the modality) or one DICOM file. Bytes live in file storage (docs/radiology.md); this row
+/// is the record. Never deleted: a wrong image is marked REMOVED with a reason and stops showing, but stays on the record.
+model RadImage {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  facilityId   String            @db.Uuid
+  patientId    String            @db.Uuid
+  studyId      String            @db.Uuid
+  fileName     String
+  contentType  String
+  sizeBytes    Int
+  sha256       String
+  storageKey   String
+  description  String?
+  status       PatientFileStatus @default(ACTIVE)
+  uploadedById String            @db.Uuid
+  uploadedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  removedById  String?           @db.Uuid
+  removedAt    DateTime?         @db.Timestamptz(3)
+  removeReason String?
+
+  study RadStudy @relation(fields: [tenantId, studyId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, studyId, status, uploadedAt])
 }

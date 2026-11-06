@@ -284,7 +284,10 @@ describe("clinical core: allergies, diagnoses, consultation, prescription, signi
       const ok = await sign(v.doctor.token, v.encounterId, s.body.data.version, { acknowledgeAllergyWarnings: true });
       assert.equal(ok.status, 200);
       const evt = await t.prisma.auditEvent.findFirstOrThrow({ where: { tenantId: a.tenantId, action: "PRESCRIPTION_ALLERGY_ACKNOWLEDGED", actorUserId: v.doctor.userId } });
-      assert.deepEqual((evt.metadata as { allergies: string[] }).allergies, ["Amoxicillin"]);
+      const meta = evt.metadata as { allergyIds: string[]; severities: string[]; allergies?: unknown };
+      assert.equal(meta.allergyIds.length, 1, "which allergy record was overridden");
+      assert.ok(meta.severities.length === 1 && typeof meta.severities[0] === "string");
+      assert.ok(!JSON.stringify(evt.metadata).includes("Amoxicillin") && meta.allergies === undefined, "the allergen name is not copied into the audit trail, which managers can read");
     });
 
     it("resolved or erroneous allergies no longer trigger warnings", async () => {
@@ -418,11 +421,98 @@ describe("clinical core: allergies, diagnoses, consultation, prescription, signi
       const existing = (await t.api("get", `/encounters/${e}/diagnoses`, tok)).body.data[0];
       assert.equal((await t.api("post", `/diagnoses/${existing.id}/remove`, tok).send({ reason: "Remove it quietly" })).body.error.code, "CONSULTATION_SIGNED");
       assert.equal((await rx(tok, e, [AMOX])).body.error.code, "CONSULTATION_SIGNED");
-      const item = (await t.api("get", `/encounters/${e}/prescription`, tok)).body.data.orders[0].items[0];
-      assert.equal((await t.api("post", `/medication-order-items/${item.id}/stop`, tok).send({ reason: "Quiet stop" })).body.error.code, "CONSULTATION_SIGNED");
       assert.equal((await sign(tok, e, 1)).body.error.code, "CONSULTATION_SIGNED");
       const content = (await t.api("get", `/encounters/${e}/consultation`, tok)).body.data.document.content;
       assert.equal(content.chiefComplaint, COMPLAINT.chiefComplaint, "content untouched");
+    });
+
+    it("a medicine of a signed visit can be stopped by a signing doctor with a reason, leaving the signed note and snapshot unchanged and the stop audited", async () => {
+      const v = await signed();
+      const e = v.encounterId;
+      const tok = v.doctor.token;
+      const item = (await t.api("get", `/encounters/${e}/prescription`, tok)).body.data.orders[0].items[0];
+      const before = (await t.api("get", `/encounters/${e}/consultation`, tok)).body.data.document;
+
+      const noReason = await t.api("post", `/medication-order-items/${item.id}/stop`, tok).send({ reason: "x" });
+      assert.equal(noReason.status, 400);
+      // a practitioner who may write prescriptions but not sign them, a receptionist and another hospital's doctor cannot do it
+      const junior = await makeClinicianWith(t, a, ["PATIENT_READ", "CONSULTATION_READ", "PRESCRIPTION_CREATE", "PRESCRIPTION_READ"]);
+      assert.equal((await t.api("post", `/medication-order-items/${item.id}/stop`, junior.token).send({ reason: "Not my call" })).status, 403);
+      assert.equal((await t.api("post", `/medication-order-items/${item.id}/stop`, rec.token).send({ reason: "Not my call" })).status, 403);
+      const stranger = await makeDoctor(t, b);
+      assert.equal((await t.api("post", `/medication-order-items/${item.id}/stop`, stranger.token).send({ reason: "Other hospital" })).status, 404);
+
+      const ok = await t.api("post", `/medication-order-items/${item.id}/stop`, tok).send({ reason: "Rash after first dose" });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.equal(ok.body.data.status, "STOPPED");
+      assert.equal((await t.api("post", `/medication-order-items/${item.id}/stop`, tok).send({ reason: "Again" })).body.error.code, "INVALID_STATE");
+
+      const after = (await t.api("get", `/encounters/${e}/consultation`, tok)).body.data.document;
+      assert.equal(after.status, before.status);
+      assert.equal(after.version, before.version);
+      assert.deepEqual(after.content, before.content, "the signed note is untouched");
+      const stopped = (await t.api("get", `/encounters/${e}/prescription`, tok)).body.data.orders[0].items[0];
+      assert.equal(stopped.status, "STOPPED");
+      assert.equal(stopped.stopReason, "Rash after first dose");
+      const ev = await t.prisma.auditEvent.findFirstOrThrow({ where: { tenantId: a.tenantId, action: "PRESCRIPTION_ITEM_STOPPED", entityId: item.id } });
+      assert.equal(ev.actorUserId, v.doctor.userId);
+      assert.equal((ev.metadata as { afterSigning?: boolean }).afterSigning, true);
+    });
+
+    it("one medicine of a signed visit can be changed: the original stays on the record as stopped, the replacement is its own signed prescription, and the signed note is untouched", async () => {
+      const v = await readyVisit(false);
+      const e = v.encounterId;
+      const tok = v.doctor.token;
+      assert.equal((await rx(tok, e, [PARA, AMOX])).status, 200);
+      assert.equal((await sign(tok, e, v.version)).status, 200);
+      const read = async () => (await t.api("get", `/encounters/${e}/prescription`, tok)).body.data.orders as { id: string; orderNumber: string; status: string; items: { id: string; genericName: string; dosage: string; status: string; stopReason: string | null; amendsItemId: string | null }[] }[];
+      const first = (await read())[0]!;
+      const amox = first.items.find((i) => i.genericName === "Amoxicillin")!;
+      const note = (await t.api("get", `/encounters/${e}/consultation`, tok)).body.data.document;
+      const change = { reason: "Dose too low for the child's weight", item: { ...AMOX, dosage: "2 capsules", quantity: 30 } };
+      const amend = (id: string, body: object, token = tok) => t.api("post", `/medication-order-items/${id}/amend`, token).send(body);
+
+      // who may: a signing doctor of this hospital, with a real change and a reason
+      const junior = await makeClinicianWith(t, a, ["PATIENT_READ", "CONSULTATION_READ", "PRESCRIPTION_CREATE", "PRESCRIPTION_READ"]);
+      assert.equal((await amend(amox.id, change, junior.token)).status, 403, "writing prescriptions is not signing them");
+      assert.equal((await amend(amox.id, change, rec.token)).status, 403);
+      assert.equal((await amend(amox.id, change, (await makeDoctor(t, b)).token)).status, 404, "another hospital's doctor cannot see it");
+      assert.equal((await amend(amox.id, { ...change, reason: "x" })).status, 400);
+      assert.equal((await amend(amox.id, { reason: "No change at all", item: AMOX })).status, 400, "an identical medicine is not an amendment");
+      assert.equal((await amend(amox.id, { ...change, item: { ...change.item, unexpected: 1 } })).status, 400);
+
+      const done = await amend(amox.id, change);
+      assert.equal(done.status, 200, JSON.stringify(done.body));
+      assert.equal(done.body.data.status, "SIGNED");
+      assert.notEqual(done.body.data.orderNumber, first.orderNumber, "its own prescription number");
+      assert.equal(done.body.data.items[0].amendsItemId, amox.id);
+      assert.equal(done.body.data.items[0].dosage, "2 capsules");
+
+      const orders = await read();
+      assert.equal(orders.length, 2);
+      const original = orders.find((o) => o.items.some((i) => i.id === amox.id))!;
+      const kept = original.items.find((i) => i.id === amox.id)!;
+      assert.deepEqual([kept.status, kept.dosage, kept.stopReason], ["STOPPED", AMOX.dosage, "Amended: Dose too low for the child's weight"], "the original is kept exactly as signed");
+      assert.equal(original.items.find((i) => i.genericName === "Paracetamol")!.status, "ACTIVE", "the other medicine is not touched");
+      assert.equal((await amend(amox.id, change)).status, 409, "a stopped medicine cannot be amended again");
+
+      // the signed note is unchanged and the printed prescription shows everything
+      const after = (await t.api("get", `/encounters/${e}/consultation`, tok)).body.data.document;
+      assert.deepEqual([after.status, after.version, after.content], [note.status, note.version, note.content]);
+      const html = String((await t.api("get", `/print/prescriptions/${e}`, tok)).text);
+      assert.ok(html.includes("Paracetamol") || html.includes("Dolo"), "the untouched medicine is printed");
+      assert.ok(html.includes("[REPLACED]") && html.includes("[AMENDED]") && html.includes("2 capsules") && html.includes("Dose too low"), "the old line, the new line and the reason are printed");
+      assert.ok(html.includes(first.orderNumber), "the document keeps the first prescription's number");
+
+      // a replacement can itself be changed (a chain), and every step is audited
+      const again = await amend(done.body.data.items[0].id, { reason: "Child recovered, shorter course", item: { ...change.item, durationDays: 3, quantity: 18 } });
+      assert.equal(again.status, 200, JSON.stringify(again.body));
+      const events = await t.prisma.auditEvent.findMany({ where: { tenantId: a.tenantId, action: "PRESCRIPTION_ITEM_AMENDED" }, orderBy: { createdAt: "asc" } });
+      assert.equal(events.filter((x) => x.actorUserId === v.doctor.userId).length, 2);
+      assert.equal((events[0]!.metadata as { fromOrder: string }).fromOrder, first.orderNumber);
+
+      // database: the link cannot be rewritten
+      await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "MedicationOrderItem" SET "amendsItemId" = NULL WHERE id = '${done.body.data.items[0].id}'::uuid`), /cannot be changed|cannot be edited/);
     });
 
     it("database: signed documents, versions, orders and items reject updates and deletes even via raw SQL", async () => {

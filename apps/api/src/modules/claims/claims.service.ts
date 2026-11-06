@@ -8,9 +8,9 @@ import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { balanceDue, fmt } from "../billing/billing.domain";
 import { LedgerService } from "../billing/ledger.service";
-import { amount } from "../billing/money.schema";
+import { amount, percent } from "../billing/money.schema";
 import { NumberingService } from "../numbering/numbering.service";
-import { nextStatus, stepAllowedForType, stepsFrom, type ClaimStatus, type ClaimStep } from "./claims.domain";
+import { calculateCopay, type CopayRule, hasCopayRule, nextStatus, stepAllowedForType, stepsFrom, type ClaimStatus, type ClaimStep } from "./claims.domain";
 
 const uuid = z.string().uuid();
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-11-02");
@@ -21,14 +21,20 @@ export const insurerSchema = z.object({ name: z.string().trim().min(2).max(120),
 export const policySchema = z.object({
   insurerId: uuid, policyNumber: z.string().trim().min(3).max(60), memberId: z.string().trim().max(60).optional(), holderName: z.string().trim().max(120).optional(),
   validFrom: day, validTo: day, sumInsured: amount().optional(),
+  copayPercent: percent.optional(), deductible: amount().optional(), deductibleUsed: amount().optional(),
 }).strict();
 export const policyStatusSchema = z.object({ status: z.enum(["ACTIVE", "INACTIVE"]) }).strict();
+/** Sets a policy's co-pay rule. `copayPercent: null` with no deductible removes the rule. */
+export const policyCopaySchema = z.object({ copayPercent: percent.nullable(), deductible: amount(), deductibleUsed: amount() }).strict();
+export const copayPreviewSchema = z.object({ invoiceId: uuid }).strict();
+const overrideReason = z.string().trim().min(10).max(300);
 export const createClaimSchema = z.object({ patientId: uuid, policyId: uuid, type: z.enum(["CASHLESS", "REIMBURSEMENT"]), encounterId: uuid.optional(), diagnosis: z.string().trim().max(300).optional() }).strict();
 export const preauthSchema = z.object({ requestedAmount: amount({ positive: true }), note: note.optional() }).strict();
 export const preauthDecisionSchema = z.object({ decision: z.enum(["APPROVE", "REJECT"]), amount: amount({ positive: true }).optional(), reason: reason.optional() }).strict();
-export const submitSchema = z.object({ invoiceId: uuid, claimedAmount: amount({ positive: true }), note: note.optional() }).strict();
+/** `claimedAmount` may be left out when the policy has a co-pay rule: the calculated amount is used. A different amount needs `overrideReason`. */
+export const submitSchema = z.object({ invoiceId: uuid, claimedAmount: amount({ positive: true }).optional(), overrideReason: overrideReason.optional(), note: note.optional() }).strict();
 export const querySchema = z.object({ note }).strict();
-export const resubmitSchema = z.object({ note, claimedAmount: amount({ positive: true }).optional() }).strict();
+export const resubmitSchema = z.object({ note, claimedAmount: amount({ positive: true }).optional(), overrideReason: overrideReason.optional() }).strict();
 export const decisionSchema = z.object({ decision: z.enum(["APPROVE", "REJECT"]), approvedAmount: amount({ positive: true }).optional(), reason: reason.optional() }).strict();
 export const settleSchema = z.object({ amount: amount({ positive: true }), reference: z.string().trim().min(4).max(60), receivedOn: day }).strict();
 export const closeSchema = z.object({ reason }).strict();
@@ -41,6 +47,10 @@ export const listClaimsSchema = z.object({
 const nameOf = (p: { firstName: string; lastName: string | null }) => [p.firstName, p.lastName].filter(Boolean).join(" ");
 const money = (v: Decimal.Value | null | undefined) => (v === null || v === undefined ? null : fmt(v));
 const today = () => new Date(new Date().toISOString().slice(0, 10));
+const ruleOf = (p: { copayPercent: Prisma.Decimal | null; deductible: Prisma.Decimal; deductibleUsed: Prisma.Decimal; sumInsured: Prisma.Decimal | null }): CopayRule => ({
+  copayPercent: p.copayPercent === null ? null : new Decimal(p.copayPercent.toString()), deductible: new Decimal(p.deductible.toString()), deductibleUsed: new Decimal(p.deductibleUsed.toString()),
+  sumInsured: p.sumInsured === null ? null : new Decimal(p.sumInsured.toString()),
+});
 
 /**
  * Insurance claims (docs/claims.md): insurers and TPAs, the patient's policies, and a claim that follows one issued invoice through pre-authorisation,
@@ -81,9 +91,12 @@ export class ClaimsService {
     });
   }
 
-  private policyView(p: { id: string; policyNumber: string; memberId: string | null; holderName: string | null; validFrom: Date; validTo: Date; sumInsured: Prisma.Decimal | null; status: string; insurer: { id: string; name: string; kind: string } }) {
+  private policyView(p: { id: string; policyNumber: string; memberId: string | null; holderName: string | null; validFrom: Date; validTo: Date; sumInsured: Prisma.Decimal | null; copayPercent: Prisma.Decimal | null; deductible: Prisma.Decimal; deductibleUsed: Prisma.Decimal; status: string; insurer: { id: string; name: string; kind: string } }) {
     const iso = (d: Date) => d.toISOString().slice(0, 10);
-    return { id: p.id, policyNumber: p.policyNumber, memberId: p.memberId, holderName: p.holderName, validFrom: iso(p.validFrom), validTo: iso(p.validTo), sumInsured: money(p.sumInsured), status: p.status, insurer: p.insurer, validToday: p.status === "ACTIVE" && p.validFrom <= today() && p.validTo >= today() };
+    return {
+      id: p.id, policyNumber: p.policyNumber, memberId: p.memberId, holderName: p.holderName, validFrom: iso(p.validFrom), validTo: iso(p.validTo), sumInsured: money(p.sumInsured),
+      copayPercent: p.copayPercent === null ? null : new Decimal(p.copayPercent.toString()).toFixed(2), deductible: fmt(p.deductible), deductibleUsed: fmt(p.deductibleUsed), hasCopayRule: hasCopayRule(ruleOf(p)),
+      status: p.status, insurer: p.insurer, validToday: p.status === "ACTIVE" && p.validFrom <= today() && p.validTo >= today() };
   }
 
   async policies(ctx: RequestContext, patientId: string) {
@@ -95,13 +108,14 @@ export class ClaimsService {
 
   async addPolicy(ctx: RequestContext, patientId: string, input: z.infer<typeof policySchema>) {
     if (input.validFrom > input.validTo) throw new DomainError("VALIDATION_FAILED", "The policy ends before it starts", 400, [{ path: "validTo", message: "Before the start date" }]);
+    this.checkRule(input.deductible ?? new Decimal(0), input.deductibleUsed ?? new Decimal(0));
     return this.prisma.$transaction(async (tx) => {
       const patient = await tx.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
       const insurer = await tx.insurer.findFirst({ where: { id: input.insurerId, tenantId: ctx.tenantId, status: "ACTIVE" }, select: { id: true } });
       if (!patient || !insurer) throw new DomainError("NOT_FOUND", "Resource not found", 404);
       try {
         const p = await tx.patientPolicy.create({
-          data: { tenantId: ctx.tenantId, patientId, insurerId: input.insurerId, policyNumber: input.policyNumber, memberId: input.memberId ?? null, holderName: input.holderName ?? null, validFrom: new Date(input.validFrom), validTo: new Date(input.validTo), sumInsured: input.sumInsured?.toFixed(2) ?? null, createdById: ctx.userId },
+          data: { tenantId: ctx.tenantId, patientId, insurerId: input.insurerId, policyNumber: input.policyNumber, memberId: input.memberId ?? null, holderName: input.holderName ?? null, validFrom: new Date(input.validFrom), validTo: new Date(input.validTo), sumInsured: input.sumInsured?.toFixed(2) ?? null, copayPercent: input.copayPercent?.toFixed(2) ?? null, deductible: (input.deductible ?? new Decimal(0)).toFixed(2), deductibleUsed: (input.deductibleUsed ?? new Decimal(0)).toFixed(2), createdById: ctx.userId },
           include: { insurer: { select: { id: true, name: true, kind: true } } },
         });
         await this.audit.record(tx, actorOf(ctx), { action: "POLICY_ADDED", entityType: "PatientPolicy", entityId: p.id, metadata: { patientId, insurerId: input.insurerId } });
@@ -110,6 +124,29 @@ export class ClaimsService {
         if ((e as { code?: string }).code === "P2002") throw new DomainError("CONFLICT", "This policy is already on the patient's record", 409);
         throw e;
       }
+    });
+  }
+
+  private checkRule(deductible: Decimal, used: Decimal): void {
+    if (used.gt(deductible)) throw new DomainError("VALIDATION_FAILED", "The deductible already used cannot be more than the deductible", 400, [{ path: "deductibleUsed", message: "More than the deductible" }]);
+  }
+
+  /** Sets (or removes) the policy's co-pay rule. Claims already submitted keep the calculation they were made with. */
+  async setPolicyCopay(ctx: RequestContext, policyId: string, input: z.infer<typeof policyCopaySchema>) {
+    this.checkRule(input.deductible, input.deductibleUsed);
+    return this.prisma.$transaction(async (tx) => {
+      const p = await tx.patientPolicy.findFirst({ where: { id: policyId, tenantId: ctx.tenantId }, select: { id: true, copayPercent: true, deductible: true, deductibleUsed: true } });
+      if (!p) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      const r = await tx.patientPolicy.update({
+        where: { tenantId_id: { tenantId: ctx.tenantId, id: p.id } },
+        data: { copayPercent: input.copayPercent?.toFixed(2) ?? null, deductible: input.deductible.toFixed(2), deductibleUsed: input.deductibleUsed.toFixed(2) },
+        include: { insurer: { select: { id: true, name: true, kind: true } } },
+      });
+      await this.audit.record(tx, actorOf(ctx), {
+        action: "POLICY_COPAY_CHANGED", entityType: "PatientPolicy", entityId: p.id,
+        metadata: { from: { copayPercent: p.copayPercent?.toString() ?? null, deductible: fmt(p.deductible), deductibleUsed: fmt(p.deductibleUsed) }, to: { copayPercent: input.copayPercent?.toFixed(2) ?? null, deductible: fmt(input.deductible), deductibleUsed: fmt(input.deductibleUsed) } },
+      });
+      return this.policyView(r);
     });
   }
 
@@ -177,6 +214,7 @@ export class ClaimsService {
       id: c.id, claimNumber: c.claimNumber, type: c.type, status, diagnosis: c.diagnosis, closeReason: c.closeReason, encounterId: c.encounterId,
       patient: { id: c.patient.id, name: nameOf(c.patient), mrn: c.patient.identifiers[0]?.value ?? null }, policy: this.policyView(c.policy),
       preauthRequested: money(c.preauthRequested), preauthApproved: money(c.preauthApproved), claimedAmount: money(c.claimedAmount), approvedAmount: money(c.approvedAmount), settledAmount: money(c.settledAmount),
+      copay: c.calculatedAmount === null ? null : { calculatedAmount: money(c.calculatedAmount), patientShare: money(c.patientShare), copayPercent: money(c.copayPercentApplied), deductibleApplied: money(c.deductibleApplied), overrideReason: c.amountOverrideReason },
       outstanding: c.approvedAmount ? fmt(new Decimal(c.approvedAmount.toString()).minus(c.settledAmount.toString())) : null,
       invoice: c.invoice ? { id: c.invoice.id, invoiceNumber: c.invoice.invoiceNumber, status: c.invoice.status, total: fmt(c.invoice.total), balanceDue: fmt(balanceDue(c.invoice)) } : null,
       nextSteps: stepsFrom(status).filter((s) => stepAllowedForType(s, c.type)),
@@ -198,10 +236,10 @@ export class ClaimsService {
     return next;
   }
 
-  private async move(tx: Db, ctx: RequestContext, c: { id: string; status: ClaimStatus; claimNumber: string }, to: ClaimStatus, data: Prisma.ClaimUncheckedUpdateInput, ev: { amount?: Decimal | undefined; note?: string | undefined }, action: string) {
+  private async move(tx: Db, ctx: RequestContext, c: { id: string; status: ClaimStatus; claimNumber: string }, to: ClaimStatus, data: Prisma.ClaimUncheckedUpdateInput, ev: { amount?: Decimal | undefined; note?: string | undefined }, action: string, meta: Record<string, unknown> = {}) {
     await tx.claim.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: c.id } }, data: { ...data, status: to } });
     await tx.claimEvent.create({ data: { tenantId: ctx.tenantId, claimId: c.id, fromStatus: c.status, toStatus: to, amount: ev.amount?.toFixed(2) ?? null, note: ev.note ?? null, actorId: ctx.userId } });
-    await this.audit.record(tx, actorOf(ctx), { action, entityType: "Claim", entityId: c.id, metadata: { claimNumber: c.claimNumber, from: c.status, to, ...(ev.amount ? { amount: fmt(ev.amount) } : {}) } });
+    await this.audit.record(tx, actorOf(ctx), { action, entityType: "Claim", entityId: c.id, metadata: { claimNumber: c.claimNumber, from: c.status, to, ...(ev.amount ? { amount: fmt(ev.amount) } : {}), ...meta } });
     return { id: c.id, status: to };
   }
 
@@ -232,9 +270,50 @@ export class ClaimsService {
     return this.prisma.$transaction(async (tx) => {
       const c = await this.lock(tx, ctx, id);
       const to = this.step(c, "SUBMIT");
-      const inv = await this.invoiceFor(tx, ctx, c.patientId, input.invoiceId, input.claimedAmount);
-      return this.attach(tx, ctx, c, to, inv.id, input.claimedAmount, input.note, "CLAIM_SUBMITTED");
+      const inv = await this.invoiceFor(tx, ctx, c.patientId, input.invoiceId, new Decimal(0));
+      const policy = await tx.patientPolicy.findFirstOrThrow({ where: { id: c.policyId, tenantId: ctx.tenantId } });
+      const d = this.decideAmount(policy, inv, input.claimedAmount, input.overrideReason);
+      if (d.claimed.gt(d.base)) throw new DomainError("VALIDATION_FAILED", "The claim is for more than the invoice is worth", 400, [{ path: "claimedAmount", message: "More than the invoice" }]);
+      return this.attach(tx, ctx, c, to, inv.id, d.claimed, input.note, "CLAIM_SUBMITTED", d.data, d.meta);
     });
+  }
+
+  /** What a claim for this invoice would be under the policy's co-pay rule, without saving anything (the screen shows it before the officer submits). */
+  async copayPreview(ctx: RequestContext, claimId: string, input: z.infer<typeof copayPreviewSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      const c = await tx.claim.findFirst({ where: { id: claimId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { patientId: true, policyId: true } });
+      if (!c) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      const inv = await this.invoiceFor(tx, ctx, c.patientId, input.invoiceId, new Decimal(0));
+      const policy = await tx.patientPolicy.findFirstOrThrow({ where: { id: c.policyId, tenantId: ctx.tenantId } });
+      const base = new Decimal(inv.total.toString()).minus(inv.creditedTotal.toString());
+      const rule = ruleOf(policy);
+      if (!hasCopayRule(rule)) return { hasRule: false as const, invoiceAmount: fmt(base) };
+      const r = calculateCopay(base, rule);
+      return { hasRule: true as const, invoiceAmount: fmt(base), deductibleApplied: fmt(r.deductibleApplied), copayPercent: r.copayPercentApplied.toFixed(2), copayAmount: fmt(r.copayAmount), claimAmount: fmt(r.claim), patientShare: fmt(r.patientShare), cappedBySumInsured: r.cappedBySumInsured };
+    });
+  }
+
+  /**
+   * Works out the amount to claim. With a co-pay rule the calculated amount is the default; a different amount needs a reason, which is kept with the claim.
+   * Without a rule the officer enters the amount, as before.
+   */
+  private decideAmount(policy: { copayPercent: Prisma.Decimal | null; deductible: Prisma.Decimal; deductibleUsed: Prisma.Decimal; sumInsured: Prisma.Decimal | null }, inv: { total: Prisma.Decimal; creditedTotal: Prisma.Decimal }, entered: Decimal | undefined, why: string | undefined) {
+    const base = new Decimal(inv.total.toString()).minus(inv.creditedTotal.toString());
+    const rule = ruleOf(policy);
+    if (!hasCopayRule(rule)) {
+      if (!entered) throw new DomainError("VALIDATION_FAILED", "Enter the amount to claim", 400, [{ path: "claimedAmount", message: "Required" }]);
+      return { base, claimed: entered, data: {} as Prisma.ClaimUncheckedUpdateInput, meta: {} as Record<string, unknown> };
+    }
+    const r = calculateCopay(base, rule);
+    if (r.claim.lte(0)) throw new DomainError("INVALID_STATE", "The patient's share covers the whole bill, so there is nothing to claim from the insurer", 409);
+    const claimed = entered ?? r.claim;
+    const overridden = !claimed.eq(r.claim);
+    if (overridden && !why) throw new DomainError("VALIDATION_FAILED", "Give a reason for changing the calculated amount", 400, [{ path: "overrideReason", message: "Required" }]);
+    return {
+      base, claimed,
+      data: { calculatedAmount: r.claim.toFixed(2), patientShare: base.minus(claimed).toFixed(2), copayPercentApplied: r.copayPercentApplied.toFixed(2), deductibleApplied: r.deductibleApplied.toFixed(2), amountOverrideReason: overridden ? why! : null } as Prisma.ClaimUncheckedUpdateInput,
+      meta: { copayPercent: r.copayPercentApplied.toFixed(2), deductibleApplied: fmt(r.deductibleApplied), calculated: fmt(r.claim), ...(overridden ? { overridden: true, overrideReason: why } : {}) },
+    };
   }
 
   private async invoiceFor(tx: Db, ctx: RequestContext, patientId: string, invoiceId: string, claimed: Decimal) {
@@ -245,9 +324,9 @@ export class ClaimsService {
     return inv;
   }
 
-  private async attach(tx: Db, ctx: RequestContext, c: { id: string; status: ClaimStatus; claimNumber: string }, to: ClaimStatus, invoiceId: string, claimed: Decimal, noteText: string | undefined, action: string) {
+  private async attach(tx: Db, ctx: RequestContext, c: { id: string; status: ClaimStatus; claimNumber: string }, to: ClaimStatus, invoiceId: string, claimed: Decimal, noteText: string | undefined, action: string, extra: Prisma.ClaimUncheckedUpdateInput = {}, meta: Record<string, unknown> = {}) {
     try {
-      return await this.move(tx, ctx, c, to, { invoiceId, claimedAmount: claimed.toFixed(2) }, { amount: claimed, note: noteText }, action);
+      return await this.move(tx, ctx, c, to, { invoiceId, claimedAmount: claimed.toFixed(2), ...extra }, { amount: claimed, note: noteText }, action, meta);
     } catch (e) {
       if (String((e as { message?: string }).message ?? "").includes("claim_one_per_invoice") || (e as { code?: string }).code === "P2002") throw new DomainError("CONFLICT", "This invoice already has a claim in progress", 409);
       throw e;
@@ -267,8 +346,19 @@ export class ClaimsService {
       const c = await this.lock(tx, ctx, id);
       const to = this.step(c, "RESUBMIT");
       const claimed = input.claimedAmount ?? new Decimal(c.claimedAmount!.toString());
-      if (c.invoiceId && input.claimedAmount) await this.invoiceFor(tx, ctx, c.patientId, c.invoiceId, input.claimedAmount);
-      return this.move(tx, ctx, c, to, input.claimedAmount ? { claimedAmount: input.claimedAmount.toFixed(2) } : {}, { amount: claimed, note: input.note }, "CLAIM_RESUBMITTED");
+      let extra: Prisma.ClaimUncheckedUpdateInput = {};
+      let meta: Record<string, unknown> = {};
+      if (c.invoiceId && input.claimedAmount) {
+        const inv = await this.invoiceFor(tx, ctx, c.patientId, c.invoiceId, input.claimedAmount);
+        // A claim made under a co-pay rule keeps the calculation it was submitted with; changing the amount away from it needs a reason.
+        if (c.calculatedAmount !== null) {
+          const overridden = !input.claimedAmount.eq(c.calculatedAmount.toString());
+          if (overridden && !input.overrideReason) throw new DomainError("VALIDATION_FAILED", "Give a reason for changing the calculated amount", 400, [{ path: "overrideReason", message: "Required" }]);
+          extra = { patientShare: new Decimal(inv.total.toString()).minus(inv.creditedTotal.toString()).minus(input.claimedAmount).toFixed(2), amountOverrideReason: overridden ? input.overrideReason! : null };
+          if (overridden) meta = { overridden: true, overrideReason: input.overrideReason };
+        }
+      }
+      return this.move(tx, ctx, c, to, { ...(input.claimedAmount ? { claimedAmount: input.claimedAmount.toFixed(2) } : {}), ...extra }, { amount: claimed, note: input.note }, "CLAIM_RESUBMITTED", meta);
     });
   }
 

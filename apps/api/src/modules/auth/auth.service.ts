@@ -100,7 +100,7 @@ export class AuthService {
     if (!chosen && input.facilityId) throw new DomainError("UNAUTHORIZED_FACILITY", "No access to this facility", 403);
     if (!chosen) return { status: "FACILITY_SELECTION_REQUIRED", facilities };
 
-    await this.prisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null } });
+    await this.prisma.user.update({ where: { id: user.id }, data: { failedLoginCount: 0, lockedUntil: null, lastFailedLoginAt: null } });
     await this.upgradeHash(actor, user.id, tenant.id, user.passwordHash, input.password);
     const tokens = await this.prisma.$transaction(async (tx) => {
       const t = await this.issue(tx, tenant.id, user.id, chosen.id, randomUUID());
@@ -238,13 +238,18 @@ export class AuthService {
     await this.prisma.refreshToken.updateMany({ where: { familyId, revokedAt: null }, data: { revokedAt: new Date() } });
   }
 
+  /**
+   * Counts a wrong password. Only wrong tries within the failure window of each other add up: the count starts again at 1 when the previous wrong try is older than
+   * the window, so a few typos spread over weeks never lock an account. One statement does the check and the increment, so simultaneous tries are each counted once.
+   */
   private async registerFailure(userId: string, tenantId: string): Promise<void> {
-    const updated = await this.prisma.user.update({
-      where: { tenantId_id: { tenantId, id: userId } },
-      data: { failedLoginCount: { increment: 1 } },
-      select: { failedLoginCount: true },
-    });
-    if (updated.failedLoginCount >= this.config.LOGIN_MAX_FAILURES) {
+    const rows = await this.prisma.$queryRaw<{ failedLoginCount: number }[]>`
+      UPDATE "User" SET
+        "failedLoginCount" = CASE WHEN "lastFailedLoginAt" IS NULL OR "lastFailedLoginAt" < now() - make_interval(secs => ${this.config.LOGIN_FAILURE_WINDOW_SECONDS}::double precision) THEN 1 ELSE "failedLoginCount" + 1 END,
+        "lastFailedLoginAt" = now()
+      WHERE id = ${userId}::uuid AND "tenantId" = ${tenantId}::uuid
+      RETURNING "failedLoginCount"`;
+    if ((rows[0]?.failedLoginCount ?? 0) >= this.config.LOGIN_MAX_FAILURES) {
       await this.prisma.user.update({
         where: { tenantId_id: { tenantId, id: userId } },
         data: { lockedUntil: new Date(Date.now() + this.config.LOGIN_LOCK_SECONDS * 1000), failedLoginCount: 0 },
@@ -264,7 +269,7 @@ export class AuthService {
         expiresAt: new Date(Date.now() + this.config.REFRESH_TOKEN_TTL_SECONDS * 1000),
       },
     });
-    const accessToken = jwt.sign({ typ: "access", tid: tenantId, fid: facilityId }, this.config.JWT_ACCESS_SECRET, {
+    const accessToken = jwt.sign({ typ: "access", tid: tenantId, fid: facilityId, sid: familyId }, this.config.JWT_ACCESS_SECRET, {
       algorithm: "HS256", subject: userId, expiresIn: this.config.ACCESS_TOKEN_TTL_SECONDS,
     });
     const pair = { accessToken, refreshToken, expiresIn: this.config.ACCESS_TOKEN_TTL_SECONDS };

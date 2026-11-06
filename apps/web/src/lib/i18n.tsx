@@ -20,7 +20,8 @@ const COOKIE = "medos_lang";
 export function translate(lang: Lang, text: string): string {
   if (lang === "en") return text;
   const d = DICTIONARIES[lang];
-  return d[text] ?? d[text.trim()] ?? d[text.toLowerCase()] ?? text;
+  // Exact text first, then trimmed, lower-case and Capitalised forms, so a badge such as "pharmacy" finds the entry "Pharmacy".
+  return d[text] ?? d[text.trim()] ?? d[text.toLowerCase()] ?? d[text.charAt(0).toUpperCase() + text.slice(1)] ?? text;
 }
 
 /** BCP-47 locale for dates; Latin digits are kept for money and identifiers so amounts are never ambiguous. */
@@ -52,3 +53,6 @@ export function I18nProvider({ children }: { children: ReactNode }) {
 
 export const useI18n = (): Ctx => useContext(I18nContext);
 export const useT = (): ((text: string) => string) => useContext(I18nContext).t;
+
+/** Translates plain text that sits outside the shared UI components: <T>No documents uploaded.</T>. Data (names, numbers) must never be wrapped. */
+export function T({ children }: { children: string }): ReactNode { return useContext(I18nContext).t(children); }

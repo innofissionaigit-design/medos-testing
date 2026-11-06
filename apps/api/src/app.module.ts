@@ -111,13 +111,25 @@ import { PayoutsService } from "./modules/earnings/payouts.service";
 import { LabController } from "./modules/lab/lab.controller";
 import { LabService } from "./modules/lab/lab.service";
 import { RadiologyController } from "./modules/radiology/radiology.controller";
+import { RadImagesController } from "./modules/radiology/rad-images.controller";
+import { RadImagesService } from "./modules/radiology/rad-images.service";
 import { RadiologyService } from "./modules/radiology/radiology.service";
 import { ClaimsController } from "./modules/claims/claims.controller";
+import { ClaimDocumentsController } from "./modules/claims/claim-documents.controller";
+import { ClaimDocumentsService } from "./modules/claims/claim-documents.service";
 import { ClaimsService } from "./modules/claims/claims.service";
 import { PayrollController } from "./modules/payroll/payroll.controller";
 import { PayrollService } from "./modules/payroll/payroll.service";
+import { AttendanceController } from "./modules/payroll/attendance.controller";
+import { AttendanceService } from "./modules/payroll/attendance.service";
 import { PortalController, PortalAuthController, AppointmentRequestsController } from "./modules/portal/portal.controller";
 import { PortalAuthService, PortalGuard, PortalService } from "./modules/portal/portal.service";
+import { EmailController } from "./modules/email/email.controller";
+import { EMAIL_PROVIDER, createEmailProvider } from "./modules/email/email.provider";
+import { EmailService } from "./modules/email/email.service";
+import { EmailWorker } from "./modules/email/email.worker";
+import { NotificationsController } from "./modules/notifications/notifications.controller";
+import { NotificationsService } from "./modules/notifications/notifications.service";
 import { TelemedicineController } from "./modules/telemedicine/telemedicine.controller";
 import { TelemedicineService } from "./modules/telemedicine/telemedicine.service";
 import { AbdmController } from "./modules/abdm/abdm.controller";
@@ -132,6 +144,7 @@ import { StatementController } from "./modules/billing/statement.controller";
 import { StatementService } from "./modules/billing/statement.service";
 import { AdvancesService } from "./modules/billing/advances.service";
 import { MergeService } from "./modules/patients/merge.service";
+import { PatientIdentifiersService } from "./modules/patients/patient-identifiers.service";
 import { ImportsController } from "./modules/imports/imports.controller";
 import { ImportsService } from "./modules/imports/imports.service";
 import { PrivacyController } from "./modules/privacy/privacy.controller";
@@ -142,7 +155,7 @@ export const CONTROLLERS = [
   HealthController, AuthController, TenantsController, FacilitiesController,
   UsersController, NumberingController, AuditController, MastersController, PatientsController,
   EncountersController, AppointmentsController, QueueController, VitalsController,
-  AllergiesController, ConsultationsController, TestOrdersController, PrescriptionsController, BillingController, PharmacyController, StockLocationsController, WardStoresController, PrescriptionDeliveryController, EarningsReportsController, LabController, RadiologyController, ClaimsController, PayrollController, PortalAuthController, PortalController, AppointmentRequestsController, TelemedicineController, AbdmController, AiController, IpdController, NursingController, DischargeController, SettingsController, MedicineMasterController, PrintController, ReportsController, FilesController, FollowUpsController, PrivacyController, ImportsController, AdvancesController, StatementController, BookingApiController, IntegrationsController, EarningsController, ScansController, TemplatesController, OcrConfigController, PrescriptionShareController, PublicPrescriptionController,
+  AllergiesController, ConsultationsController, TestOrdersController, PrescriptionsController, BillingController, PharmacyController, StockLocationsController, WardStoresController, PrescriptionDeliveryController, EarningsReportsController, LabController, RadiologyController, RadImagesController, ClaimsController, ClaimDocumentsController, PayrollController, AttendanceController, PortalAuthController, PortalController, AppointmentRequestsController, TelemedicineController, NotificationsController, EmailController, AbdmController, AiController, IpdController, NursingController, DischargeController, SettingsController, MedicineMasterController, PrintController, ReportsController, FilesController, FollowUpsController, PrivacyController, ImportsController, AdvancesController, StatementController, BookingApiController, IntegrationsController, EarningsController, ScansController, TemplatesController, OcrConfigController, PrescriptionShareController, PublicPrescriptionController,
 ];
 
 @Module({
@@ -156,9 +169,10 @@ export const CONTROLLERS = [
     CatalogService, InvoicesService, LedgerService, PaymentsService, ShiftsService,
     StockService, MedicinesService, InventoryService, StockLocationsService, DispensingService,
     WardsService, AdmissionsService, ChargesService, NursingService, MarService, SettingsService, DischargeService, SummaryService, PrintService, ReportsService, FilesService, StorageService, ScanService,
-    RemindersService, ReminderWorker, FollowUpsService, TestOrdersService, PrescriptionDraftService, CashierViewService, CashierCollectService, PrivacyService, ImportsService, MergeService, AdvancesService, StatementService, BookingApiService, IntegrationsService, EarningsService, ShareLedgerService, PayoutsService, LabService, RadiologyService, ClaimsService, PayrollService, PortalAuthService, PortalService, PortalGuard, TelemedicineService, AbdmService, AiService, ScansService, TemplatesService, OcrConfigService, SecretsService, PrescriptionShareService, RegistrationFeeService,
+    RemindersService, ReminderWorker, FollowUpsService, TestOrdersService, PrescriptionDraftService, CashierViewService, CashierCollectService, PrivacyService, ImportsService, MergeService, PatientIdentifiersService, AdvancesService, StatementService, BookingApiService, IntegrationsService, EarningsService, ShareLedgerService, PayoutsService, LabService, RadiologyService, RadImagesService, ClaimsService, ClaimDocumentsService, PayrollService, AttendanceService, PortalAuthService, PortalService, PortalGuard, TelemedicineService, NotificationsService, EmailService, EmailWorker, AbdmService, AiService, ScansService, TemplatesService, OcrConfigService, SecretsService, PrescriptionShareService, RegistrationFeeService,
     { provide: OCR_PROVIDER, useFactory: (c: AppConfig) => createOcrProvider(c), inject: [CONFIG] },
     { provide: MESSAGE_PROVIDER, useFactory: (c: AppConfig) => createMessageProvider(c), inject: [CONFIG] },
+    { provide: EMAIL_PROVIDER, useFactory: (c: AppConfig) => createEmailProvider(c), inject: [CONFIG] },
     WebhooksService, PrescriptionDeliveryService, OutboundWorker,
     { provide: REMINDER_PROVIDER, useFactory: (c: AppConfig) => createReminderProvider(c.REMINDER_PROVIDER), inject: [CONFIG] },
     { provide: PAYMENT_LINK_PROVIDER, useFactory: (c: AppConfig) => createPaymentLinkProvider(c.PAYMENT_LINK_PROVIDER), inject: [CONFIG] },

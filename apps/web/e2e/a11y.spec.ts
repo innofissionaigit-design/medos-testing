@@ -32,6 +32,11 @@ for (const { user, paths } of SCREENS) {
 test("keyboard: the first Tab stop is a skip link or the navigation, and dialogs trap and restore focus", async ({ page }) => {
   await loginAs(page, "reception1");
   await page.goto("/patients");
+  await page.waitForLoadState("networkidle");
+  // The patients page puts the cursor in its search box on load; start from a page with nothing focused so the first Tab is the page's first Tab stop.
+  // Blurring is not enough (the browser remembers where focus was); a click at the top-left corner resets where Tab starts from.
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.mouse.click(2, 2);
   await page.keyboard.press("Tab");
   const first = await page.evaluate(() => document.activeElement?.tagName ?? "");
   expect(["A", "BUTTON", "INPUT"]).toContain(first);

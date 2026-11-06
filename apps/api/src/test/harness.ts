@@ -144,7 +144,11 @@ export function patientBody(o: Record<string, unknown> = {}): Record<string, unk
   };
 }
 export async function registerPatient(t: TestApp, token: string, o: Record<string, unknown> = {}): Promise<{ id: string; mrn: string; version: number }> {
-  const r = await t.api("post", "/patients", token).send(patientBody(o));
+  // Every test patient has the same birth date and a random name, and duplicate detection looks at similar name plus the same birth date, so two random names can very
+  // rarely look alike. When that happens (and the caller did not choose the names) try again with fresh names instead of failing an unrelated test.
+  const named = "firstName" in o || "lastName" in o;
+  let r = await t.api("post", "/patients", token).send(patientBody(o));
+  for (let tries = 0; r.status === 409 && r.body?.error?.code === "DUPLICATE_PATIENT_SUSPECTED" && !named && tries < 5; tries++) r = await t.api("post", "/patients", token).send(patientBody(o));
   if (r.status !== 201) throw new Error(`registerPatient failed: ${r.status} ${JSON.stringify(r.body)}`);
   return r.body.data as { id: string; mrn: string; version: number };
 }

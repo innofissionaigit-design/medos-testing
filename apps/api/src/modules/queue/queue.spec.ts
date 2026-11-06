@@ -208,7 +208,15 @@ describe("check-in, walk-in and OPD queue", () => {
       assert.equal((await t.api("get", "/queue/doctor", d2.token).query({ practitionerId: d1.practitionerId })).status, 403, "cannot view another doctor's queue");
       assert.equal((await t.api("post", `/queue/${qid}/skip`, d1.token)).status, 403, "skip is a reception action");
       assert.equal((await t.api("post", `/queue/${qid}/cancel`, d1.token).send({ reason: "Doctor cancel" })).status, 403);
-      assert.equal((await t.api("patch", `/queue/${qid}/priority`, d1.token).send({ priority: "EMERGENCY" })).status, 403);
+      // Priority: a doctor may change it for their own waiting patients only; nurses and other doctors may not; reception may for anyone.
+      assert.equal((await t.api("patch", `/queue/${qid}/priority`, d2.token).send({ priority: "EMERGENCY" })).status, 403, "another doctor's queue");
+      assert.equal((await t.api("patch", `/queue/${qid}/priority`, nurse.token).send({ priority: "EMERGENCY" })).status, 403, "nurse");
+      const own = await t.api("patch", `/queue/${qid}/priority`, d1.token).send({ priority: "EMERGENCY" });
+      assert.deepEqual([own.status, own.body.data.priority], [200, "EMERGENCY"], "a doctor on their own queue");
+      assert.equal((await t.api("patch", `/queue/${qid}/priority`, d1.token).send({ priority: "SUPER" })).status, 400);
+      assert.equal((await t.api("patch", `/queue/${qid}/priority`, rec.token).send({ priority: "PRIORITY" })).body.data.priority, "PRIORITY", "reception on any queue");
+      const evts = await t.prisma.auditEvent.findMany({ where: { tenantId: a.tenantId, action: "QUEUE_PRIORITY_CHANGED", entityId: qid }, orderBy: { createdAt: "asc" } });
+      assert.deepEqual(evts.map((e) => [e.actorUserId, (e.metadata as { to: string }).to]), [[d1.userId, "EMERGENCY"], [rec.id, "PRIORITY"]], "each change is audited with who made it");
       assert.equal((await t.api("post", `/queue/${qid}/call`, rec.token)).status, 200, "reception may call");
       assert.equal((await t.api("get", "/queue")).status, 401);
     });

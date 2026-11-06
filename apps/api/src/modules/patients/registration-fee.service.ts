@@ -85,7 +85,12 @@ export class RegistrationFeeService {
       const locked = await tx.$queryRaw<{ id: string; status: string; amount: string }[]>`
         SELECT id, status::text AS status, amount::text AS amount FROM "PatientRegistration" WHERE "tenantId" = ${ctx.tenantId}::uuid AND "patientId" = ${patientId}::uuid FOR UPDATE`;
       const row = locked[0];
-      if (!row) throw new DomainError("INVALID_STATE", "This patient has no registration fee to collect", 409);
+      if (!row) {
+        // An id that is not a patient of this hospital (unknown, or another hospital's) is "not found", the same for both.
+        const patient = await tx.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
+        if (!patient) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+        throw new DomainError("INVALID_STATE", "This patient has no registration fee to collect", 409);
+      }
       if (row.status !== "PENDING") throw new DomainError("INVALID_STATE", `The registration fee of this patient is already ${row.status === "PAID" ? "paid" : "exempted"}`, 409);
       return this.settleRow(tx, ctx, row.id, patientId, new Decimal(row.amount), input);
     });

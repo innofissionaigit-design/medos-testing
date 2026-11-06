@@ -2,7 +2,8 @@ import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { registerPatient, startApp, uniqueWord, type TestApp, type TestTenant } from "../../test/harness";
-import { nextStatus, stepsFrom, type ClaimStatus, type ClaimStep } from "./claims.domain";
+import { Decimal } from "@medos/shared";
+import { calculateCopay, type CopayRule, hasCopayRule, nextStatus, stepsFrom, type ClaimStatus, type ClaimStep } from "./claims.domain";
 
 type User = { id: string; token: string };
 const key = () => `k-${randomUUID().slice(0, 18)}`;
@@ -19,6 +20,44 @@ describe("claims: the order of steps", () => {
     for (const done of ["REJECTED", "SETTLED", "CLOSED"] as ClaimStatus[]) assert.deepEqual(stepsFrom(done), []);
     const all: ClaimStep[] = ["REQUEST_PREAUTH", "DECIDE_PREAUTH", "SUBMIT", "RAISE_QUERY", "RESUBMIT", "DECIDE", "SETTLE", "CLOSE"];
     for (const s of all) assert.equal(nextStatus("SETTLED", s, "APPROVED"), null);
+  });
+});
+
+describe("claims: the co-pay calculation", () => {
+  const rule = (o: { pct?: string | null; ded?: string; used?: string; sum?: string | null } = {}): CopayRule => ({
+    copayPercent: o.pct === null ? null : new Decimal(o.pct ?? "0"), deductible: new Decimal(o.ded ?? "0"), deductibleUsed: new Decimal(o.used ?? "0"), sumInsured: o.sum ? new Decimal(o.sum) : null,
+  });
+  const figures = (base: string, r: CopayRule) => { const x = calculateCopay(new Decimal(base), r); return [x.deductibleApplied, x.copayAmount, x.claim, x.patientShare].map((d) => d.toFixed(2)); };
+
+  it("a policy with no percentage and no deductible has no rule", () => {
+    assert.equal(hasCopayRule(rule({ pct: null })), false);
+    assert.equal(hasCopayRule(rule({ pct: "0" })), true, "a stated 0% is a rule");
+    assert.equal(hasCopayRule(rule({ pct: null, ded: "500" })), true);
+  });
+
+  it("applies the deductible first, then the percentage to what is left", () => {
+    assert.deepEqual(figures("10000", rule({ pct: "10" })), ["0.00", "1000.00", "9000.00", "1000.00"]);
+    assert.deepEqual(figures("10000", rule({ pct: "10", ded: "2000" })), ["2000.00", "800.00", "7200.00", "2800.00"]);
+    assert.deepEqual(figures("10000", rule({ pct: "10", ded: "2000", used: "500" })), ["1500.00", "850.00", "7650.00", "2350.00"], "only the deductible still to be met comes off");
+    assert.deepEqual(figures("10000", rule({ pct: "10", ded: "2000", used: "2000" })), ["0.00", "1000.00", "9000.00", "1000.00"], "a met deductible is not taken again");
+  });
+
+  it("edge cases: a deductible bigger than the bill, 100% co-pay, 0% co-pay, and rounding to the paisa", () => {
+    assert.deepEqual(figures("1000", rule({ pct: "10", ded: "5000" })), ["1000.00", "0.00", "0.00", "1000.00"]);
+    assert.deepEqual(figures("500", rule({ pct: "100" })), ["0.00", "500.00", "0.00", "500.00"]);
+    assert.deepEqual(figures("500", rule({ pct: "0" })), ["0.00", "0.00", "500.00", "0.00"]);
+    assert.deepEqual(figures("333.33", rule({ pct: "10" })), ["0.00", "33.33", "300.00", "33.33"]);
+    assert.deepEqual(figures("0.05", rule({ pct: "50" })), ["0.00", "0.03", "0.02", "0.03"], "half a paisa rounds up, and the two parts still add up to the bill");
+  });
+
+  it("the claim never exceeds the sum insured, and the rest is the patient's; the two always add up to the bill", () => {
+    const capped = calculateCopay(new Decimal("10000"), rule({ pct: "0", sum: "5000" }));
+    assert.deepEqual([capped.claim.toFixed(2), capped.patientShare.toFixed(2), capped.cappedBySumInsured], ["5000.00", "5000.00", true]);
+    for (const [base, r] of [["12345.67", rule({ pct: "12.5", ded: "750.25", used: "100" })], ["99.99", rule({ pct: "33.33" })], ["1000000", rule({ pct: "7", sum: "400000" })]] as [string, CopayRule][]) {
+      const x = calculateCopay(new Decimal(base), r);
+      assert.ok(x.claim.plus(x.patientShare).eq(base), `${base}: claim + patient share = bill`);
+      assert.ok(x.claim.gte(0) && x.patientShare.gte(0));
+    }
   });
 });
 
@@ -305,6 +344,198 @@ describe("claims: insurers, policies, and a claim from pre-authorisation to sett
     const inv = await issued(patient.id, "9000");
     const rs = await Promise.all([post(`/claims/${c1.body.data.id}/submit`, { invoiceId: inv, claimedAmount: "9000" }), post(`/claims/${c2.body.data.id}/submit`, { invoiceId: inv, claimedAmount: "9000" })]);
     assert.deepEqual(rs.map((r) => r.status).sort(), [200, 409], JSON.stringify(rs.map((r) => r.body)));
+  });
+
+  describe("co-pay", () => {
+    /** A draft claim on a policy with a co-pay rule (10% after a 2000 deductible by default) and an issued invoice of 10000. */
+    const withRule = async (rule: Record<string, unknown> = { copayPercent: "10", deductible: "2000", deductibleUsed: "0" }, total = "10000") => {
+      const patient = await registerPatient(t, rec.token);
+      const pol = await policy(patient.id, rule);
+      assert.equal(pol.status, 201, JSON.stringify(pol.body));
+      const c = await post("/claims", { patientId: patient.id, policyId: pol.body.data.id, type: "REIMBURSEMENT" });
+      assert.equal(c.status, 201, JSON.stringify(c.body));
+      return { patient, policyId: pol.body.data.id as string, claimId: c.body.data.id as string, invoiceId: await issued(patient.id, total) };
+    };
+    const num = (v: unknown) => Number(v);
+
+    it("previews, then submits the calculated amount by default and keeps the calculation with the claim", async () => {
+      const s = await withRule();
+      const p = await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: s.invoiceId });
+      assert.equal(p.status, 200, JSON.stringify(p.body));
+      assert.deepEqual([p.body.data.hasRule, num(p.body.data.invoiceAmount), num(p.body.data.deductibleApplied), num(p.body.data.copayAmount), num(p.body.data.claimAmount), num(p.body.data.patientShare)], [true, 10000, 2000, 800, 7200, 2800]);
+      assert.equal((await view(s.claimId)).status, "DRAFT", "a preview changes nothing");
+      const r = await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId });
+      assert.equal(r.status, 200, JSON.stringify(r.body));
+      const c = await view(s.claimId);
+      assert.deepEqual([num(c.claimedAmount), num(c.copay.calculatedAmount), num(c.copay.patientShare), num(c.copay.copayPercent), num(c.copay.deductibleApplied), c.copay.overrideReason], [7200, 7200, 2800, 10, 2000, null]);
+      const audit = await t.prisma.auditEvent.findFirstOrThrow({ where: { tenantId: a.tenantId, action: "CLAIM_SUBMITTED", entityId: s.claimId } });
+      assert.equal((audit.metadata as { copayPercent?: string }).copayPercent, "10.00");
+    });
+
+    it("typing exactly the calculated amount needs no reason; a different amount needs one, and keeps it", async () => {
+      const s = await withRule();
+      assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "7000" })).status, 400, "no reason");
+      assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "7000", overrideReason: "too short" })).status, 400, "reason under 10 characters");
+      assert.equal((await view(s.claimId)).status, "DRAFT");
+      const ok = await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "7000", overrideReason: "Insurer agreed a lower package rate" });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      const c = await view(s.claimId);
+      assert.deepEqual([num(c.claimedAmount), num(c.copay.calculatedAmount), num(c.copay.patientShare), c.copay.overrideReason], [7000, 7200, 3000, "Insurer agreed a lower package rate"]);
+      const audit = await t.prisma.auditEvent.findFirstOrThrow({ where: { tenantId: a.tenantId, action: "CLAIM_SUBMITTED", entityId: s.claimId } });
+      assert.equal((audit.metadata as { overridden?: boolean }).overridden, true);
+      const same = await withRule();
+      assert.equal((await post(`/claims/${same.claimId}/submit`, { invoiceId: same.invoiceId, claimedAmount: "7200.00" })).status, 200, "the calculated amount typed in by hand");
+      assert.equal((await view(same.claimId)).copay.overrideReason, null);
+      const more = await withRule();
+      assert.equal((await post(`/claims/${more.claimId}/submit`, { invoiceId: more.invoiceId, claimedAmount: "10001", overrideReason: "Claiming above the invoice" })).status, 400, "never more than the invoice");
+    });
+
+    it("a policy without a rule still needs the amount entered by hand, as before", async () => {
+      const s = await setup("REIMBURSEMENT");
+      const p = await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: s.invoiceId });
+      assert.deepEqual([p.status, p.body.data.hasRule], [200, false]);
+      assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId })).status, 400);
+      assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "8000" })).status, 200);
+      assert.equal((await view(s.claimId)).copay, null);
+    });
+
+    it("when the patient's share covers the whole bill there is nothing to claim", async () => {
+      const s = await withRule({ copayPercent: "10", deductible: "20000", deductibleUsed: "0" });
+      const r = await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId });
+      assert.deepEqual([r.status, r.body.error.code], [409, "INVALID_STATE"]);
+      assert.equal((await view(s.claimId)).status, "DRAFT");
+    });
+
+    it("the rule is validated and changed only by the claims officer; the change is audited and old claims keep their calculation", async () => {
+      const s = await withRule();
+      assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId })).status, 200);
+      const put = (body: Record<string, unknown>, tok = officer.token, id = s.policyId) => t.api("put", `/policies/${id}/copay`, tok).send(body);
+      assert.equal((await put({ copayPercent: "101", deductible: "0", deductibleUsed: "0" })).status, 400, "over 100%");
+      assert.equal((await put({ copayPercent: "-1", deductible: "0", deductibleUsed: "0" })).status, 400);
+      assert.equal((await put({ copayPercent: "10", deductible: "100", deductibleUsed: "200" })).status, 400, "used more than the deductible");
+      assert.equal((await put({ copayPercent: "10", deductible: "100" })).status, 400, "missing field");
+      assert.equal((await put({ copayPercent: "10", deductible: "0", deductibleUsed: "0", extra: 1 })).status, 400);
+      for (const tok of [rec.token, nurse.token, cashier.token]) assert.equal((await put({ copayPercent: "20", deductible: "0", deductibleUsed: "0" }, tok)).status, 403);
+      assert.equal((await put({ copayPercent: "20", deductible: "0", deductibleUsed: "0" }, bOfficer.token)).status, 404, "another hospital's policy");
+      assert.equal((await put({ copayPercent: "20", deductible: "0", deductibleUsed: "0" }, officer.token, randomUUID())).status, 404);
+      const ok = await put({ copayPercent: "20", deductible: "0", deductibleUsed: "0" });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.deepEqual([num(ok.body.data.copayPercent), ok.body.data.hasCopayRule], [20, true]);
+      assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "POLICY_COPAY_CHANGED", entityId: s.policyId } }));
+      const c = await view(s.claimId);
+      assert.deepEqual([num(c.copay.copayPercent), num(c.copay.patientShare)], [10, 2800], "the submitted claim keeps the calculation it was made with");
+      const removed = await put({ copayPercent: null, deductible: "0", deductibleUsed: "0" });
+      assert.deepEqual([removed.status, removed.body.data.hasCopayRule, removed.body.data.copayPercent], [200, false, null]);
+    });
+
+    it("a resubmitted amount that moves away from the calculation needs a reason", async () => {
+      const s = await withRule();
+      assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId })).status, 200);
+      assert.equal((await post(`/claims/${s.claimId}/query`, { note: "Please send the discharge card" })).status, 200);
+      assert.equal((await post(`/claims/${s.claimId}/resubmit`, { note: "Sent the discharge card", claimedAmount: "7000" })).status, 400, "no reason");
+      const ok = await post(`/claims/${s.claimId}/resubmit`, { note: "Sent the discharge card", claimedAmount: "7000", overrideReason: "Insurer corrected the package rate" });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      const c = await view(s.claimId);
+      assert.deepEqual([num(c.claimedAmount), num(c.copay.patientShare), c.copay.overrideReason], [7000, 3000, "Insurer corrected the package rate"]);
+    });
+
+    it("other hospitals, other roles and made-up ids cannot preview; database rules hold", async () => {
+      const s = await withRule();
+      assert.equal((await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: s.invoiceId }, bOfficer.token)).status, 404, "another hospital's claim");
+      assert.equal((await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: s.invoiceId }, nurse.token)).status, 403);
+      assert.equal((await post(`/claims/${randomUUID()}/copay-preview`, { invoiceId: s.invoiceId })).status, 404);
+      assert.equal((await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: randomUUID() })).status, 404, "an invoice that does not exist");
+      const other = await registerPatient(t, rec.token);
+      assert.equal((await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: await issued(other.id) })).status, 404, "another patient's invoice");
+      assert.equal((await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: s.invoiceId, extra: 1 })).status, 400);
+      await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "PatientPolicy" SET "copayPercent" = 150 WHERE id = '${s.policyId}'::uuid`), /policy_copay_values|check constraint/i);
+      await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "PatientPolicy" SET deductible = -1 WHERE id = '${s.policyId}'::uuid`), /policy_copay_values|check constraint/i);
+      assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId })).status, 200);
+      await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "Claim" SET "amountOverrideReason" = 'short' WHERE id = '${s.claimId}'::uuid`), /claim_copay_values|check constraint/i);
+    });
+  });
+
+  it("documents: PNG, JPEG and PDF are attached to an open claim; the content is checked; the officer adds and removes; a finished claim keeps what it had", async () => {
+    const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("not-really-pixels")]);
+    const PDF = Buffer.from("%PDF-1.4 not really a pdf");
+    const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("not-really-jpeg")]);
+    const s = await setup();
+    const up = (claimId: string, tok: string, body: Buffer | string, type: string, query: Record<string, string> = { filename: "discharge.pdf", label: "Discharge summary" }) => t.api("post", `/claims/${claimId}/documents`, tok).query(query).set("Content-Type", type).send(body);
+
+    const ok = await up(s.claimId, officer.token, PDF, "application/pdf");
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.deepEqual([ok.body.data.label, ok.body.data.fileName, ok.body.data.contentType, ok.body.data.sizeBytes], ["Discharge summary", "discharge.pdf", "application/pdf", PDF.length]);
+    assert.equal((await up(s.claimId, officer.token, PNG, "image/png", { filename: "policy-card.png", label: "Policy card" })).status, 201);
+    assert.equal((await up(s.claimId, officer.token, JPG, "image/jpeg", { filename: "id.jpg", label: "ID proof" })).status, 201);
+
+    // who may add, and what is refused
+    assert.equal((await up(s.claimId, cashier.token, PDF, "application/pdf")).status, 403, "reading claims is not managing them");
+    assert.equal((await up(s.claimId, rec.token, PDF, "application/pdf")).status, 403);
+    assert.equal((await up(s.claimId, nurse.token, PDF, "application/pdf")).status, 403);
+    assert.equal((await up(s.claimId, bOfficer.token, PDF, "application/pdf")).status, 404, "another hospital cannot reach this claim");
+    assert.equal((await up(randomUUID(), officer.token, PDF, "application/pdf")).status, 404);
+    assert.equal((await up(s.claimId, officer.token, "<html><script>alert(1)</script></html>", "application/pdf")).status, 415, "HTML disguised as a PDF");
+    assert.equal((await up(s.claimId, officer.token, PDF, "image/png")).status, 415, "type must match the content");
+    assert.equal((await up(s.claimId, officer.token, Buffer.concat([PDF, Buffer.alloc(5 * 1024 * 1024)]), "application/pdf")).status, 413, "over 5 MB");
+    assert.equal((await up(s.claimId, officer.token, PDF, "application/pdf", { filename: "x.pdf", label: "x" })).status, 400, "a label of at least two characters");
+    assert.equal((await up(s.claimId, officer.token, PDF, "application/pdf", { filename: "x.pdf" })).status, 400, "a label is needed");
+
+    // who may look
+    const list = await t.api("get", `/claims/${s.claimId}/documents`, officer.token);
+    assert.deepEqual(list.body.data.map((d: { label: string }) => d.label), ["Discharge summary", "Policy card", "ID proof"]);
+    assert.equal((await t.api("get", `/claims/${s.claimId}/documents`, cashier.token)).status, 200);
+    assert.equal((await t.api("get", `/claims/${s.claimId}/documents`, nurse.token)).status, 403);
+    assert.equal((await t.api("get", `/claims/${s.claimId}/documents`, bOfficer.token)).status, 404);
+
+    const docId = ok.body.data.id as string;
+    const got = await t.api("get", `/claim-documents/${docId}/content`, cashier.token).buffer(true).parse((res, cb) => { const chunks: Buffer[] = []; res.on("data", (c: Buffer) => chunks.push(c)); res.on("end", () => cb(null, Buffer.concat(chunks))); });
+    assert.equal(got.status, 200);
+    assert.deepEqual([got.headers["content-type"], got.headers["x-content-type-options"], got.headers["cache-control"]], ["application/pdf", "nosniff", "private, no-store"]);
+    assert.match(String(got.headers["content-disposition"]), /^attachment/);
+    assert.ok((got.body as Buffer).equals(PDF), "the same bytes come back");
+    assert.equal((await t.api("get", `/claim-documents/${docId}/content`, bOfficer.token)).status, 404);
+    assert.equal((await t.api("get", `/claim-documents/${docId}/content`, nurse.token)).status, 403);
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_DOCUMENT_VIEWED", entityId: docId, actorUserId: cashier.id } }), "opening a document is audited");
+
+    // removing: a reason, the claims officer only, and the record stays
+    assert.equal((await t.api("post", `/claim-documents/${docId}/remove`, cashier.token).send({ reason: "Wrong document" })).status, 403);
+    assert.equal((await t.api("post", `/claim-documents/${docId}/remove`, officer.token).send({ reason: "no" })).status, 400);
+    assert.equal((await t.api("post", `/claim-documents/${docId}/remove`, bOfficer.token).send({ reason: "Wrong document" })).status, 404);
+    assert.equal((await t.api("post", `/claim-documents/${docId}/remove`, officer.token).send({ reason: "Wrong document" })).status, 200);
+    assert.equal((await t.api("post", `/claim-documents/${docId}/remove`, officer.token).send({ reason: "Wrong document" })).status, 409);
+    assert.equal((await t.api("get", `/claim-documents/${docId}/content`, officer.token)).status, 404, "a removed document no longer opens");
+    assert.equal((await t.api("get", `/claims/${s.claimId}/documents`, officer.token)).body.data.length, 2);
+    const row = await t.prisma.claimDocument.findFirstOrThrow({ where: { id: docId } });
+    assert.deepEqual([row.status, row.removeReason, row.removedById], ["REMOVED", "Wrong document", officer.id]);
+    assert.deepEqual((await t.prisma.auditEvent.findMany({ where: { tenantId: a.tenantId, entityId: docId } })).map((e) => e.action).sort(), ["CLAIM_DOCUMENT_ADDED", "CLAIM_DOCUMENT_REMOVED", "CLAIM_DOCUMENT_VIEWED"]);
+
+    // database rules on an open claim
+    await assert.rejects(t.prisma.$executeRawUnsafe(`DELETE FROM "ClaimDocument" WHERE id = '${docId}'::uuid`), /append-only/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "ClaimDocument" SET label = 'Something else' WHERE id = '${docId}'::uuid`), /cannot be edited/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "ClaimDocument" SET status = 'ACTIVE' WHERE id = '${docId}'::uuid`), /cannot be restored/);
+    const insert = (patientId: string, claimId: string, type = "application/pdf") => `INSERT INTO "ClaimDocument" ("tenantId", "facilityId", "patientId", "claimId", label, "fileName", "contentType", "sizeBytes", sha256, "storageKey", "uploadedById") VALUES ('${a.tenantId}'::uuid, '${a.facilityId}'::uuid, '${patientId}'::uuid, '${claimId}'::uuid, 'Label', 'x.pdf', '${type}', 10, 'abc', 'k', '${officer.id}'::uuid)`;
+    await assert.rejects(t.prisma.$executeRawUnsafe(insert(randomUUID(), s.claimId)), /same patient and facility/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(insert(s.patient.id, s.claimId, "image/svg+xml")), /check/i);
+
+    // a finished claim keeps what it had and takes nothing more
+    assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "Patient withdrew the claim" })).status, 200);
+    assert.equal((await up(s.claimId, officer.token, PDF, "application/pdf")).status, 409, "no documents for a finished claim");
+    const keep = (await t.api("get", `/claims/${s.claimId}/documents`, officer.token)).body.data[0] as { id: string };
+    assert.equal((await t.api("post", `/claim-documents/${keep.id}/remove`, officer.token).send({ reason: "Trying to tidy up" })).status, 409, "nor can they be removed");
+    assert.equal((await t.api("get", `/claims/${s.claimId}/documents`, officer.token)).body.data.length, 2, "still readable");
+    await assert.rejects(t.prisma.$executeRawUnsafe(insert(s.patient.id, s.claimId)), /finished claim/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "ClaimDocument" SET status = 'REMOVED', "removedById" = '${officer.id}'::uuid, "removedAt" = now(), "removeReason" = 'Trying to tidy up' WHERE id = '${keep.id}'::uuid`), /finished claim/);
+  });
+
+  it("documents: a claim holds at most 30; removing one makes room", async () => {
+    const PDF = Buffer.from("%PDF-1.4 x");
+    const s = await setup();
+    const up = () => t.api("post", `/claims/${s.claimId}/documents`, officer.token).query({ filename: "d.pdf", label: "Report" }).set("Content-Type", "application/pdf").send(PDF);
+    const ids: string[] = [];
+    for (let i = 0; i < 30; i++) { const r = await up(); assert.equal(r.status, 201, JSON.stringify(r.body)); ids.push(r.body.data.id as string); }
+    assert.equal((await up()).status, 409);
+    assert.equal((await t.api("post", `/claim-documents/${ids[0]}/remove`, officer.token).send({ reason: "Duplicate scan" })).status, 200);
+    assert.equal((await up()).status, 201);
   });
 
   it("the claims officer role exists with what it needs", async () => {

@@ -3,13 +3,15 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Badge, Card, PageHeader, Spinner, Table, Td } from "@/components/ui";
 import { api } from "@/lib/api";
+import { localeFor, useI18n, useT } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
 import { visibleNav } from "@/lib/nav";
 
 function Stat({ label, value, href }: { label: string; value: string | number | undefined; href?: string }) {
+  const t = useT();
   const body = (
     <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-sm hover:border-brand-500">
-      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="text-xs uppercase tracking-wide text-slate-500">{t(label)}</div>
       <div className="mt-1 text-2xl font-semibold text-slate-900">{value ?? <span className="text-slate-300">…</span>}</div>
     </div>
   );
@@ -24,6 +26,7 @@ interface RegReport {
 
 export default function Dashboard() {
   const { me, can, features, money } = useMe();
+  const { lang, t } = useI18n();
   const opd = useQuery({ queryKey: ["dash-opd"], queryFn: () => api.get<{ total: number }>("/reports/opd/daily"), enabled: can("REPORT_READ", "REPORT_OPD") });
   const col = useQuery({ queryKey: ["dash-col"], queryFn: () => api.get<{ totals: { net: string } }>("/reports/collections"), enabled: can("REPORT_READ", "REPORT_FINANCE") });
   const queue = useQuery({ queryKey: ["dash-queue"], queryFn: () => api.get<{ status: string }[]>("/queue"), enabled: can("QUEUE_READ"), refetchInterval: 20_000 });
@@ -37,7 +40,7 @@ export default function Dashboard() {
 
   return (
     <>
-      <PageHeader title={`Welcome, ${me.fullName}`} subtitle={`${me.facility?.name ?? ""} · ${new Intl.DateTimeFormat("en-IN", { dateStyle: "full", timeZone: me.facility?.timezone ?? me.tenant.timezone }).format(new Date())}`} />
+      <PageHeader title={`${t("Welcome,")} ${me.fullName}`} subtitle={`${me.facility?.name ?? ""} · ${new Intl.DateTimeFormat(localeFor(lang), { dateStyle: "full", timeZone: me.facility?.timezone ?? me.tenant.timezone }).format(new Date())}`} />
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         {can("QUEUE_READ") && <Stat label="Waiting in OPD" value={waiting} href="/queue" />}
         {can("REPORT_READ", "REPORT_OPD") && <Stat label="OPD visits today" value={opd.data?.total} href="/reports" />}
@@ -58,7 +61,7 @@ export default function Dashboard() {
           <Table head={["Time", "Patient", "Patient ID", "Fee", "Status", "Paid by", "Receipt", "Registered by"]}>
             {reg.data.rows.slice(0, 8).map((r) => (
               <tr key={r.patientId}>
-                <Td>{new Intl.DateTimeFormat("en-IN", { timeStyle: "short", timeZone: me.facility?.timezone ?? me.tenant.timezone }).format(new Date(r.registeredAt))}</Td>
+                <Td>{new Intl.DateTimeFormat(localeFor(lang), { timeStyle: "short", timeZone: me.facility?.timezone ?? me.tenant.timezone }).format(new Date(r.registeredAt))}</Td>
                 <Td><Link href={`/patients/${r.patientId}`} className="text-brand-700 hover:underline">{r.patient}</Link></Td><Td>{r.mrn}</Td><Td>{money(r.fee)}</Td>
                 <Td><Badge tone={r.status === "PAID" ? "green" : r.status === "PENDING" ? "amber" : "gray"}>{r.status === "PENDING" ? "due" : r.status.toLowerCase()}</Badge>{r.exemptionReason ? <span className="ml-1 text-xs text-slate-500">{r.exemptionReason}</span> : null}</Td>
                 <Td>{r.paymentMethods ?? "—"}</Td><Td>{r.receiptNumber ?? "—"}</Td><Td>{r.registeredBy ?? ""}</Td>
@@ -68,8 +71,8 @@ export default function Dashboard() {
         </Card>
       )}
       <Card title="Go to" className="mt-4">
-        {nav.length === 0 ? <Spinner /> : <div className="flex flex-wrap gap-2">{nav.map((n) => <Link key={n.href} href={n.href} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-brand-50">{n.label}</Link>)}</div>}
-        <p className="mt-3 text-xs text-slate-500">Tip: press <kbd className="rounded border px-1">/</kbd> anywhere to search for a patient.</p>
+        {nav.length === 0 ? <Spinner /> : <div className="flex flex-wrap gap-2">{nav.map((n) => <Link key={n.href} href={n.href} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-brand-50">{t(n.label)}</Link>)}</div>}
+        <p className="mt-3 text-xs text-slate-500">{t("Tip: press")} <kbd className="rounded border px-1">/</kbd> {t("anywhere to search for a patient.")}</p>
       </Card>
     </>
   );

@@ -107,7 +107,7 @@ export class AdmissionsService {
       const [first, second] = [current.bedId, input.toBedId].sort();
       await this.lockBed(tx, ctx, first as string);
       await this.lockBed(tx, ctx, second as string);
-      const target = await tx.bed.findFirstOrThrow({ where: { id: input.toBedId, tenantId: ctx.tenantId, facilityId: ctx.facilityId } });
+      const target = await tx.bed.findFirstOrThrow({ where: { id: input.toBedId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, include: { ward: { select: { status: true } }, room: { select: { status: true } } } });
       this.assertAllocatable(target);
 
       const now = new Date();
@@ -187,11 +187,12 @@ export class AdmissionsService {
   private async lockBed(tx: Db, ctx: RequestContext, bedId: string) {
     const rows = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "Bed" WHERE id = ${bedId}::uuid AND "tenantId" = ${ctx.tenantId}::uuid AND "facilityId" = ${ctx.facilityId}::uuid FOR UPDATE`;
     if (rows.length === 0) throw new DomainError("NOT_FOUND", "Resource not found", 404);
-    return tx.bed.findFirstOrThrow({ where: { id: bedId, tenantId: ctx.tenantId } });
+    return tx.bed.findFirstOrThrow({ where: { id: bedId, tenantId: ctx.tenantId }, include: { ward: { select: { status: true } }, room: { select: { status: true } } } });
   }
 
-  private assertAllocatable(bed: { code: string; status: string; active: string }): void {
-    if (bed.active !== "ACTIVE") throw new DomainError("BED_NOT_AVAILABLE", `Bed ${bed.code} is not in service`, 409);
+  private assertAllocatable(bed: { code: string; status: string; active: string; ward?: { status: string }; room?: { status: string } }): void {
+    // A bed is in service only while the bed, its room and its ward are all switched on.
+    if (bed.active !== "ACTIVE" || (bed.ward && bed.ward.status !== "ACTIVE") || (bed.room && bed.room.status !== "ACTIVE")) throw new DomainError("BED_NOT_AVAILABLE", `Bed ${bed.code} is not in service`, 409);
     if (bed.status !== "AVAILABLE") throw new DomainError("BED_NOT_AVAILABLE", `Bed ${bed.code} is ${bed.status.toLowerCase()} and cannot be allocated`, 409, { status: bed.status });
   }
 

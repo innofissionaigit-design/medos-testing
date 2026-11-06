@@ -6,7 +6,7 @@ import { z } from "zod";
 import { actorOf, AuditService } from "../../common/audit.service";
 import { PrismaService } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
-import type { PortalSession } from "../portal/portal.service";
+import { assertUnlocked, type PortalSession } from "../portal/portal.access";
 import { SettingsService } from "../settings/settings.service";
 import { joinWindow, LIVE_APPOINTMENT, roomUrl } from "./telemedicine.domain";
 
@@ -136,6 +136,7 @@ export class TelemedicineService {
     return this.prisma.$transaction(async (tx) => {
       const t = await tx.teleconsult.findFirst({ where: { id, tenantId: p.tenantId, facilityId: p.facilityId, patient: { mobile: p.mobile, status: "ACTIVE", mergedIntoId: null } }, include: { appointment: { select: { status: true } } } });
       if (!t) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      await assertUnlocked(tx, p, t.patientId);
       if (t.status !== "SCHEDULED" && t.status !== "IN_PROGRESS") throw new DomainError("INVALID_STATE", "This video consultation is over", 409);
       if (!isLive(t.appointment.status)) throw new DomainError("INVALID_STATE", "The appointment is cancelled or finished", 409);
       const w = joinWindow(t.scheduledAt, new Date());

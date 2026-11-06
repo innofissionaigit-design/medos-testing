@@ -103,6 +103,43 @@ describe("IPD: wards, beds, admission, transfer, charges", () => {
       assert.equal((await t.api("patch", `/wards/${w.id}`, a.admin.token).send({ status: "INACTIVE" })).status, 409);
     });
 
+    it("a bed is in service only while its room and ward are on: no admission or transfer into a switched-off ward or room, and they can be switched back on in order", async () => {
+      const w = await mkWard();
+      const r = await mkRoom(w.id);
+      const bed = await mkBed({ roomId: r.id });
+      const other = await mkBed({ roomId: r.id });
+      // Room off: the beds in it cannot be used, new beds cannot be added to it, and it is still listed for the administrator to switch back on.
+      assert.equal((await t.api("patch", `/rooms/${r.id}`, a.admin.token).send({ status: "INACTIVE" })).status, 200);
+      const blocked = await admit((await registerPatient(t, rec.token)).id, bed.id);
+      assert.deepEqual([blocked.status, blocked.body.error.code], [409, "BED_NOT_AVAILABLE"], "room switched off");
+      assert.equal((await t.api("post", "/beds", a.admin.token).send({ roomId: r.id, code: code("B") })).status, 400);
+      assert.ok(!(await t.api("get", `/rooms?wardId=${w.id}`, a.admin.token)).body.data.some((x: { id: string }) => x.id === r.id), "hidden by default");
+      const all = await t.api("get", `/rooms?wardId=${w.id}&includeInactive=true`, a.admin.token);
+      assert.deepEqual(all.body.data.map((x: { id: string; status: string }) => [x.id, x.status]), [[r.id, "INACTIVE"]]);
+      const asNurse = await t.api("get", `/rooms?wardId=${w.id}&includeInactive=true`, nurse.token);
+      assert.equal(asNurse.body.data.length, 0, "only an administrator sees switched-off rooms");
+      assert.equal((await t.api("patch", `/rooms/${r.id}`, a.admin.token).send({ status: "ACTIVE" })).status, 200);
+      // Ward off while a patient is elsewhere: beds of the ward cannot be used, even as a transfer target.
+      const p = await registerPatient(t, rec.token);
+      const elsewhere = await mkBed();
+      const ad = (await admit(p.id, elsewhere.id)).body.data;
+      assert.equal((await t.api("patch", `/wards/${w.id}`, a.admin.token).send({ status: "INACTIVE" })).status, 200);
+      const tr = await t.api("post", `/admissions/${ad.id}/transfer`, nurse.token).send({ toBedId: other.id, reason: "Move to the quiet room" });
+      assert.deepEqual([tr.status, tr.body.error.code], [409, "BED_NOT_AVAILABLE"], "ward switched off");
+      assert.equal(await bedStatus(elsewhere.id), "OCCUPIED", "a failed transfer changes nothing");
+      assert.equal((await t.api("post", "/beds", a.admin.token).send({ roomId: r.id, code: code("B") })).status, 400, "no new beds in a switched-off ward");
+      // Switching back on goes ward first, then room, then bed.
+      assert.equal((await t.api("patch", `/rooms/${r.id}`, a.admin.token).send({ status: "INACTIVE" })).status, 200);
+      assert.equal((await t.api("patch", `/rooms/${r.id}`, a.admin.token).send({ status: "ACTIVE" })).status, 409, "the ward is still off");
+      assert.equal((await t.api("patch", `/beds/${bed.id}`, a.admin.token).send({ active: "INACTIVE" })).status, 200);
+      assert.equal((await t.api("patch", `/beds/${bed.id}`, a.admin.token).send({ active: "ACTIVE" })).status, 409, "ward and room are still off");
+      assert.equal((await t.api("patch", `/wards/${w.id}`, a.admin.token).send({ status: "ACTIVE" })).status, 200);
+      assert.equal((await t.api("patch", `/rooms/${r.id}`, a.admin.token).send({ status: "ACTIVE" })).status, 200);
+      assert.equal((await t.api("patch", `/beds/${bed.id}`, a.admin.token).send({ active: "ACTIVE" })).status, 200);
+      const ok = await t.api("post", `/admissions/${ad.id}/transfer`, nurse.token).send({ toBedId: other.id, reason: "Move to the quiet room" });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    });
+
     it("isolates masters by tenant and facility", async () => {
       const bed = await mkBed();
       const bAdmin = b.admin.token;

@@ -7,6 +7,8 @@ import { visitScope } from "../../common/data-scope";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { NumberingService } from "../numbering/numbering.service";
+import { EmailService } from "../email/email.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { flagNumber, isCritical, parseNumber, rangeFor, rangeText, type LabFlag, type ParamFacts } from "./lab.domain";
 
 const uuid = z.string().uuid();
@@ -64,7 +66,7 @@ type ParamRow = ParamFacts & { id: string; name: string; unit: string | null; li
  */
 @Injectable()
 export class LabService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService, private readonly notifications: NotificationsService, private readonly email: EmailService) {}
 
   // ───── test definitions ─────
 
@@ -301,6 +303,9 @@ export class LabService {
       await tx.labResult.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: r.id } }, data: { status: "VERIFIED", currentVersion: 1, hasCritical } });
       await this.audit.record(tx, actorOf(ctx), { action: "LAB_RESULT_VERIFIED", entityType: "LabResult", entityId: r.id, metadata: { testOrderId: r.testOrderId, version: 1, abnormal: values.filter((v) => v.flag !== "NORMAL").length } });
       if (hasCritical) await this.audit.record(tx, actorOf(ctx), { action: "LAB_CRITICAL_RESULT", entityType: "LabResult", entityId: r.id, metadata: { testOrderId: r.testOrderId, parameters: values.filter((v) => isCritical(v.flag)).map((v) => v.name) } });
+      if (hasCritical) await this.notifications.criticalResult(tx, ctx, "LAB", r.testOrderId, r.id, 1);
+      // The patient is told a report is ready, never what it says (docs/email.md).
+      await this.email.reportReadyEmail(tx, ctx, r.testOrderId, r.id, "LabResult");
       return { id: r.id, status: "VERIFIED" as const, currentVersion: 1, hasCritical };
     });
   }
@@ -318,6 +323,7 @@ export class LabService {
       await tx.labResult.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: r.id } }, data: { currentVersion: next, hasCritical, ...(hasCritical ? { criticalAckById: null, criticalAckAt: null } : {}) } });
       await this.audit.record(tx, actorOf(ctx), { action: "LAB_RESULT_AMENDED", entityType: "LabResult", entityId: r.id, metadata: { testOrderId: r.testOrderId, version: next, reason: input.reason } });
       if (hasCritical) await this.audit.record(tx, actorOf(ctx), { action: "LAB_CRITICAL_RESULT", entityType: "LabResult", entityId: r.id, metadata: { testOrderId: r.testOrderId, version: next } });
+      if (hasCritical) await this.notifications.criticalResult(tx, ctx, "LAB", r.testOrderId, r.id, next);
       return { id: r.id, status: "VERIFIED" as const, currentVersion: next, hasCritical };
     });
   }

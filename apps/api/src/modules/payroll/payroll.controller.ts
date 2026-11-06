@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Patch, Post, Put, Query } from "@nestjs/common";
 import { AnyAuthenticated, Ctx, id, parse, RequirePermissions } from "../../common/http";
 import type { RequestContext } from "../../common/request-context";
-import { adjustSlipSchema, cancelSchema, createRunSchema, employeeSchema, listEmployeesSchema, paySchema, PayrollService, structureSchema, updateEmployeeSchema } from "./payroll.service";
+import { addArrearsSchema, adjustSlipSchema, cancelSchema, createRunSchema, employeeSchema, listEmployeesSchema, paySchema, PayrollService, structureSchema, updateEmployeeSchema } from "./payroll.service";
 
 /** Payroll (docs/payroll.md): employees and salary structures, the monthly run, approval and payment, and payslips. */
 @Controller()
@@ -47,6 +47,15 @@ export class PayrollController {
   @RequirePermissions("PAYROLL_MANAGE")
   @Put("payroll/runs/:id/payslips/:slipId")
   async adjust(@Ctx() ctx: RequestContext, @Param("id") runId: string, @Param("slipId") slipId: string, @Body() body: unknown) { return { data: await this.payroll.adjustSlip(ctx, id(runId), id(slipId), parse(adjustSlipSchema, body)) }; }
+
+  @RequirePermissions("PAYROLL_MANAGE")
+  @Get("payroll/runs/:id/payslips/:slipId/arrears")
+  async arrearsSuggestions(@Ctx() ctx: RequestContext, @Param("id") runId: string, @Param("slipId") slipId: string) { return { data: await this.payroll.arrearsSuggestions(ctx, id(runId), id(slipId)) }; }
+
+  @RequirePermissions("PAYROLL_MANAGE")
+  @Post("payroll/runs/:id/payslips/:slipId/arrears")
+  @HttpCode(200)
+  async addArrears(@Ctx() ctx: RequestContext, @Param("id") runId: string, @Param("slipId") slipId: string, @Body() body: unknown) { return { data: await this.payroll.addArrears(ctx, id(runId), id(slipId), parse(addArrearsSchema, body)) }; }
 
   @RequirePermissions("PAYROLL_APPROVE")
   @Post("payroll/runs/:id/approve")

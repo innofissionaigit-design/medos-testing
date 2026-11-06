@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { T } from "@/lib/i18n";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8,6 +9,7 @@ import { CancelAdmission, DoseReasonModal, TasksCard, VitalsCard, WaiveButton } 
 import { todayIn, useAvailableBeds } from "@/components/pickers";
 import { Badge, Button, Card, ConfirmButton, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Tabs, Td, Textarea } from "@/components/ui";
 import { blankItem, RxRows, toPayload, type RxItem } from "@/components/rx-editor";
+import { AmendMedicine } from "@/components/prescription-extras";
 import { WardStoreCard } from "@/components/ward-store";
 import { api, ApiError, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
@@ -56,13 +58,14 @@ function Overview({ adm, refresh }: { adm: Admission; refresh: () => void }) {
     mutationFn: () => api.post(`/admissions/${adm.id}/charges`, c.serviceId ? { type: "SERVICE", serviceId: c.serviceId, quantity: c.quantity } : { type: "SERVICE", description: c.description, unitPrice: c.unitPrice, taxPercent: 0, quantity: c.quantity }),
     onSuccess: () => { setC({ description: "", unitPrice: "", quantity: "1", serviceId: "" }); void qc.invalidateQueries({ queryKey: ["charges", adm.id] }); },
   });
-  const bedDays = useMutation({ mutationFn: () => api.post(`/admissions/${adm.id}/charges/bed-days`), onSuccess: () => qc.invalidateQueries({ queryKey: ["charges", adm.id] }) });
+  // One bed charge is posted per calendar day of the stay (the admission day included). Pressing the button again the same day posts nothing, so say so instead of looking broken.
+  const bedDays = useMutation({ mutationFn: () => api.post<{ posted: number }>(`/admissions/${adm.id}/charges/bed-days`), onSuccess: () => qc.invalidateQueries({ queryKey: ["charges", adm.id] }) });
   const voidCharge = useMutation({ mutationFn: (id: string) => api.post(`/charges/${id}/void`, { reason: "Entered in error" }), onSuccess: () => qc.invalidateQueries({ queryKey: ["charges", adm.id] }) });
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Card title="Bed history" actions={open && can("ADMISSION_TRANSFER") ? <Button variant="secondary" onClick={() => setTransfer(true)}>Transfer bed</Button> : undefined}>
         <Table head={["Ward · bed", "From", "To", "Rate/day"]}>
-          {adm.bedHistory.map((b) => <tr key={b.id}><Td>{b.ward} · {b.bedCode}<div className="text-xs text-slate-500">{b.reason}</div></Td><Td>{dateTime(b.assignedAt)}</Td><Td>{b.releasedAt ? dateTime(b.releasedAt) : <Badge tone="blue">current</Badge>}</Td><Td>{money(b.dailyRate)}</Td></tr>)}
+          {adm.bedHistory.map((b, i) => <tr key={b.id}><Td>{b.ward} · {b.bedCode}<div className="text-xs text-slate-500">{b.reason ? <>{i > 0 ? <><T>Moved here</T>: </> : null}{b.reason}</> : null}</div></Td><Td>{dateTime(b.assignedAt)}</Td><Td>{b.releasedAt ? dateTime(b.releasedAt) : <Badge tone="blue">current</Badge>}</Td><Td>{money(b.dailyRate)}</Td></tr>)}
         </Table>
       </Card>
       <Card title="Charges" actions={open && can("CHARGE_CREATE") ? <Button variant="secondary" loading={bedDays.isPending} onClick={() => bedDays.mutate()}>Post bed days</Button> : undefined}>
@@ -72,6 +75,7 @@ function Overview({ adm, refresh }: { adm: Admission; refresh: () => void }) {
               <Td>{x.status === "PENDING" && open && can("CHARGE_CREATE") && <button className="text-xs text-slate-500 hover:text-red-700" onClick={() => voidCharge.mutate(x.id)}>void</button>}</Td></tr>
           ))}
         </Table>
+        {bedDays.data && <div className="mt-3"><Notice tone={bedDays.data.posted > 0 ? "success" : "info"}>{bedDays.data.posted > 0 ? "Bed days added to the charges." : "Nothing to add: every day of the stay so far is already charged. A new day is charged from midnight, hospital time."}</Notice></div>}
         {open && can("CHARGE_CREATE") && (
           <form className="mt-3 grid grid-cols-12 gap-2" onSubmit={(e) => { e.preventDefault(); post.mutate(); }}>
             <Select aria-label="Service" className="col-span-12 sm:col-span-4" value={c.serviceId} onChange={(e) => setC({ ...c, serviceId: e.target.value })}><option value="">Other charge…</option>{services.data?.data.map((s) => <option key={s.id} value={s.id}>{s.name} · {money(s.price)}</option>)}</Select>
@@ -104,7 +108,8 @@ function Orders({ adm }: { adm: Admission }) {
   const [ack, setAck] = useState<RxWarning[] | null>(null);
   const [ackChecked, setAckChecked] = useState(false);
   useEffect(() => { if (rx.data && !loaded) { setItems(draft?.items.map((i) => ({ ...i })) ?? []); setLoaded(true); } }, [rx.data, loaded, draft]);
-  const resync = () => { setLoaded(false); void qc.invalidateQueries({ queryKey: ["ipd-rx", adm.id] }); void qc.invalidateQueries({ queryKey: ["mar", adm.id] }); };
+  // Fetch the saved copy FIRST, then refill the rows from it: refilling from the copy loaded before the save would blank what was just typed.
+  const resync = async () => { await Promise.all([qc.invalidateQueries({ queryKey: ["ipd-rx", adm.id] }), qc.invalidateQueries({ queryKey: ["mar", adm.id] })]); setLoaded(false); };
   const filled = () => items.filter((i) => i.genericName.trim()).map(toPayload);
   const save = useMutation({ mutationFn: () => api.put(`/encounters/${adm.encounterId}/prescription`, { items: filled() }), onSuccess: resync });
   const sign = useMutation({
@@ -112,7 +117,11 @@ function Orders({ adm }: { adm: Admission }) {
     onSuccess: () => { setAck(null); setAckChecked(false); setItems([]); resync(); },
     onError: (e) => { if (e instanceof ApiError && e.code === "ALLERGY_CONFLICT") setAck(((e.details as { allergyWarnings?: RxWarning[] } | undefined)?.allergyWarnings) ?? []); },
   });
-  const stop = useMutation({ mutationFn: (id: string) => api.post(`/medication-order-items/${id}/stop`, { reason: "Stopped by doctor" }), onSuccess: resync });
+  // Stopping is a clinical change, so the doctor confirms it and gives a reason that stays on the record.
+  const [stopping, setStopping] = useState<{ id: string; name: string } | null>(null);
+  const [stopReason, setStopReason] = useState("");
+  const [changing, setChanging] = useState<(RxItem & { id: string }) | null>(null);
+  const stop = useMutation({ mutationFn: (v: { id: string; reason: string }) => api.post(`/medication-order-items/${v.id}/stop`, { reason: v.reason }), onSuccess: () => { setStopping(null); setStopReason(""); resync(); } });
   const canWrite = open && can("PRESCRIPTION_CREATE");
   if (rx.isLoading) return <Spinner />;
   return (
@@ -123,11 +132,22 @@ function Orders({ adm }: { adm: Admission }) {
             <Table head={["Medicine", "Dose", "Route", "Frequency", "Status", ""]}>
               {o.items.map((i) => (
                 <tr key={i.id}><Td>{i.genericName} {i.strength}</Td><Td>{i.dosage}</Td><Td>{i.route}</Td><Td>{i.frequency}</Td><Td><StatusBadge value={i.status} /></Td>
-                  <Td>{i.status === "ACTIVE" && canWrite && <button className="text-xs text-slate-500 hover:text-red-700" onClick={() => stop.mutate(i.id)}>stop</button>}</Td></tr>
+                  <Td>{i.status === "ACTIVE" && canWrite && can("PRESCRIPTION_SIGN") && <button className="mr-2 text-xs text-slate-500 hover:text-brand-700" onClick={() => setChanging(i)}>change</button>}{i.status === "ACTIVE" && canWrite && <button className="text-xs text-slate-500 hover:text-red-700" onClick={() => { stop.reset(); setStopReason(""); setStopping({ id: i.id, name: [i.genericName, i.strength].filter(Boolean).join(" ") }); }}>stop</button>}</Td></tr>
               ))}
             </Table>
           </div>
         ))}
+        {changing && <AmendMedicine item={changing} onClose={() => setChanging(null)} onDone={() => { setChanging(null); resync(); }} />}
+        {stopping && (
+          <div className="mt-3 space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3">
+            <Notice tone="warn">Stop {stopping.name}? It stays on the record as stopped, with your name and reason. Nurses will no longer give it.</Notice>
+            <Field label="Reason for stopping" hint="At least 3 characters"><Input autoFocus value={stopReason} onChange={(e) => setStopReason(e.target.value)} /></Field>
+            <div className="flex gap-2">
+              <Button variant="danger" loading={stop.isPending} disabled={stopReason.trim().length < 3} onClick={() => stop.mutate({ id: stopping.id, reason: stopReason.trim() })}>Stop medicine</Button>
+              <Button variant="secondary" onClick={() => { setStopping(null); setStopReason(""); }}>Keep it</Button>
+            </div>
+          </div>
+        )}
         <ErrorNote error={stop.error} />
       </Card>
       {canWrite && (

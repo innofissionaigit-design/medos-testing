@@ -1,19 +1,20 @@
 "use client";
 import { useRef, useState } from "react";
+import { T } from "@/lib/i18n";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, errorText } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, Spinner } from "./ui";
 
 export interface EditablePatient {
-  id: string; firstName: string; lastName: string | null; gender: string; mobile: string | null; addressLine: string | null; city: string | null; district: string | null; state: string | null;
+  id: string; firstName: string; lastName: string | null; gender: string; mobile: string | null; email?: string | null; addressLine: string | null; city: string | null; district: string | null; state: string | null;
   postalCode: string | null; guardianName: string | null; guardianRelation: string | null; guardianMobile: string | null; emergencyContactName: string | null; emergencyContactMobile: string | null;
   bloodGroup: string | null; version: number;
 }
 
 const BLOOD = ["A_POS", "A_NEG", "B_POS", "B_NEG", "AB_POS", "AB_NEG", "O_POS", "O_NEG"];
 const bloodLabel = (b: string) => b.replace("_POS", "+").replace("_NEG", "−");
-const FIELDS = ["firstName", "lastName", "gender", "mobile", "addressLine", "city", "district", "state", "postalCode", "guardianName", "guardianRelation", "guardianMobile", "emergencyContactName", "emergencyContactMobile", "bloodGroup"] as const;
+const FIELDS = ["firstName", "lastName", "gender", "mobile", "email", "addressLine", "city", "district", "state", "postalCode", "guardianName", "guardianRelation", "guardianMobile", "emergencyContactName", "emergencyContactMobile", "bloodGroup"] as const;
 type FieldKey = (typeof FIELDS)[number];
 
 /** Edit demographics. Only changed fields are sent; the record's version guards against two people editing at once. */
@@ -40,6 +41,7 @@ export function EditPatientModal({ patient, onClose }: { patient: EditablePatien
         {text("firstName", "First name")}{text("lastName", "Last name")}
         <Field label="Gender"><Select value={v.gender} onChange={set("gender")}><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="OTHER">Other</option><option value="UNKNOWN">Unknown</option></Select></Field>
         {text("mobile", "Mobile", { mode: "tel", hint: "10-digit Indian number" })}
+        {text("email", "Email", { hint: "Used only if the patient agrees to be emailed" })}
         <Field label="Blood group"><Select value={v.bloodGroup} onChange={set("bloodGroup")}><option value="">Not recorded</option>{BLOOD.map((b) => <option key={b} value={b}>{bloodLabel(b)}</option>)}</Select></Field>
         {text("addressLine", "Address")}{text("city", "City")}{text("district", "District")}{text("state", "State")}{text("postalCode", "PIN code", { mode: "numeric" })}
         {text("guardianName", "Guardian name")}{text("guardianRelation", "Guardian relation")}{text("guardianMobile", "Guardian mobile", { mode: "tel" })}
@@ -105,7 +107,7 @@ export function FilesCard({ patientId }: { patientId: string }) {
       {list.isLoading ? <Spinner /> : (
         <div className="space-y-3">
           <div className="flex items-center gap-3">
-            {photo ? <img src={fileUrl(photo.id)} alt="Patient photo" className="h-20 w-20 rounded-md border border-slate-200 object-cover" /> : <div className="flex h-20 w-20 items-center justify-center rounded-md border border-dashed border-slate-300 text-xs text-slate-400">No photo</div>}
+            {photo ? <img src={fileUrl(photo.id)} alt="Patient photo" className="h-20 w-20 rounded-md border border-slate-200 object-cover" /> : <div className="flex h-20 w-20 items-center justify-center rounded-md border border-dashed border-slate-300 text-xs text-slate-400"><T>No photo</T></div>}
             {photo && can("PATIENT_UPDATE") && <button className="text-xs text-slate-500 hover:text-red-700" onClick={() => { setRemoving(photo); setReason(""); }}>remove photo</button>}
           </div>
           <ul className="divide-y divide-slate-100">
@@ -115,7 +117,7 @@ export function FilesCard({ patientId }: { patientId: string }) {
                 {can("PATIENT_UPDATE") && <button className="text-xs text-slate-500 hover:text-red-700" onClick={() => { setRemoving(d); setReason(""); }}>remove</button>}
               </li>
             ))}
-            {docs.length === 0 && <li className="py-1.5 text-sm text-slate-500">No documents uploaded.</li>}
+            {docs.length === 0 && <li className="py-1.5 text-sm text-slate-500"><T>No documents uploaded.</T></li>}
           </ul>
           {can("PATIENT_UPDATE") && (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

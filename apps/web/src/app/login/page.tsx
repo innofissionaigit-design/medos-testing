@@ -15,12 +15,26 @@ export default function LoginPage() {
   const { register, handleSubmit, formState: { errors, isSubmitting }, getValues } = useForm<Form>({ resolver: zodResolver(schema), defaultValues: { tenantCode: typeof window !== "undefined" ? (localStorage.getItem("medos.tenant") ?? "") : "" } });
   const [error, setError] = useState<unknown>(null);
   const [facilities, setFacilities] = useState<Facility[] | null>(null);
+  const [wrongDetails, setWrongDetails] = useState(false);
+  const [capsLock, setCapsLock] = useState(false);
 
   async function submit(values: Form, facilityId?: string) {
     setError(null);
-    const res = await fetch("/api/session/login", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "x-medos-csrf": "1" }, body: JSON.stringify({ ...values, ...(facilityId ? { facilityId } : {}) }) });
-    const json = (await res.json().catch(() => ({}))) as { data?: { status: string; facilities?: Facility[] }; error?: { message: string } };
-    if (!res.ok || !json.data) { setError(new Error(json.error?.message ?? "Could not sign in")); return; }
+    setWrongDetails(false);
+    let res: Response;
+    try {
+      res = await fetch("/api/session/login", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "x-medos-csrf": "1" }, body: JSON.stringify({ ...values, ...(facilityId ? { facilityId } : {}) }) });
+    } catch {
+      setError(new Error("Could not reach the server. Check your connection and try again."));
+      return;
+    }
+    const json = (await res.json().catch(() => ({}))) as { data?: { status: string; facilities?: Facility[] }; error?: { message: string; code?: string } };
+    if (!res.ok || !json.data) {
+      setError(new Error(json.error?.message ?? "Could not sign in"));
+      // One message for every wrong detail (hospital code, username or password), so it never says which. The hint covers the lock a few wrong tries cause without saying whether this account is locked.
+      setWrongDetails(json.error?.code === "INVALID_CREDENTIALS");
+      return;
+    }
     if (json.data.status === "AUTHENTICATED") {
       try { localStorage.setItem("medos.tenant", values.tenantCode); } catch { /* storage unavailable */ }
       window.location.assign("/dashboard");
@@ -44,8 +58,10 @@ export default function LoginPage() {
             <form method="post" action="/login" onSubmit={handleSubmit((v) => submit(v))} className="space-y-3" noValidate>
               <Field label="Hospital code" error={errors.tenantCode?.message}><Input autoFocus autoComplete="organization" {...register("tenantCode")} /></Field>
               <Field label="Username or email" error={errors.identifier?.message}><Input autoComplete="username" {...register("identifier")} /></Field>
-              <Field label="Password" error={errors.password?.message}><Input type="password" autoComplete="current-password" {...register("password")} /></Field>
+              <Field label="Password" error={errors.password?.message}><Input type="password" autoComplete="current-password" onKeyUp={(e) => setCapsLock(e.getModifierState("CapsLock"))} {...register("password")} /></Field>
+              {capsLock && <p className="text-xs text-amber-700" role="status">Caps Lock is on.</p>}
               <ErrorNote error={error} />
+              {wrongDetails && <p className="text-xs text-slate-500">Check the hospital code, your username and your password. After several wrong tries the account is locked for a few minutes; wait and try again, or ask your administrator to unlock it.</p>}
               <Button type="submit" className="w-full" loading={isSubmitting}>Sign in</Button>
             </form>
           )}

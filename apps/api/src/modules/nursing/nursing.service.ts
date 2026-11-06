@@ -27,7 +27,7 @@ export const ioSchema = z.object({
   const ok = v.direction === "INTAKE" ? ["ORAL", "IV", "OTHER_INTAKE"] : ["URINE", "DRAIN", "VOMIT", "OTHER_OUTPUT"];
   if (!ok.includes(v.category)) c.addIssue({ code: "custom", path: ["category"], message: `${v.category} is not a valid ${v.direction.toLowerCase()} type` });
 });
-export const ioTotalsSchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((s) => dateOnly(s).toISOString().slice(0, 10) === s, "Invalid date") }).strict();
+export const ioTotalsSchema = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine((s) => !Number.isNaN(dateOnly(s).getTime()) && dateOnly(s).toISOString().slice(0, 10) === s, "Invalid date") }).strict();
 export const worklistSchema = z.object({ wardId: uuid.optional() }).strict();
 
 /** Vitals are "due" when nothing has been recorded for this long (minutes). */

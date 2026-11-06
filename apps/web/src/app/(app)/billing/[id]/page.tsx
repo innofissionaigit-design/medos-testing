@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { T } from "@/lib/i18n";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -12,9 +13,9 @@ import { useMe } from "@/lib/me";
 
 interface Invoice {
   id: string; invoiceNumber: string | null; status: string; kind: string; patientId: string; patientName: string; mrn: string | null; notes: string | null; issuedAt: string | null;
-  subtotal: string; discountTotal: string; taxTotal: string; total: string; paidTotal: string; refundedTotal: string; creditedTotal: string; netReceived: string; balanceDue: string; refundable: string;
+  subtotal: string; discountTotal: string; taxTotal: string; taxSplit?: boolean; roundOff?: string; roundsToRupee?: boolean; cgstTotal?: string | null; sgstTotal?: string | null; total: string; paidTotal: string; refundedTotal: string; creditedTotal: string; netReceived: string; balanceDue: string; refundable: string;
   version: number; encounterId?: string | null;
-  lines: { lineNo: number; serviceId?: string | null; description: string; quantity: string; unitPrice: string; discountAmount: string; taxPercent: string; lineTotal: string }[];
+  lines: { lineNo: number; serviceId?: string | null; description: string; quantity: string; unitPrice: string; discountAmount: string; taxPercent: string; cgstAmount?: string | null; sgstAmount?: string | null; lineTotal: string }[];
   receipts: { id: string; receiptNumber: string; total: string; receivedAt: string; payments: { method: string; amount: string; reference: string | null }[] }[];
   refunds: { id: string; refundNumber: string; method: string; amount: string; reason: string; createdAt: string }[];
   creditNotes: { id: string; creditNoteNumber: string; amount: string; reason: string }[];
@@ -59,9 +60,13 @@ function Adjust({ inv, kind, onClose, onDone }: { inv: Invoice; kind: "refund" |
   const [amount, setAmount] = useState("");
   const [method, setMethod] = useState("CASH");
   const [reason, setReason] = useState("");
+  const [reference, setReference] = useState("");
   const [key] = useState(newKey);
+  // Money other than cash is paid back through a bank, UPI or card transaction, which has a reference the server asks for.
+  const needsReference = kind === "refund" && method !== "CASH";
+  const tooMuch = kind === "refund" && Number(amount) > Number(inv.refundable);
   const m = useMutation({
-    mutationFn: () => api.post(`/invoices/${inv.id}/${kind === "refund" ? "refunds" : "credit-notes"}`, { amount, reason, ...(kind === "refund" ? { method } : {}) }, key),
+    mutationFn: () => api.post(`/invoices/${inv.id}/${kind === "refund" ? "refunds" : "credit-notes"}`, { amount, reason, ...(kind === "refund" ? { method, ...(reference.trim() ? { reference: reference.trim() } : {}) } : {}) }, key),
     onSuccess: onDone,
   });
   return (
@@ -69,9 +74,13 @@ function Adjust({ inv, kind, onClose, onDone }: { inv: Invoice; kind: "refund" |
       <div className="space-y-3">
         <Field label="Amount"><Input autoFocus inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} /></Field>
         {kind === "refund" && <Field label="Refund by"><Select value={method} onChange={(e) => setMethod(e.target.value)}>{METHODS.map((x) => <option key={x} value={x}>{x.replace("_", " ").toLowerCase()}</option>)}</Select></Field>}
+        {needsReference && <Field label="Reference" hint="The transaction number of the money paid back (at least 4 characters)."><Input value={reference} onChange={(e) => setReference(e.target.value)} /></Field>}
+        {tooMuch && <Notice tone="warn">More than the {money(inv.refundable)} that can be refunded.</Notice>}
         <Field label="Reason" hint="At least 5 characters; recorded permanently."><Input value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
         <ErrorNote error={m.error} />
-        <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="danger" disabled={!Number(amount) || reason.trim().length < 5} loading={m.isPending} onClick={() => m.mutate()}>{kind === "refund" ? "Issue refund" : "Issue credit note"}</Button></div>
+        <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button>{kind === "refund"
+          ? <ConfirmButton label="Issue refund" confirmLabel={`Yes, refund ${money(amount || 0)}`} variant="danger" disabled={!Number(amount) || tooMuch || reason.trim().length < 5 || (needsReference && reference.trim().length < 4)} loading={m.isPending} onConfirm={() => m.mutate()} />
+          : <Button variant="danger" disabled={!Number(amount) || reason.trim().length < 5} loading={m.isPending} onClick={() => m.mutate()}>Issue credit note</Button>}</div>
       </div>
     </Modal>
   );
@@ -161,7 +170,26 @@ export default function InvoicePage() {
   const inv = useQuery({ queryKey: ["invoice", id], queryFn: () => api.get<Invoice>(`/invoices/${id}`) });
   const refresh = async () => { setModal(null); await qc.invalidateQueries({ queryKey: ["invoice", id] }); await qc.invalidateQueries({ queryKey: ["invoices"] }); await qc.invalidateQueries({ queryKey: ["doctor-share"] }); };
   const issue = useMutation({ mutationFn: () => api.post(`/invoices/${id}/issue`), onSuccess: refresh });
-  const cancel = useMutation({ mutationFn: () => api.post(`/invoices/${id}/cancel`, { reason: cancelReason.trim() }), onSuccess: refresh });
+  // "Email receipt": queues the receipt email to the patient when they have an address and have agreed (docs/email.md); says why when it cannot.
+  const emailReceipt = useMutation({ mutationFn: () => api.post<{ queued: boolean; reason?: string }>(`/invoices/${id}/email-receipt`) });
+  const notEmailed: Record<string, string> = { DISABLED: "Email is switched off (Administration → Email).", NO_ADDRESS: "This patient has no email address on file.", NO_CONSENT: "This patient has not agreed to be emailed.", SUPPRESSED: "This address is on the do-not-email list.", DUPLICATE: "This receipt was already emailed." };
+  const [refundRefs, setRefundRefs] = useState<Record<string, string>>({});
+  // What has to be given back to cancel a paid bill: whatever each method received and has not yet returned.
+  const giveBack = (): { method: string; amount: string }[] => {
+    const by = new Map<string, number>();
+    for (const r of inv.data?.receipts ?? []) for (const p of r.payments) by.set(p.method, (by.get(p.method) ?? 0) + Number(p.amount));
+    for (const r of inv.data?.refunds ?? []) by.set(r.method, (by.get(r.method) ?? 0) - Number(r.amount));
+    return [...by.entries()].filter(([, v]) => v > 0.004).map(([method, v]) => ({ method, amount: v.toFixed(2) }));
+  };
+  const owed = giveBack();
+  const refsMissing = owed.some((o) => o.method !== "CASH" && (refundRefs[o.method] ?? "").trim().length < 4);
+  const cancel = useMutation({
+    mutationFn: () => api.post(`/invoices/${id}/cancel`, {
+      reason: cancelReason.trim(),
+      ...(Number(inv.data?.netReceived ?? 0) > 0 ? { refunds: owed.map((o) => ({ method: o.method, amount: o.amount, ...(o.method !== "CASH" ? { reference: (refundRefs[o.method] ?? "").trim() } : {}) })) } : {}),
+    }),
+    onSuccess: refresh,
+  });
   if (inv.isLoading) return <Spinner />;
   if (inv.error || !inv.data) return <ErrorNote error={inv.error ?? new Error("Bill not found")} />;
   const i = inv.data;
@@ -180,6 +208,7 @@ export default function InvoicePage() {
           {["ISSUED", "PARTIALLY_PAID"].includes(i.status) && <UseAdvanceButton patientId={i.patientId} invoiceId={i.id} balanceDue={i.balanceDue} onDone={refresh} />}
           {i.status !== "DRAFT" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`invoices/${i.id}`)} target="_blank" rel="noreferrer">Print bill</a>}
           {i.status !== "DRAFT" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`invoices/${i.id}`)}?format=pdf&download=1`}>PDF</a>}
+          {Number(i.netReceived) > 0 && can("INVOICE_READ") && <Button variant="secondary" loading={emailReceipt.isPending} onClick={() => emailReceipt.mutate()}>Email receipt</Button>}
         </>}
       />
       {fromPatient && (
@@ -189,29 +218,43 @@ export default function InvoicePage() {
           <Link className="text-sm font-medium underline" href={`/patients/${i.patientId}`}>Back to patient</Link>
         </Notice>
       )}
-      <ErrorNote error={issue.error ?? cancel.error} />
+      <ErrorNote error={issue.error ?? cancel.error ?? emailReceipt.error} />
+      {emailReceipt.data && <Notice tone={emailReceipt.data.queued ? "success" : "warn"}>{emailReceipt.data.queued ? "The receipt email is queued and will be sent shortly." : (notEmailed[emailReceipt.data.reason ?? ""] ?? "The receipt email was not queued.")}</Notice>}
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Items" className="lg:col-span-2">
-          <Table head={["#", "Item", "Qty", "Rate", "Tax", "Amount"]}>
-            {i.lines.map((l) => <tr key={l.lineNo}><Td>{l.lineNo}</Td><Td>{l.description}</Td><Td>{l.quantity}</Td><Td>{money(l.unitPrice)}</Td><Td>{l.taxPercent}%</Td><Td>{money(l.lineTotal)}</Td></tr>)}
+          <Table head={i.taxSplit ? ["#", "Item", "Qty", "Rate", "Tax", "CGST", "SGST", "Amount"] : ["#", "Item", "Qty", "Rate", "Tax", "Amount"]}>
+            {i.lines.map((l) => <tr key={l.lineNo}><Td>{l.lineNo}</Td><Td>{l.description}</Td><Td>{l.quantity}</Td><Td>{money(l.unitPrice)}</Td><Td>{l.taxPercent}%</Td>{i.taxSplit && <><Td>{money(l.cgstAmount ?? "0")}</Td><Td>{money(l.sgstAmount ?? "0")}</Td></>}<Td>{money(l.lineTotal)}</Td></tr>)}
           </Table>
           {i.notes && <p className="mt-2 text-sm text-slate-600">{i.notes}</p>}
         </Card>
         <Card title="Totals">
           <dl className="grid grid-cols-2 gap-3">
-            <KV label="Subtotal">{money(i.subtotal)}</KV><KV label="Discount">{money(i.discountTotal)}</KV><KV label="Tax">{money(i.taxTotal)}</KV><KV label="Total"><b>{money(i.total)}</b></KV>
+            <KV label="Subtotal">{money(i.subtotal)}</KV><KV label="Discount">{money(i.discountTotal)}</KV>{i.taxSplit ? <><KV label="CGST">{money(i.cgstTotal ?? "0")}</KV><KV label="SGST">{money(i.sgstTotal ?? "0")}</KV></> : <KV label="Tax">{money(i.taxTotal)}</KV>}{i.roundsToRupee && <KV label="Round off">{money(i.roundOff ?? "0")}</KV>}<KV label="Total"><b>{money(i.total)}</b></KV>
             <KV label="Received">{money(i.netReceived)}</KV><KV label="Balance due"><b className={Number(i.balanceDue) > 0 ? "text-red-700" : "text-green-700"}>{money(i.balanceDue)}</b></KV>
           </dl>
           {live && (
             <div className="mt-4 flex flex-wrap gap-2">
               {Number(i.refundable) > 0 && can("PAYMENT_REFUND") && <Button variant="secondary" onClick={() => setModal("refund")}>Refund…</Button>}
-              {can("INVOICE_ADJUST") && Number(i.balanceDue) > 0 && <Button variant="secondary" onClick={() => setModal("credit-notes")}>Credit note…</Button>}
+              {can("INVOICE_ADJUST") && Number(i.total) - Number(i.creditedTotal) > 0 && <Button variant="secondary" onClick={() => setModal("credit-notes")}>Credit note…</Button>}
             </div>
           )}
+          {live && can("PAYMENT_REFUND") && Number(i.refundable) <= 0 && Number(i.netReceived) > 0 && <p className="mt-3 text-xs text-slate-500"><T>Nothing to refund yet: the patient has paid exactly what the bill says. A refund becomes possible after the Manager issues a credit note that lowers the bill below what was paid.</T></p>}
           {live && can("INVOICE_CANCEL") && (
             <div className="mt-4 space-y-2 border-t border-slate-100 pt-3">
               <Input placeholder="Reason to cancel this bill (min 5 characters)" aria-label="Cancel reason" value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} />
-              <ConfirmButton label="Cancel bill" confirmLabel="Yes, cancel this bill" loading={cancel.isPending} disabled={cancelReason.trim().length < 5} onConfirm={() => cancel.mutate()} />
+              {Number(i.netReceived) > 0 && (
+                <div className="space-y-2 rounded-md bg-amber-50 p-3 text-sm">
+                  <div className="font-medium">Cancelling gives back everything received: {money(i.netReceived)}</div>
+                  {!can("PAYMENT_REFUND") && <div className="text-red-700">You also need permission to refund money to cancel a paid bill.</div>}
+                  {owed.map((o) => (
+                    <div key={o.method} className="flex flex-wrap items-center gap-2">
+                      <span className="w-44">{money(o.amount)} by {o.method.replace("_", " ").toLowerCase()}</span>
+                      {o.method !== "CASH" && <Input aria-label={`Reference for ${o.method}`} placeholder="Transaction reference (min 4)" className="w-56" value={refundRefs[o.method] ?? ""} onChange={(e) => setRefundRefs({ ...refundRefs, [o.method]: e.target.value })} />}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <ConfirmButton label="Cancel bill" confirmLabel="Yes, cancel this bill" loading={cancel.isPending} disabled={cancelReason.trim().length < 5 || (Number(i.netReceived) > 0 && (!can("PAYMENT_REFUND") || refsMissing))} onConfirm={() => cancel.mutate()} />
             </div>
           )}
         </Card>

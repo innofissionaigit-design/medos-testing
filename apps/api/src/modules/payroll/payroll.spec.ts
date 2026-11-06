@@ -269,7 +269,7 @@ describe("payroll: employees, pay structures, and a monthly run from draft to pa
 
   it("the payroll officer role exists with what it needs; the approver is the administrator", async () => {
     const r = await t.prisma.role.findFirstOrThrow({ where: { tenantId: a.tenantId, name: "PAYROLL_OFFICER", isSystem: true }, include: { permissions: true } });
-    assert.deepEqual(r.permissions.map((x) => x.permission).sort(), ["PAYROLL_MANAGE", "PAYROLL_READ"]);
+    assert.deepEqual(r.permissions.map((x) => x.permission).sort(), ["ATTENDANCE_MANAGE", "PAYROLL_MANAGE", "PAYROLL_READ"]);
     const admin = await t.prisma.role.findFirstOrThrow({ where: { tenantId: a.tenantId, name: "ADMINISTRATOR", isSystem: true }, include: { permissions: true } });
     assert.ok(admin.permissions.some((x) => x.permission === "PAYROLL_APPROVE"));
   });

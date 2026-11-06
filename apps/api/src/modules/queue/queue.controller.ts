@@ -75,7 +75,8 @@ export class QueueController {
     return { data: await this.queue.act(ctx, id(entryId), "cancel", parse(cancelQueueSchema, body).reason) };
   }
 
-  @RequirePermissions("QUEUE_MANAGE")
+  /** Reception changes any queue; a doctor only their own (checked in the service). */
+  @RequirePermissions("QUEUE_PRIORITY")
   @Patch(":id/priority")
   async priority(@Ctx() ctx: RequestContext, @Param("id") entryId: string, @Body() body: unknown) {
     return { data: await this.queue.setPriority(ctx, id(entryId), parse(priorityQueueSchema, body).priority) };

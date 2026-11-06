@@ -31,4 +31,7 @@ Staff: `GET /teleconsults`, `POST /teleconsults`, `POST /teleconsults/:id/join|e
 - **The video service is the hospital's responsibility.** A public video service with an unguessable room name is not private: anyone who has the link can enter. Prefer a service the hospital hosts, with a waiting room or authentication.
 - No recording, chat, file sharing or screen sharing inside MedOS; no automatic reminder messages with the link; no joint waiting room (the doctor and patient meet when both are in the room).
 - The patient must have the mobile number registered; a patient without one cannot join from the app.
-- Telemedicine practice rules (patient identity check, advice limits for certain medicines, record of the consultation mode) are for the hospital to apply; the visit does not yet record "by video" on the prescription. See `docs/backlog.md`.
+- Telemedicine practice rules (patient identity check, advice limits for certain medicines, record of the consultation mode) are for the hospital to apply. See `docs/backlog.md`.
+
+## Video consultations on the visit and the printed prescription
+The visit screen shows a **Consulted by video** badge for any visit whose appointment has a video consultation that was not cancelled. The printed prescription adds the line **Consultation: Consulted by video** only when the patient actually joined the call (a video consultation that was booked but never took place is not printed as one).

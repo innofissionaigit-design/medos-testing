@@ -37,21 +37,53 @@ x-api-environment: &api-environment
   CLAMAV_HOST: ${CLAMAV_HOST:-}                 # set to scan every upload with a ClamAV daemon
   CLAMAV_PORT: ${CLAMAV_PORT:-3310}
   REMINDER_PROVIDER: ${REMINDER_PROVIDER:-log}  # docs/follow-ups.md
+  EMAIL_PROVIDER: ${EMAIL_PROVIDER:-log}        # docs/email.md
+  EMAIL_API_URL: ${EMAIL_API_URL:-}
+  EMAIL_API_KEY: ${EMAIL_API_KEY:-}
+  EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-}
 
 x-hardening: &hardening
   security_opt: ["no-new-privileges:true"]
   cap_drop: [ALL]
 
 services:
+  # Point-in-time recovery (docs/backup.md): the database keeps every change (WAL) in its own volume, so it can be rebuilt to any moment, not only to last night's dump.
+  # The two volumes are created root-owned, so this one-off job hands them to the postgres user first; without that every archive attempt would fail and the WAL would pile up.
+  wal-archive-init:
+    image: postgres:17-alpine
+    user: "0:0"
+    entrypoint: ["sh", "-c", "chown postgres:postgres /wal-archive /base-backups && chmod 700 /wal-archive /base-backups"]
+    volumes:
+      - medos-wal-archive:/wal-archive
+      - medos-base-backups:/base-backups
+    restart: "no"
+
   db:
     image: postgres:17-alpine
     restart: unless-stopped
+    # archive_command never overwrites an archived file and fails (so PostgreSQL retries) if the copy fails. Check `SELECT * FROM pg_stat_archiver` for failed_count.
+    # A base backup (the starting point a recovery replays the archive from) is taken inside this container, where PostgreSQL allows it without a password:
+    #   docker compose exec -u postgres db sh -c 'pg_basebackup -U "$POSTGRES_USER" -D /base-backups/base-$(date -u +%Y%m%dT%H%M%SZ) -X stream -c fast'
+    command:
+      - postgres
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=60
+      - -c
+      - archive_command=test ! -f /wal-archive/%f && cp %p /wal-archive/%f
+    depends_on:
+      wal-archive-init: { condition: service_completed_successfully }
     environment:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}   # empty is refused by the image: set it in .env or use docker-compose.secrets.yml
       POSTGRES_DB: ${POSTGRES_DB:-medos}
     volumes:
       - medos-pgdata:/var/lib/postgresql/data
+      - medos-wal-archive:/wal-archive
+      - medos-base-backups:/base-backups
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -130,6 +162,8 @@ services:
 
 volumes:
   medos-pgdata:
+  medos-wal-archive:
+  medos-base-backups:
   medos-files:
   caddy-data:
   caddy-config:

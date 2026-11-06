@@ -5,6 +5,7 @@ Per-module purpose, entities, workflow and state rules, permissions and audit ev
 ## Platform (`apps/api/src/common`, `modules/auth|tenants|facilities|users|settings|numbering|audit`)
 | Concern | Behaviour |
 |---|---|
+| Sign-in and lock-out | Hospital code + username or email + password; one generic answer for every wrong detail; 5 wrong tries within 15 minutes lock the account for 15 minutes; an administrator can unlock it. See `docs/authentication.md`. |
 | Tenant context | Taken only from the authenticated session; `AuthGuard` re-reads user, tenant, facility and permissions from the database on every request. |
 | Auth | tenant code + username/email + password; scrypt hashes; 15-minute access JWT; opaque rotating refresh tokens (reuse revokes the family); lockout after repeated failures; per-route rate limits. |
 | Permissions | `packages/shared/src/permissions.ts` (single source). Roles are bundles of permissions; custom roles supported. |
@@ -55,6 +56,8 @@ Per-module purpose, entities, workflow and state rules, permissions and audit ev
 |---|---|
 | Print | Server-rendered, fully escaped HTML or PDF (`?format=pdf`) for invoice, receipt, prescription, discharge summary and patient label, from one document model; locked-down CSP; reprints are stamped "DUPLICATE COPY"; every print is audited (`DOCUMENT_PRINTED`, with its format). |
 | Reports | 14 bounded operational reports (date ranges ≤ 93 days, facility-scoped). `REPORT_READ` opens every report (Administrator, Manager); each area has its own permission: `REPORT_OPD` (OPD daily / by doctor / by department — Receptionist, Doctor), `REPORT_FINANCE` (collections with payment modes, outstanding invoices, cashier shifts — Cashier, who sees only their own shifts), `REPORT_IPD` (current admissions, admissions/discharges, bed occupancy — Receptionist, Doctor, Nurse), `REPORT_PHARMACY` (sales, stock movement, current / low / near-expiry stock — Pharmacist). Stock movement reads the stock ledger: opening, units in and out by type, closing. |
+| Notifications | A bell for staff with seven events (critical lab and radiology results, a patient in the queue, a prescription at the pharmacy, a pharmacy bill, an outside booking, an auto-cancelled booking). Written with the event, shown live over server-sent events with polling as fallback; no patient data in a notification ([`notifications.md`](notifications.md), ADR-012). |
+| Email | Emails to patients (appointment booked or cancelled, report ready, receipt): queued with the event and sent by a worker, with the patient's agreement checked twice, templates in English, Bengali and Hindi that a hospital can reword, a delivery log and a do-not-email list. No clinical content ever ([`email.md`](email.md), ADR-013). |
 | Audit viewer | Read-only list with filters; the table is append-only at the database level. |
 
 ## Known limitations

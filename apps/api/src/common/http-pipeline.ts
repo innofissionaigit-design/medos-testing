@@ -63,6 +63,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
     if (exception instanceof DomainError) {
       status = exception.httpStatus;
       body = { error: { code: exception.code, message: exception.message, details: exception.details, requestId } };
+      // Tells well-behaved clients how long to wait (RFC 9110 Retry-After, in seconds) when they are throttled.
+      const wait = (exception.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds;
+      if (status === 429 && typeof wait === "number" && Number.isFinite(wait) && wait > 0) res.setHeader("Retry-After", String(Math.ceil(wait)));
     } else if (exception instanceof ZodError) {
       const e = validationError(exception);
       status = 400;

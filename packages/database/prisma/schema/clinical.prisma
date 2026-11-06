@@ -236,10 +236,14 @@ model MedicationOrderItem {
   stoppedAt         DateTime?           @db.Timestamptz(3)
   stoppedById       String?             @db.Uuid
   stopReason        String?
+  /// Set when this item replaces another medicine of a signed prescription (docs/prescriptions.md): the replaced item is kept, stopped as "Amended".
+  amendsItemId      String?             @db.Uuid
 
   order    MedicationOrder @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Restrict)
   medicine Medicine?       @relation(fields: [medicineId], references: [id], onDelete: Restrict)
   administrations MedicationAdministration[]
+  amendsItem MedicationOrderItem?  @relation("ItemAmendment", fields: [tenantId, amendsItemId], references: [tenantId, id], onDelete: Restrict)
+  amendedBy  MedicationOrderItem[] @relation("ItemAmendment")
 
   @@unique([tenantId, id])
   @@unique([orderId, lineNo])

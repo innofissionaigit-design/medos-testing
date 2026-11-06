@@ -80,6 +80,72 @@ describe("number sequence engine", () => {
     assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "NUMBER_SEQUENCE_CONFIG_CHANGED" } }));
   });
 
+  it("restarts at 1 April when set to the financial year, using the facility's local date", async () => {
+    const put = (body: Record<string, unknown>, type = "STOCK_TRANSFER") => t.api("put", `/number-sequences/${type}`, a.admin.token).send(body);
+    assert.equal((await put({ pattern: "TRF/{FY}/{SEQ}", padding: 4, resetPolicy: "FINANCIAL_YEAR" })).status, 200);
+    const lateMarch = new Date("2027-03-31T18:00:00Z"); // 23:30 IST on 31 March 2027: still financial year 2026-27
+    const aprilFirst = new Date("2027-03-31T19:00:00Z"); // 00:30 IST on 1 April 2027: the new financial year
+    assert.equal(await next(a, "STOCK_TRANSFER", a.facilityId, new Date("2026-11-04T05:00:00Z")), "TRF/2026-27/0001");
+    assert.equal(await next(a, "STOCK_TRANSFER", a.facilityId, new Date("2027-01-15T05:00:00Z")), "TRF/2026-27/0002", "January is still the same financial year");
+    assert.equal(await next(a, "STOCK_TRANSFER", a.facilityId, lateMarch), "TRF/2026-27/0003");
+    assert.equal(await next(a, "STOCK_TRANSFER", a.facilityId, aprilFirst), "TRF/2027-28/0001");
+    assert.equal(await next(a, "STOCK_TRANSFER", a.facilityId, aprilFirst), "TRF/2027-28/0002");
+    // The restart rule and the pattern have to agree.
+    assert.equal((await put({ pattern: "TRF-{SEQ}", padding: 4, resetPolicy: "FINANCIAL_YEAR" })).status, 400, "needs {FY}");
+    assert.equal((await put({ pattern: "TRF/{FY}/{SEQ}", padding: 4, resetPolicy: "YEARLY" })).status, 400, "{FY} needs the financial-year restart");
+    assert.equal((await put({ pattern: "TRF/{FY}/{SEQ}", padding: 4, resetPolicy: "NEVER" })).status, 400);
+  });
+
+  it("changing the restart rule never issues a number that was already issued", async () => {
+    const year = new Date().getFullYear();
+    const put = (resetPolicy: string) => t.api("put", "/number-sequences/DOCTOR_PAYOUT", a.admin.token).send({ pattern: "DPV-{YEAR}-{SEQ}", padding: 6, resetPolicy });
+    assert.deepEqual([await next(a, "DOCTOR_PAYOUT"), await next(a, "DOCTOR_PAYOUT"), await next(a, "DOCTOR_PAYOUT")], [1, 2, 3].map((n) => `DPV-${year}-${String(n).padStart(6, "0")}`));
+    // Yearly -> never: the counter would start again at 1 and re-issue DPV-<year>-000001. It continues instead.
+    const never = await put("NEVER");
+    assert.equal(never.status, 200);
+    assert.equal(never.body.data.nextNumber, 4);
+    assert.equal(await next(a, "DOCTOR_PAYOUT"), `DPV-${year}-000004`);
+    const back = await put("YEARLY");
+    assert.equal(back.body.data.nextNumber, 5, "and back again");
+    assert.equal(await next(a, "DOCTOR_PAYOUT"), `DPV-${year}-000005`);
+    const evt = await t.prisma.auditEvent.findFirstOrThrow({ where: { tenantId: a.tenantId, action: "NUMBER_SEQUENCE_CONFIG_CHANGED", entityId: "DOCTOR_PAYOUT" }, orderBy: { createdAt: "desc" } });
+    assert.deepEqual((evt.metadata as { restart: string[] }).restart, ["NEVER", "YEARLY"]);
+  });
+
+  it("an administrator can continue an existing series: the next number can be raised, never lowered, and stays gap-free and unique under load", async () => {
+    const year = new Date().getFullYear();
+    const put = (nextNumber: number) => t.api("put", "/number-sequences/CLAIM", a.admin.token).send({ pattern: "CLM-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY", nextNumber });
+    const raised = await put(1500);
+    assert.deepEqual([raised.status, raised.body.data.nextNumber], [200, 1500]);
+    const shown = (await t.api("get", "/number-sequences", a.admin.token)).body.data.find((x: { type: string }) => x.type === "CLAIM");
+    assert.deepEqual([shown.nextNumber, shown.example], [1500, `CLM-${year}-001500`], "the list shows what comes next");
+    assert.equal(await next(a, "CLAIM"), `CLM-${year}-001500`);
+    const lower = await put(10);
+    assert.equal(lower.body.data.nextNumber, 1501, "a lower number is ignored: issued numbers are never issued again");
+    const batch = await Promise.all(Array.from({ length: 12 }, () => next(a, "CLAIM")));
+    assert.deepEqual(batch.map((n) => Number(n.split("-").pop())).sort((x, y) => x - y), Array.from({ length: 12 }, (_, i) => 1501 + i));
+    assert.equal((await put(0)).status, 400);
+    const fresh = (await t.api("get", "/number-sequences", a.admin.token)).body.data.find((x: { type: string }) => x.type === "LAB_ACCESSION");
+    assert.equal(fresh.nextNumber, 1, "an unused series starts at 1");
+    const unchanged = (await t.api("get", "/number-sequences", a.admin.token)).body.data;
+    assert.equal(unchanged.find((x: { type: string }) => x.type === "LAB_ACCESSION").isDefault, true, "an unchanged format is not shown as custom");
+    assert.equal(unchanged.find((x: { type: string }) => x.type === "STOCK_TRANSFER").isDefault, false, "a changed one is");
+  });
+
+  it("bills that carry GST keep to the 16 character rule: only letters, digits, - and /", async () => {
+    const put = (type: string, pattern: string, padding = 6) => t.api("put", `/number-sequences/${type}`, a.admin.token).send({ pattern, padding, resetPolicy: pattern.includes("{YEAR}") ? "YEARLY" : "NEVER" });
+    const long = await put("INVOICE", "INVOICE/{FACILITY}/{YEAR}/{SEQ}");
+    assert.equal(long.status, 400);
+    assert.match(long.body.error.message, /at most 16 characters/);
+    assert.equal((await put("INVOICE", "INV_{YEAR}_{SEQ}")).status, 400, "underscore is not allowed");
+    assert.equal((await put("CREDIT_NOTE", "CN.{SEQ}")).status, 400, "nor a dot");
+    assert.equal((await put("INVOICE", "INV/{YEAR}/{SEQ}", 8)).status, 400, "INV/2026/ + 8 digits is 17");
+    assert.equal((await put("INVOICE", "INV/{YEAR}/{SEQ}", 7)).status, 200, "exactly 16 is fine");
+    assert.equal((await put("INVOICE", "INV-{YEAR}-{SEQ}", 6)).status, 200, "the default shape");
+    // Other records are not tax bills and may be longer.
+    assert.equal((await put("PURCHASE", "PURCHASE/{FACILITY}/{YEAR}/{SEQ}", 8)).status, 200);
+  });
+
   it("rejects unsafe or collision-prone configurations", async () => {
     const bad = [
       { pattern: "NOSEQ-{YEAR}", padding: 6, resetPolicy: "YEARLY" },

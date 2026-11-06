@@ -8,6 +8,7 @@ import { PatientPicker, type PickedPatient } from "@/components/pickers";
 import { CashierPrescriptions } from "@/components/cashier-prescriptions";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api } from "@/lib/api";
+import { useT, T } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
 
 interface InvoiceRow { id: string; invoiceNumber: string | null; status: string; kind: string; patientName: string; mrn: string | null; total: string; balanceDue: string; createdAt: string }
@@ -135,6 +136,7 @@ function UnbilledCard() {
 
 function BillingInner() {
   const { can, money, date } = useMe();
+  const t = useT();
   const router = useRouter();
   const params = useSearchParams();
   const [adding, setAdding] = useState(!!params.get("patient"));
@@ -153,7 +155,7 @@ function BillingInner() {
       {waitingCount > 0 && (
         <div className="mb-3"><Notice tone="warn">
           {waitingCount} pharmacy {waitingCount === 1 ? "bill is" : "bills are"} waiting for payment. The pharmacy does not take payment; collect it here.{" "}
-          <button className="font-medium underline" onClick={() => { setKind("PHARMACY"); setStatus("OUTSTANDING"); }}>Show them</button>
+          <button className="font-medium underline" onClick={() => { setKind("PHARMACY"); setStatus("OUTSTANDING"); }}><T>Show them</T></button>
         </Notice></div>
       )}
       {can("TEST_BILL") && <div className="mb-4"><CashierPrescriptions /></div>}
@@ -168,7 +170,7 @@ function BillingInner() {
               <Table head={["Bill", "Patient", "Status", "Total", "Due", "Date"]} {...(list.data?.data.length === 0 ? { empty: "No bills found." } : {})}>
                 {list.data?.data.map((i) => (
                   <tr key={i.id} className="hover:bg-slate-50">
-                    <Td><Link className="font-medium text-brand-700 hover:underline" href={`/billing/${i.id}`}>{i.invoiceNumber ?? "Draft"}</Link> <Badge>{i.kind.toLowerCase()}</Badge></Td>
+                    <Td><Link className="font-medium text-brand-700 hover:underline" href={`/billing/${i.id}`}>{i.invoiceNumber ?? t("Draft")}</Link> <Badge>{i.kind.toLowerCase()}</Badge></Td>
                     <Td>{i.patientName}<div className="text-xs text-slate-500">{i.mrn}</div></Td><Td><StatusBadge value={i.status} /></Td><Td>{money(i.total)}</Td><Td>{money(i.balanceDue)}</Td><Td>{date(i.createdAt)}</Td>
                   </tr>
                 ))}

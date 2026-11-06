@@ -13,6 +13,8 @@ const schema = z.object({
   REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(7 * 24 * 3600),
   LOGIN_MAX_FAILURES: z.coerce.number().int().positive().default(5),
   LOGIN_LOCK_SECONDS: z.coerce.number().int().positive().default(900),
+  /** Wrong passwords count towards a lock only if they are this close together; an occasional typo weeks apart never locks anyone. */
+  LOGIN_FAILURE_WINDOW_SECONDS: z.coerce.number().int().positive().default(900),
   RATE_LIMIT_ENABLED: z.enum(["true", "false"]).default("true").transform((v) => v === "true"),
   // "database" shares the allowance across every API instance; "memory" counts per process (single instance only).
   RATE_LIMIT_STORE: z.enum(["database", "memory"]).default("database"),
@@ -67,6 +69,15 @@ const schema = z.object({
   MESSAGE_API_URL: z.string().url().optional(),
   MESSAGE_API_KEY: z.string().min(1).optional(),
   MESSAGE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
+  // Email (docs/email.md). "log" records what would be sent and sends nothing; "http" posts each email to EMAIL_API_URL (EMAIL_API_KEY, or EMAIL_API_KEY_FILE, is sent as a bearer token).
+  // EMAIL_FROM_ADDRESS is the sender address the hospital has verified with its email service (SPF, DKIM and DMARC are set in DNS, not here).
+  EMAIL_PROVIDER: z.enum(["log", "http"]).default("log"),
+  EMAIL_API_URL: z.string().url().optional(),
+  EMAIL_API_KEY: z.string().min(1).optional(),
+  EMAIL_FROM_ADDRESS: z.string().email().optional(),
+  EMAIL_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
+  EMAIL_WORKER_ENABLED: z.enum(["true", "false"]).default("true").transform((v) => v === "true"),
+  EMAIL_POLL_SECONDS: z.coerce.number().int().min(5).max(3600).default(30),
   /** The website's public address, used in links sent to patients. Defaults to the first CORS origin. */
   PUBLIC_WEB_URL: z.string().url().optional(),
   /** Base of the payment link text. The default is deliberately not a real address. */
@@ -82,6 +93,8 @@ const checked = schema.superRefine((c, ctx) => {
   if (c.STORAGE_DRIVER === "s3" && !c.S3_REGION) ctx.addIssue({ code: "custom", path: ["S3_REGION"], message: "is required when STORAGE_DRIVER=s3" });
   if (c.OCR_PROVIDER === "http" && !c.OCR_API_URL) ctx.addIssue({ code: "custom", path: ["OCR_API_URL"], message: "OCR_API_URL is required when OCR_PROVIDER=http" });
   if (c.MESSAGE_PROVIDER === "http" && !c.MESSAGE_API_URL) ctx.addIssue({ code: "custom", path: ["MESSAGE_API_URL"], message: "MESSAGE_API_URL is required when MESSAGE_PROVIDER=http" });
+  if (c.EMAIL_PROVIDER === "http" && !c.EMAIL_API_URL) ctx.addIssue({ code: "custom", path: ["EMAIL_API_URL"], message: "EMAIL_API_URL is required when EMAIL_PROVIDER=http" });
+  if (c.EMAIL_PROVIDER === "http" && !c.EMAIL_FROM_ADDRESS) ctx.addIssue({ code: "custom", path: ["EMAIL_FROM_ADDRESS"], message: "EMAIL_FROM_ADDRESS is required when EMAIL_PROVIDER=http" });
   if (!!c.S3_ACCESS_KEY_ID !== !!c.S3_SECRET_ACCESS_KEY) ctx.addIssue({ code: "custom", path: ["S3_SECRET_ACCESS_KEY"], message: "S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY must be set together" });
   if (c.S3_KMS_KEY_ID && c.S3_SSE !== "aws:kms") ctx.addIssue({ code: "custom", path: ["S3_KMS_KEY_ID"], message: "needs S3_SSE=aws:kms" });
   if (c.NODE_ENV === "production" && c.ARGON2_MEMORY_KIB < 19_456) ctx.addIssue({ code: "custom", path: ["ARGON2_MEMORY_KIB"], message: "must be at least 19456 in production" });
@@ -105,7 +118,7 @@ const checked = schema.superRefine((c, ctx) => {
 const PLACEHOLDER_SECRET = /change-?me|dev-only|ci-only|e2e-only|unit-test|test-access|example|password|x{8,}/i;
 
 /** Settings that may instead be given as `<NAME>_FILE`, the path of a file holding the value (Docker and Kubernetes secrets). */
-const FILE_SECRETS = ["DATABASE_URL", "JWT_ACCESS_SECRET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "OCR_API_KEY", "MESSAGE_API_KEY", "SECRETS_ENCRYPTION_KEY"] as const;
+const FILE_SECRETS = ["DATABASE_URL", "JWT_ACCESS_SECRET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "OCR_API_KEY", "MESSAGE_API_KEY", "EMAIL_API_KEY", "SECRETS_ENCRYPTION_KEY"] as const;
 
 /**
  * Empty values count as unset (Docker passes an empty string for a variable that is merely declared), and `<NAME>_FILE`

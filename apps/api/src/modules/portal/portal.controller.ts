@@ -3,7 +3,7 @@ import { Ctx, id, parse, Public, RateLimit, RequirePermissions } from "../../com
 import type { RequestContext } from "../../common/request-context";
 import { patientJoinSchema, TelemedicineService } from "../telemedicine/telemedicine.service";
 import {
-  handleRequestSchema, listRequestsSchema, otpRequestSchema, otpVerifySchema, patientQuerySchema, PortalAuthService, PortalGuard, type PortalRequest, PortalService, requestSchema,
+  handleRequestSchema, listRequestsSchema, otpRequestSchema, otpVerifySchema, patientQuerySchema, PortalAuthService, PortalGuard, type PortalRequest, PortalService, requestSchema, unlockSchema,
 } from "./portal.service";
 
 /** The patient app's sign-in (docs/patient-app.md). Public: it is how a patient gets a session. */
@@ -36,6 +36,13 @@ export class PortalController {
   @Public()
   @Get("me")
   async me(@Req() req: PortalRequest) { return { data: await this.portal.profiles(this.session(req)) }; }
+
+  /** Confirms one patient's date of birth so that patient's records open in this session (needed when several people share the number). */
+  @Public()
+  @RateLimit({ limit: 10, windowMs: 60_000, by: "session" })
+  @Post("unlock")
+  @HttpCode(200)
+  async unlock(@Req() req: PortalRequest, @Body() body: unknown) { return { data: await this.auth.unlock(this.session(req), parse(unlockSchema, body)) }; }
 
   @Public()
   @Post("logout")

@@ -1,17 +1,4 @@
-"use client";
-import { useState } from "react";
-import { Gate } from "@/components/gate";
-import { RadCritical, RadWorklist } from "@/components/radiology";
-import { PageHeader, Tabs } from "@/components/ui";
+import { redirect } from "next/navigation";
 
-export default function RadiologyPage() {
-  const [tab, setTab] = useState<"work" | "critical">("work");
-  return (
-    <Gate anyOf={["RAD_READ"]}>
-      <PageHeader title="Radiology" />
-      <Tabs tabs={[{ id: "work", label: "Work list" }, { id: "critical", label: "Critical findings" }]} value={tab} onChange={setTab} />
-      {tab === "work" && <RadWorklist />}
-      {tab === "critical" && <RadCritical />}
-    </Gate>
-  );
-}
+/** Radiology is now a branch of LIS; the old address keeps working. */
+export default function RadiologyRedirect() { redirect("/lis?branch=radiology"); }

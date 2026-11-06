@@ -1,6 +1,7 @@
 import { Injectable } from "@nestjs/common";
-import { Decimal, DomainError } from "@medos/shared";
+import { Decimal, DomainError, type Permission } from "@medos/shared";
 import { z } from "zod";
+import { actorOf, AuditService } from "../../common/audit.service";
 import { PrismaService } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { admissionScopeSql, visitScopeSql } from "../../common/data-scope";
@@ -16,11 +17,33 @@ export const rangeSchema = z.object({ from: day.optional(), to: day.optional() }
 export const expirySchema = z.object({ withinDays: z.coerce.number().int().min(1).max(730).default(90) }).strict();
 export const outstandingSchema = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25) }).strict();
 
+/** What a person is recording when they download a report as a file (the file itself is built on their computer, so the server is told). */
+export const exportLogSchema = z.object({ report: z.string().regex(/^[a-z-]{2,30}$/), from: day.optional(), to: day.optional(), rows: z.number().int().min(0).max(1_000_000) }).strict();
+
+/** The permission that opens each report on the Reports page; REPORT_READ opens all of them except a doctor's own "my" reports. */
+const EXPORT_PERMISSION: Record<string, Permission> = {
+  "bookings-earnings": "REPORT_FINANCE", "my-bookings": "REPORT_MY_PRACTICE", "my-payouts": "REPORT_MY_PRACTICE",
+  "opd-daily": "REPORT_OPD", "opd-doctor": "REPORT_OPD", "opd-dept": "REPORT_OPD",
+  collections: "REPORT_FINANCE", registrations: "REPORT_FINANCE", "fee-skips": "REPORT_FINANCE", shifts: "REPORT_FINANCE", outstanding: "REPORT_FINANCE",
+  "cur-adm": "REPORT_IPD", "adm-dis": "REPORT_IPD", occupancy: "REPORT_IPD",
+  sales: "REPORT_PHARMACY", movement: "REPORT_PHARMACY", stock: "REPORT_PHARMACY", low: "REPORT_PHARMACY", expiry: "REPORT_PHARMACY",
+};
+
 interface Range { from: string; to: string; start: Date; end: Date; tz: string }
 
 @Injectable()
 export class ReportsService {
-  constructor(private readonly prisma: PrismaService, private readonly earnings: EarningsService) {}
+  constructor(private readonly prisma: PrismaService, private readonly earnings: EarningsService, private readonly audit: AuditService) {}
+
+  /** Writes "report exported" to the audit trail: who, which report, which dates, how many rows. The rows themselves are never stored. */
+  async logExport(ctx: RequestContext, q: z.infer<typeof exportLogSchema>): Promise<{ logged: true }> {
+    const need = EXPORT_PERMISSION[q.report];
+    if (!need) throw new DomainError("VALIDATION_FAILED", "Unknown report", 400);
+    const mayOpen = ctx.permissions.has(need) || (need !== "REPORT_MY_PRACTICE" && ctx.permissions.has("REPORT_READ"));
+    if (!mayOpen) throw new DomainError("FORBIDDEN", "You do not have permission to perform this action", 403);
+    await this.audit.recordStandalone(actorOf(ctx), { action: "REPORT_EXPORTED", entityType: "Report", metadata: { report: q.report, ...(q.from ? { from: q.from } : {}), ...(q.to ? { to: q.to } : {}), rows: q.rows } });
+    return { logged: true };
+  }
 
   /** Facility-local calendar range (default: today). Bounds are converted to UTC instants once. */
   private async range(ctx: RequestContext, q: z.infer<typeof rangeSchema>): Promise<Range> {

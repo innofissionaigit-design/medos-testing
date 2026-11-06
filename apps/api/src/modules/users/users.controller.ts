@@ -70,6 +70,12 @@ export class UsersController {
     await this.users.resetPassword(ctx, id(userId), parse(resetPasswordSchema, body));
   }
 
+  /** Ends a lock-out now (docs/authentication.md). */
+  @RequirePermissions("ADMIN_USERS")
+  @Post("users/:id/unlock")
+  @HttpCode(200)
+  async unlock(@Ctx() ctx: RequestContext, @Param("id") userId: string) { return { data: await this.users.unlock(ctx, id(userId)) }; }
+
   /** The permission names a role can hold (for the role editor). */
   @RequirePermissions("ADMIN_USERS")
   @Get("permissions")

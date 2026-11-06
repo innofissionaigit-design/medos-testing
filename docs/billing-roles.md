@@ -7,3 +7,7 @@
 
 Existing hospitals: migration `20261030120000_pharmacy_bills_cashier_collects` removes those four permissions from the built-in Pharmacist role and records a `SYSTEM_ROLE_PERMISSIONS_CHANGED` audit event. A hospital that gave them to a custom role keeps that choice.
 * **Only billing staff and administrators raise the final IPD bill.** The route `POST /admissions/:id/discharge/final-invoice` needs the permission `IPD_FINAL_BILL`, held by the Cashier and Administrator roles (migration `20261031100000_ipd_final_bill_permission`; hospital-made roles that could create and issue bills keep it). Reception can issue and collect OPD and desk bills (`INVOICE_ISSUE`, `PAYMENT_CREATE`) but is refused (403) on the final IPD bill, and the Generate final bill button is hidden for it.
+
+## Cancelling a paid bill (decision 6 Nov 2026)
+
+Cancelling a bill that has received money needs two people on purpose: the **Cashier** gives the money back (Refund, with the transaction reference for UPI, card or bank), then the **Manager** cancels the bill (`INVOICE_CANCEL`) or issues a credit note (`INVOICE_ADJUST`). No single built-in role holds both `PAYMENT_REFUND` and `INVOICE_CANCEL`, so one login cannot cancel an invoice and take the cash out. A hospital that wants one person to do both can give a custom role both permissions under Administration.

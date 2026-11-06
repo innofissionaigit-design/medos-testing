@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
  * The patient app (docs/patient-app.md). A phone-first page for patients: sign in with a code sent to the mobile number the hospital has on record, then see
  * appointments, visits and prescriptions, reports and bills, and ask for an appointment. It has its own cookie and talks only to /api/patient/*.
  */
-interface Profile { id: string; name: string; mrn: string | null; gender: string; age: number | null }
+interface Profile { id: string; name: string; mrn: string | null; gender: string | null; age: number | null; locked: boolean; canUnlock: boolean }
 interface Me { hospital: string | null; patients: Profile[] }
 interface Appt { id: string; startAt: string; status: string; type: string; doctor: string; specialty: string | null; video: { id: string; status: string; consented: boolean; opensAt: string; canJoin: boolean } | null }
 interface Visit { id: string; visitNumber: string; date: string; doctor: string | null; diagnoses: string[]; advice: string | null; prescription: { number: string | null; medicines: { name: string; dose: string; frequency: string; days: number | null; food: string | null; note: string | null }[] } | null }
@@ -62,6 +62,25 @@ function SignIn({ onDone }: { onDone: () => void }) {
         </div>
       </Card>
     </main>
+  );
+}
+
+/** A number can be shared by a family: the code proves the phone, so each person confirms their own date of birth before their records open. */
+function Unlock({ profile, onDone }: { profile: Profile; onDone: () => void }) {
+  const [dob, setDob] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const submit = async () => { setBusy(true); setErr(null); try { await call("POST", "unlock", { patientId: profile.id, dateOfBirth: dob }); onDone(); } catch (e) { setErr(e instanceof Error ? e.message : "Something went wrong"); } finally { setBusy(false); } };
+  if (!profile.canUnlock) return <Card title={profile.name}><p className="text-sm text-slate-600">To protect your records, please ask the hospital front desk to add your date of birth. Then you can open them here.</p></Card>;
+  return (
+    <Card title={`Open ${profile.name}'s records`}>
+      <div className="space-y-3">
+        <p className="text-sm text-slate-600">Several people use this mobile number. To protect your records, please confirm your date of birth.</p>
+        <label className="block text-sm">Date of birth<input type="date" className={field} max={new Date().toISOString().slice(0, 10)} value={dob} onChange={(e) => setDob(e.target.value)} /></label>
+        {err && <p role="alert" className="rounded-lg bg-red-50 p-2 text-sm text-red-800">{err}</p>}
+        <Btn disabled={busy || !dob} onClick={() => void submit()}>Open records</Btn>
+      </div>
+    </Card>
   );
 }
 
@@ -198,17 +217,18 @@ export default function PatientApp() {
   return (
     <main className="mx-auto max-w-md space-y-4 p-4 pb-16">
       <header className="flex items-start justify-between gap-2 pt-2">
-        <div><div className="text-xs text-slate-500">{me.hospital}</div><h1 className="text-xl font-semibold">{current?.name ?? "Patient"}</h1>{current && <div className="text-xs text-slate-500">{current.mrn}{current.age !== null ? ` · ${current.age} yrs` : ""}</div>}</div>
+        <div><div className="text-xs text-slate-500">{me.hospital}</div><h1 className="text-xl font-semibold">{current?.name ?? "Patient"}</h1>{current && !current.locked && <div className="text-xs text-slate-500">{current.mrn}{current.age !== null ? ` · ${current.age} yrs` : ""}</div>}</div>
         <Btn kind="plain" onClick={() => void signOut()}>Sign out</Btn>
       </header>
-      {me.patients.length > 1 && <label className="block text-sm">Showing records of<select className={field} value={pid} onChange={(e) => setPid(e.target.value)}>{me.patients.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.mrn}</option>)}</select></label>}
-      <nav className="grid grid-cols-4 gap-1 rounded-xl bg-slate-200 p-1 text-sm" role="tablist">
+      {me.patients.length > 1 && <label className="block text-sm">Showing records of<select className={field} value={pid} onChange={(e) => setPid(e.target.value)}>{me.patients.map((p) => <option key={p.id} value={p.id}>{p.name}{p.mrn ? ` · ${p.mrn}` : ""}</option>)}</select></label>}
+      {current?.locked && <Unlock profile={current} key={`u${current.id}`} onDone={load} />}
+      {!current?.locked && <nav className="grid grid-cols-4 gap-1 rounded-xl bg-slate-200 p-1 text-sm" role="tablist">
         {([["appointments", "Visits to come"], ["visits", "Prescriptions"], ["reports", "Reports"], ["bills", "Bills"]] as const).map(([k, l]) => <button key={k} role="tab" aria-selected={tab === k} onClick={() => setTab(k)} className={`min-h-11 rounded-lg px-1 ${tab === k ? "bg-white font-medium shadow-sm" : "text-slate-700"}`}>{l}</button>)}
-      </nav>
-      {pid && tab === "appointments" && <Appointments patientId={pid} key={`a${pid}`} />}
-      {pid && tab === "visits" && <Visits patientId={pid} key={`v${pid}`} />}
-      {pid && tab === "reports" && <ReportsTab patientId={pid} key={`r${pid}`} />}
-      {pid && tab === "bills" && <Bills patientId={pid} key={`b${pid}`} />}
+      </nav>}
+      {pid && !current?.locked && tab === "appointments" && <Appointments patientId={pid} key={`a${pid}`} />}
+      {pid && !current?.locked && tab === "visits" && <Visits patientId={pid} key={`v${pid}`} />}
+      {pid && !current?.locked && tab === "reports" && <ReportsTab patientId={pid} key={`r${pid}`} />}
+      {pid && !current?.locked && tab === "bills" && <Bills patientId={pid} key={`b${pid}`} />}
     </main>
   );
 }
