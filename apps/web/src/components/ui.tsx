@@ -1,16 +1,16 @@
 "use client";
 import clsx from "clsx";
-import { Children, cloneElement, forwardRef, isValidElement, useEffect, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
+import { Children, cloneElement, forwardRef, isValidElement, useEffect, useRef, useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes, type TextareaHTMLAttributes } from "react";
 import { errorText } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 
 // ───── buttons ─────
 type Variant = "primary" | "secondary" | "danger" | "ghost";
 const VARIANTS: Record<Variant, string> = {
-  primary: "bg-brand-600 text-white hover:bg-brand-700 disabled:bg-slate-300",
-  secondary: "bg-white text-slate-800 border border-slate-300 hover:bg-slate-50 disabled:text-slate-400",
-  danger: "bg-red-600 text-white hover:bg-red-700 disabled:bg-slate-300",
-  ghost: "text-brand-700 hover:bg-brand-50 disabled:text-slate-400",
+  primary: "bg-brand-600 text-white hover:bg-brand-700 disabled:bg-slate-200 disabled:text-slate-600",
+  secondary: "bg-white text-slate-800 border border-slate-300 hover:bg-slate-50 disabled:text-slate-500",
+  danger: "bg-red-600 text-white hover:bg-red-700 disabled:bg-slate-200 disabled:text-slate-600",
+  ghost: "text-brand-700 hover:bg-brand-50 disabled:text-slate-500",
 };
 export function Button({ variant = "primary", loading, className, children, ...p }: ButtonHTMLAttributes<HTMLButtonElement> & { variant?: Variant; loading?: boolean }) {
   const t = useT();
@@ -126,10 +126,28 @@ export function Spinner() { const t = useT(); return <div className="p-6 text-ce
 
 export function Modal({ title, onClose, children, wide }: { title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   const tr = useT();
+  const box = useRef<HTMLDivElement>(null);
   useEffect(() => { const k = (e: KeyboardEvent) => e.key === "Escape" && onClose(); window.addEventListener("keydown", k); return () => window.removeEventListener("keydown", k); }, [onClose]);
+  // Keyboard users must not leave the dialog by Tab: focus moves in when it opens, wraps at both ends, and returns to where it was when it closes.
+  useEffect(() => {
+    const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusable = () => [...(box.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])].filter((el) => el.offsetParent !== null || el === document.activeElement);
+    if (!box.current?.contains(document.activeElement)) (focusable()[0] ?? box.current)?.focus();
+    const trap = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      if (items.length === 0) { e.preventDefault(); box.current?.focus(); return; }
+      const first = items[0]!, last = items[items.length - 1]!;
+      const inside = box.current?.contains(document.activeElement) ?? false;
+      if (e.shiftKey && (document.activeElement === first || !inside)) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && (document.activeElement === last || !inside)) { e.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", trap);
+    return () => { document.removeEventListener("keydown", trap); if (before && document.contains(before)) before.focus(); };
+  }, []);
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 pt-16" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={clsx("w-full rounded-lg bg-white shadow-xl", wide ? "max-w-3xl" : "max-w-lg")}>
+      <div ref={box} tabIndex={-1} className={clsx("w-full rounded-lg bg-white shadow-xl focus:outline-none", wide ? "max-w-3xl" : "max-w-lg")}>
         <header className="flex items-center justify-between border-b border-slate-100 px-4 py-3"><h2 className="font-semibold">{tr(title)}</h2><button aria-label="Close" className="text-slate-500 hover:text-slate-800" onClick={onClose}>✕</button></header>
         <div className="p-4">{children}</div>
       </div>

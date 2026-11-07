@@ -411,6 +411,9 @@ describe("pharmacy: masters, stock ledger, procurement, dispensing", () => {
       assert.equal(d.invoice.status, "ISSUED", "the bill is issued and waits for the cashier");
       assert.equal(d.invoice.paidTotal, "0.00");
       assert.match(d.invoice.invoiceNumber, /^INV-/);
+      // The cashiers are told a bill is waiting (once); the pharmacist who dispensed is not (notifications.md).
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: cashier.id, type: "PHARMACY_BILL_WAITING", entityId: d.invoiceId } }), 1);
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: pharm.id, entityId: d.invoiceId } }), 0);
       assert.equal(r.body.data.receipt, undefined, "the pharmacy never produces a receipt");
       // The pharmacy cannot take payment in any way.
       assert.equal((await dispense({ patientId: patient.id, items: [{ medicineId: m.id, quantity: 1 }], payments: [{ method: "UPI", amount: "9.35", reference: "UPI-PH-0002" }] })).status, 400, "payments are not accepted when dispensing");

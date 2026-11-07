@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
 import { patientName, type PatientRow } from "./shell";
 import { ErrorNote, Input, Spinner, useDebounced } from "./ui";
@@ -10,6 +11,8 @@ export interface PickedPatient { id: string; name: string; mrn: string | null }
 
 /** Type-ahead patient selector (MRN, mobile or name). Calls onPick with the chosen patient. */
 export function PatientPicker({ value, onPick, autoFocus }: { value: PickedPatient | null; onPick: (p: PickedPatient | null) => void; autoFocus?: boolean }) {
+  const { can } = useMe();
+  const t = useT();
   const [q, setQ] = useState("");
   const term = useDebounced(q.trim(), 250);
   const res = useQuery({ queryKey: ["picker-patients", term], queryFn: () => api.page<PatientRow>("/patients", { q: term, pageSize: 6 }), enabled: term.length >= 2 && !value });
@@ -27,7 +30,7 @@ export function PatientPicker({ value, onPick, autoFocus }: { value: PickedPatie
       {term.length >= 2 && (
         <ul className="absolute z-30 mt-1 max-h-60 w-full overflow-auto rounded-md border border-slate-200 bg-white shadow-lg">
           {res.isLoading && <li className="px-3 py-2 text-sm text-slate-500">Searching…</li>}
-          {res.data?.data.length === 0 && <li className="px-3 py-2 text-sm text-slate-500">No patients found</li>}
+          {res.data?.data.length === 0 && <li className="px-3 py-2 text-sm text-slate-500">{t("No patients found")}{can("PATIENT_CREATE") && <> · <a className="text-brand-700 hover:underline" href="/patients?register=1" target="_blank" rel="noreferrer">{t("Register a new patient")}</a></>}</li>}
           {res.data?.data.map((p) => (
             <li key={p.id} className="cursor-pointer px-3 py-1.5 text-sm hover:bg-brand-50" onClick={() => onPick({ id: p.id, name: patientName(p), mrn: p.mrn })}>
               {patientName(p)} <span className="text-slate-500">· {p.mrn} · {p.mobile ?? "no mobile"}</span>

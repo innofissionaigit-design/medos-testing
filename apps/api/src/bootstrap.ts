@@ -23,8 +23,11 @@ export async function createApp(): Promise<NestExpressApplication> {
   // Raw file bodies (PNG/JPEG/PDF) are accepted only on the patient file upload route, only from callers that sent credentials
   // (so anonymous requests cannot make the server buffer large bodies), and only up to the size limit.
   const rawFiles = raw({ type: ["image/png", "image/jpeg", "application/pdf"], limit: "6mb" });
-  const authedOnly: RequestHandler = (req, res, next) => (req.method === "POST" && req.headers.authorization && /^\/api\/v1\/(patients\/[^/]+\/files|encounters\/[^/]+\/prescription-scans)\/?$/.test(req.path) ? rawFiles(req, res, next) : next());
+  const authedOnly: RequestHandler = (req, res, next) => (req.method === "POST" && req.headers.authorization && /^\/api\/v1\/(patients\/[^/]+\/files|encounters\/[^/]+\/prescription-scans|claims\/[^/]+\/documents)\/?$/.test(req.path) ? rawFiles(req, res, next) : next());
   app.use(authedOnly);
+  // Radiology images (docs/radiology.md): PNG, JPEG or DICOM, up to 10 MB, only on the study image upload route and only with credentials.
+  const rawRad = raw({ type: ["image/png", "image/jpeg", "application/dicom"], limit: "11mb" });
+  app.use(((req, res, next) => (req.method === "POST" && req.headers.authorization && /^\/api\/v1\/rad\/studies\/[^/]+\/images\/?$/.test(req.path) ? rawRad(req, res, next) : next())) as RequestHandler);
   // CSV imports (docs/import.md): same rule, own limit.
   const rawCsv = raw({ type: ["text/csv"], limit: "5mb" });
   app.use(((req, res, next) => (req.method === "POST" && req.headers.authorization && /^\/api\/v1\/imports\/[^/]+\/?$/.test(req.path) ? rawCsv(req, res, next) : next())) as RequestHandler);

@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apptStatus, RemindersModal } from "@/components/follow-up-extras";
 import { Gate } from "@/components/gate";
@@ -8,6 +8,7 @@ import { FeeLine, SkipFeeModal, TakeFeeModal, type FeeInfo } from "@/components/
 import { DuplicateBookingNotice, isDuplicateBooking } from "@/components/booking-guard";
 import { GiveBackDeposit } from "@/components/advance-extras";
 import { AppointmentRequestsCard } from "@/components/appointment-requests";
+import { DoctorSchedules } from "@/components/doctor-schedules";
 import { MakeVideoButton } from "@/components/telemedicine";
 import { Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api, newKey } from "@/lib/api";
@@ -19,6 +20,17 @@ interface Doc { id: string; displayName: string }
 
 interface Booked { startAt: string; patientName: string; practitionerName: string }
 
+/** The UTC moment of a wall-clock time ("2026-11-05", "09:40") in a time zone. */
+function zonedToIso(day: string, hm: string, tz: string): string {
+  const [y, mo, d] = day.split("-").map(Number) as [number, number, number];
+  const [h, mi] = hm.split(":").map(Number) as [number, number];
+  const guess = Date.UTC(y, mo - 1, d, h, mi);
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: tz, hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).formatToParts(new Date(guess));
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+  const shown = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"));
+  return new Date(guess - (shown - guess)).toISOString();
+}
+
 function Book({ date, onClose, onBooked }: { date: string; onClose: () => void; onBooked: (b: Booked) => void }) {
   const qc = useQueryClient();
   const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<Doc[]>("/practitioners") });
@@ -27,10 +39,29 @@ function Book({ date, onClose, onBooked }: { date: string; onClose: () => void; 
   const [day, setDay] = useState(date);
   const [slot, setSlot] = useState("");
   const slots = useQuery({ queryKey: ["slots", doc, day], queryFn: () => api.get<Slot[]>(`/practitioners/${doc}/availability`, { date: day }), enabled: !!doc });
-  const { dateTime } = useMe();
+  const { dateTime, can, me } = useMe();
+  // An exception: a time outside the doctor's free times, for people who hold APPOINTMENT_OVERBOOK. It needs a reason and is audited.
+  const [exception, setException] = useState(false);
+  const [exTime, setExTime] = useState("09:00");
+  const [exMinutes, setExMinutes] = useState("15");
+  const [exReason, setExReason] = useState("");
+  const tz = me.facility?.timezone ?? me.tenant.timezone;
+  // One key for one exact request: if the answer is lost and the button is pressed again, the first booking is returned instead of a second attempt failing as "already booked".
+  const keys = useRef(new Map<string, string>());
   const book = useMutation({
-    mutationFn: (override?: string) => api.post<Booked>("/appointments", { patientId: patient!.id, practitionerId: doc, startAt: slot, ...(override ? { duplicateOverride: { reason: override } } : {}) }),
+    mutationFn: (override?: string) => {
+      const chosen = slots.data?.find((s) => s.startAt === slot);
+      const minutes = chosen ? Math.round((new Date(chosen.endAt).getTime() - new Date(chosen.startAt).getTime()) / 60_000) : undefined;
+      const body = exception
+        ? { patientId: patient!.id, practitionerId: doc, startAt: zonedToIso(day, exTime, tz), durationMinutes: Number(exMinutes), overbook: { reason: exReason.trim() }, ...(override ? { duplicateOverride: { reason: override } } : {}) }
+        : { patientId: patient!.id, practitionerId: doc, startAt: slot, ...(minutes ? { durationMinutes: minutes } : {}), ...(override ? { duplicateOverride: { reason: override } } : {}) };
+      const sig = JSON.stringify(body);
+      if (!keys.current.has(sig)) keys.current.set(sig, newKey());
+      return api.post<Booked>("/appointments", body, keys.current.get(sig));
+    },
     onSuccess: async (b) => { await qc.invalidateQueries({ queryKey: ["appointments"] }); onBooked(b); onClose(); },
+    // Someone else may have just taken the time: show what is free now and make the person choose again.
+    onError: async (e) => { if ((e as { code?: string }).code === "SLOT_UNAVAILABLE") { await qc.invalidateQueries({ queryKey: ["slots"] }); setSlot(""); } },
   });
   return (
     <Modal title="Book appointment" onClose={onClose} wide>
@@ -38,7 +69,17 @@ function Book({ date, onClose, onBooked }: { date: string; onClose: () => void; 
         <div className="sm:col-span-2"><Field as="div" label="Patient"><PatientPicker value={patient} onPick={setPatient} autoFocus /></Field></div>
         <Field label="Doctor"><Select value={doc} onChange={(e) => { setDoc(e.target.value); setSlot(""); }}><option value="">Choose…</option>{docs.data?.map((d) => <option key={d.id} value={d.id}>{d.displayName}</option>)}</Select></Field>
         <Field label="Date"><Input type="date" value={day} min={date} onChange={(e) => { setDay(e.target.value); setSlot(""); }} /></Field>
-        <div className="sm:col-span-2">
+        {can("APPOINTMENT_OVERBOOK") && (
+          <label className="flex items-center gap-2 text-sm sm:col-span-2"><input type="checkbox" checked={exception} onChange={(e) => setException(e.target.checked)} /> Book outside the free times (exception, needs a reason)</label>
+        )}
+        {exception && (
+          <div className="grid grid-cols-3 gap-2 sm:col-span-2">
+            <Field label="Time"><Input type="time" aria-label="Exception time" value={exTime} onChange={(e) => setExTime(e.target.value)} /></Field>
+            <Field label="Minutes"><Input inputMode="numeric" aria-label="Exception minutes" value={exMinutes} onChange={(e) => setExMinutes(e.target.value.replace(/\D/g, ""))} /></Field>
+            <Field label="Why is this an exception?"><Input aria-label="Exception reason" placeholder="e.g. urgent referral" value={exReason} onChange={(e) => setExReason(e.target.value)} /></Field>
+          </div>
+        )}
+        <div className={exception ? "hidden" : "sm:col-span-2"}>
           <div className="mb-1 text-sm font-medium text-slate-700">Time</div>
           {!doc ? <p className="text-sm text-slate-500">Choose a doctor to see free times.</p> : slots.isLoading ? <Spinner /> : slots.data?.length === 0 ? <p className="text-sm text-slate-500">This doctor does not see patients on that day.</p> : (
             <div className="flex flex-wrap gap-1.5">
@@ -51,7 +92,7 @@ function Book({ date, onClose, onBooked }: { date: string; onClose: () => void; 
           )}
         </div>
         <div className="sm:col-span-2">{isDuplicateBooking(book.error) ? <DuplicateBookingNotice error={book.error} pending={book.isPending} onOverride={(r) => book.mutate(r)} /> : <ErrorNote error={book.error} />}</div>
-        <div className="flex justify-end gap-2 sm:col-span-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!patient || !doc || !slot} loading={book.isPending} onClick={() => book.mutate(undefined)}>Book</Button></div>
+        <div className="flex justify-end gap-2 sm:col-span-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!patient || !doc || (exception ? exReason.trim().length < 3 || !exTime || Number(exMinutes) < 5 : !slot)} loading={book.isPending} onClick={() => book.mutate(undefined)}>Book</Button></div>
       </div>
     </Modal>
   );
@@ -144,6 +185,7 @@ export default function AppointmentsPage() {
   return (
     <Gate anyOf={["APPOINTMENT_READ"]}>
       <AppointmentRequestsCard />
+      <div className="mt-4"><DoctorSchedules /></div>
       <PageHeader
         title="Appointments"
         actions={<>

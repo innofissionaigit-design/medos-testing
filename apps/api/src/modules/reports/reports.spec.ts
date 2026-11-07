@@ -230,4 +230,32 @@ describe("operational reports", () => {
     const names = new Set(all.rows.map((r: { cashier: string }) => r.cashier));
     assert.ok(names.has(`Synthetic ${c1.username}`) && names.has(`Synthetic ${c2.username}`));
   });
+  it("a report saved as a file is written to the audit trail, with who, which report, dates and row count but no data", async () => {
+    const manager = await t.makeUser(a, ["MANAGER"]);
+    const log = (tok: string | null, body: Record<string, unknown>) => { const r = t.api("post", "/reports/export-log", tok ?? undefined); return r.send(body); };
+    const ok = await log(manager.token, { report: "collections", from: ymd(-2), to: ymd(0), rows: 12 });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    const ev = await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "REPORT_EXPORTED", actorUserId: manager.id }, orderBy: { createdAt: "desc" } });
+    assert.ok(ev, "the export is on the audit trail");
+    assert.equal(ev.facilityId, a.facilityId);
+    assert.deepEqual(ev.metadata, { report: "collections", from: ymd(-2), to: ymd(0), rows: 12 }, "only the report, the dates and the row count are kept");
+    // Not another hospital's trail
+    assert.equal(await t.prisma.auditEvent.count({ where: { tenantId: b.tenantId, action: "REPORT_EXPORTED" } }), 0);
+
+    // Each person may log only the reports they may open
+    const before = await t.prisma.auditEvent.count({ where: { tenantId: a.tenantId, action: "REPORT_EXPORTED" } });
+    assert.equal((await log(rec.token, { report: "opd-daily", rows: 3 })).status, 201, "reception may open OPD reports");
+    assert.equal((await log(rec.token, { report: "collections", rows: 3 })).status, 403, "but not the collections report");
+    assert.equal((await log(cashier.token, { report: "opd-daily", rows: 3 })).status, 403, "the cashier may not open OPD reports");
+    assert.equal((await log(d1.token, { report: "my-bookings", rows: 1 })).status, 201, "a doctor may log their own report");
+    assert.equal((await log(manager.token, { report: "my-bookings", rows: 1 })).status, 403, "REPORT_READ does not open a doctor's own report");
+    assert.equal(await t.prisma.auditEvent.count({ where: { tenantId: a.tenantId, action: "REPORT_EXPORTED" } }), before + 2, "refused attempts leave no entry");
+
+    // Bad input and no sign-in
+    for (const bad of [{ report: "no-such-report", rows: 1 }, { report: "collections", rows: -1 }, { report: "collections" }, { report: "collections", rows: 1, extra: "x" }, { report: "collections", from: "2026-13-40", rows: 1 }]) {
+      assert.equal((await log(manager.token, bad)).status, 400, JSON.stringify(bad));
+    }
+    assert.equal((await t.api("post", "/reports/export-log").send({ report: "collections", rows: 1 })).status, 401);
+  });
+
 });

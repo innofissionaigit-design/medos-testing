@@ -38,6 +38,8 @@ model Patient {
   estimatedAgeYears      Int?
   ageRecordedOn          DateTime?    @db.Date
   mobile                 String?
+  /// For appointment, receipt and report-ready emails (docs/email.md). Used only with the patient's agreement (the EMAIL_MESSAGES consent).
+  email                  String?
   addressLine            String?
   city                   String?
   district               String?
@@ -109,18 +111,24 @@ model Patient {
   @@index([mobile(ops: raw("gin_trgm_ops"))], type: Gin, map: "Patient_mobile_trgm")
 }
 
+/// Another way a patient is known: the old hospital number, a card or policy number. Never edited; a wrong one is retired (removedAt) and the right one added.
+/// The value is unique among identifiers that have not been retired (a partial unique index written in the migration).
 model PatientIdentifier {
-  id        String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId  String         @db.Uuid
-  patientId String         @db.Uuid
-  type      IdentifierType
-  value     String
-  issuer    String?
-  createdAt DateTime       @default(now()) @db.Timestamptz(3)
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String         @db.Uuid
+  patientId     String         @db.Uuid
+  type          IdentifierType
+  value         String
+  issuer        String?
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  createdById   String?        @db.Uuid
+  removedAt     DateTime?      @db.Timestamptz(3)
+  removedById   String?        @db.Uuid
+  removalReason String?
 
   patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
 
-  @@unique([tenantId, type, value])
+  @@index([tenantId, type, value])
   @@index([tenantId, patientId])
   @@index([value(ops: raw("gin_trgm_ops"))], type: Gin, map: "PatientIdentifier_value_trgm")
 }
@@ -141,6 +149,7 @@ model IdempotencyKey {
 enum ConsentPurpose {
   PRIVACY_NOTICE_ACKNOWLEDGED
   APPOINTMENT_REMINDERS
+  EMAIL_MESSAGES
 }
 
 enum ConsentStatus {

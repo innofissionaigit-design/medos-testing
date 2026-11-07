@@ -5,6 +5,8 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
+import { EmailService } from "../email/email.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import type { RequestContext } from "../../common/request-context";
 import { isRestricted, visitScope } from "../../common/data-scope";
 import { chartPatientIds } from "../patients/patient-links";
@@ -22,6 +24,7 @@ import { assertNoDuplicateBooking, findDuplicateBookings } from "./duplicate-boo
 import { AdvancesService } from "../billing/advances.service";
 import { InvoicesService } from "../billing/invoices.service";
 import { RegistrationFeeService } from "../patients/registration-fee.service";
+import { TelemedicineService } from "../telemedicine/telemedicine.service";
 
 export type AppointmentStatusName = "BOOKED" | "CHECKED_IN" | "WAITING" | "IN_CONSULTATION" | "COMPLETED" | "NO_SHOW" | "CANCELLED";
 
@@ -72,7 +75,8 @@ const duplicateOverride = z.object({ reason }).strict();
 
 export const createAppointmentSchema = z.object({
   patientId: uuid, practitionerId: uuid, startAt: instant,
-  durationMinutes: z.number().int().min(5).max(240).default(15),
+  /** Left out, an appointment takes the length of the doctor's slot it starts in (15 minutes when the doctor has no schedule). */
+  durationMinutes: z.number().int().min(5).max(240).optional(),
   type: z.enum(["CONSULTATION", "FOLLOW_UP", "PROCEDURE"]).default("CONSULTATION"),
   notes: z.string().trim().max(500).optional(),
   overbook: overbook.optional(),
@@ -163,6 +167,9 @@ export class AppointmentsService {
     private readonly paymentLinks: PaymentLinksService,
     private readonly advances: AdvancesService,
     private readonly invoices: InvoicesService,
+    private readonly notifications: NotificationsService,
+    private readonly email: EmailService,
+    private readonly telemedicine: TelemedicineService,
   ) {}
 
   /**
@@ -181,7 +188,7 @@ export class AppointmentsService {
   // ───── schedules ─────
 
   async getSchedule(ctx: RequestContext, practitionerId: string) {
-    await this.assertPractitioner(this.prisma, ctx, practitionerId, false);
+    await this.assertPractitioner(this.prisma, ctx, practitionerId, false, "path");
     const rows = await this.prisma.practitionerSchedule.findMany({
       where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId, status: "ACTIVE" },
       orderBy: [{ dayOfWeek: "asc" }, { startMinute: "asc" }],
@@ -191,8 +198,10 @@ export class AppointmentsService {
 
   async setSchedule(ctx: RequestContext, practitionerId: string, input: z.infer<typeof scheduleSchema>) {
     return this.prisma.$transaction(async (tx) => {
-      await this.assertPractitioner(tx, ctx, practitionerId, false);
+      await this.assertPractitioner(tx, ctx, practitionerId, false, "path");
       await tx.practitionerSchedule.updateMany({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId, status: "ACTIVE" }, data: { status: "INACTIVE" } });
+      // From now on the saved sessions are the only bookable times (an empty schedule means not bookable).
+      await tx.practitioner.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: practitionerId } }, data: { scheduleSet: true } });
       if (input.windows.length) {
         await tx.practitionerSchedule.createMany({
           data: input.windows.map((w) => ({ tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId, dayOfWeek: w.dayOfWeek, startMinute: w.start, endMinute: w.end, slotMinutes: w.slotMinutes })),
@@ -205,7 +214,7 @@ export class AppointmentsService {
 
   async availability(ctx: RequestContext, practitionerId: string, date: string) {
     const tz = await this.tz(this.prisma, ctx);
-    await this.assertPractitioner(this.prisma, ctx, practitionerId, true);
+    await this.assertPractitioner(this.prisma, ctx, practitionerId, true, "path");
     const weekday = localParts(zonedToUtc(date, 12 * 60, tz), tz).weekday;
     const windows = await this.prisma.practitionerSchedule.findMany({
       where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId, status: "ACTIVE", dayOfWeek: weekday }, orderBy: { startMinute: "asc" },
@@ -303,9 +312,10 @@ export class AppointmentsService {
   }
 
   private async createInTx(tx: Db, ctx: RequestContext, input: z.infer<typeof createAppointmentSchema>, link: { followUpOfEncounterId?: string }) {
-    const endAt = new Date(input.startAt.getTime() + input.durationMinutes * 60_000);
     await this.lockBooking(tx, `practitioner:${input.practitionerId}`, `patient:${input.patientId}`);
     const tz = await this.tz(tx, ctx);
+    const duration = input.durationMinutes ?? (await this.slotLengthAt(tx, ctx, input.practitionerId, input.startAt, tz)) ?? 15;
+    const endAt = new Date(input.startAt.getTime() + duration * 60_000);
     const practitioner = await this.assertPractitioner(tx, ctx, input.practitionerId, true);
     await this.assertPatient(tx, ctx, input.patientId);
     if (!input.overbook) await this.assertWithinSchedule(tx, ctx, input.practitionerId, input.startAt, endAt, tz);
@@ -324,6 +334,9 @@ export class AppointmentsService {
       },
       select: VIEW,
     });
+    // The patient is emailed that the appointment is booked (when they have an address and have agreed: docs/email.md).
+    await this.email.appointmentEmail(tx, ctx, a.id, "APPOINTMENT_BOOKED");
+    if (ctx.apiClientId) await this.notifications.notifyPermission(tx, ["APPOINTMENT_CREATE"], { tenantId: ctx.tenantId, facilityId: ctx.facilityId, type: "BOOKING_FROM_OUTSIDE", entityType: "Appointment", entityId: a.id, dedupeKey: `BOOKING_FROM_OUTSIDE:${a.id}` });
     await this.audit.record(tx, actorOf(ctx), { action: "APPOINTMENT_CREATED", entityType: "Appointment", entityId: a.id, metadata: { practitionerId: input.practitionerId, startAt: input.startAt.toISOString() } });
     if (input.overbook) {
       await this.audit.record(tx, actorOf(ctx), { action: "APPOINTMENT_OVERBOOKED", entityType: "Appointment", entityId: a.id, metadata: { reason: input.overbook.reason } });
@@ -372,6 +385,7 @@ export class AppointmentsService {
           metadata: { from: { startAt: existing.startAt.toISOString(), practitionerId: existing.practitionerId }, to: { startAt: startAt.toISOString(), practitionerId } },
         });
         await this.reminders.replan(tx, { id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: existing.patientId, type: existing.type, status: "BOOKED", startAt });
+        await this.telemedicine.onAppointmentMoved(tx, ctx, { id, patientId: existing.patientId, practitionerId, startAt });
         await this.webhooks.enqueue(tx, ctx.tenantId, { id, facilityId: ctx.facilityId, createdById: existing.createdById, status: "BOOKED", startAt, endAt, practitionerId, version: input.version + 1 }, "appointment.moved");
         return toAppointmentView(await tx.appointment.findFirstOrThrow({ where: { id, tenantId: ctx.tenantId }, select: VIEW }));
       });
@@ -397,6 +411,7 @@ export class AppointmentsService {
       await this.paymentLinks.close(tx, ctx.tenantId, id, "CANCELLED");
       const fee = await this.settleFeeOnCancel(tx, ctx, existing);
       await this.webhooks.enqueue(tx, ctx.tenantId, { id, facilityId: ctx.facilityId, createdById: existing.createdById, status: "CANCELLED", startAt: existing.startAt, endAt: existing.endAt, practitionerId: existing.practitionerId, version: existing.version + 1, cancelReason: input.reason }, "appointment.cancelled");
+      await this.email.appointmentEmail(tx, ctx, id, "APPOINTMENT_CANCELLED");
       await this.audit.record(tx, actorOf(ctx), { action: "APPOINTMENT_CANCELLED", entityType: "Appointment", entityId: id, metadata: { from, reason: input.reason, remindersCancelled, ...(fee ? { feeCharged: fee.charged, feeToGiveBack: fee.refundable } : {}) } });
       return toAppointmentView(await tx.appointment.findFirstOrThrow({ where: { id, tenantId: ctx.tenantId }, select: VIEW }));
     });
@@ -598,6 +613,9 @@ export class AppointmentsService {
       },
     });
     await tx.appointment.updateMany({ where: { id: appt.id, tenantId: ctx.tenantId, status: "CHECKED_IN" }, data: { status: "WAITING", encounterId: encounter.id, version: { increment: 1 } } });
+    // The doctor is told a patient has joined their queue.
+    const doctorUser = await this.notifications.doctorUser(tx, ctx.tenantId, appt.practitionerId);
+    if (doctorUser) await this.notifications.notify(tx, [doctorUser], { tenantId: ctx.tenantId, facilityId: ctx.facilityId, type: "QUEUE_PATIENT_ADDED", entityType: "QueueEntry", entityId: queue.id, dedupeKey: `QUEUE_PATIENT_ADDED:${queue.id}` });
     await this.audit.record(tx, actorOf(ctx), {
       action: "APPOINTMENT_CHECKED_IN", entityType: "Appointment", entityId: appt.id,
       metadata: { encounterId: encounter.id, queueEntryId: queue.id, tokenNumber: queue.tokenNumber, priority },
@@ -634,11 +652,16 @@ export class AppointmentsService {
     return { required: true, status: "NEEDS_BILL" as const };
   }
 
-  private async assertPractitioner(db: Db, ctx: RequestContext, practitionerId: string, mustBeActive: boolean) {
+  /**
+   * `from` says where the id came from. An id in the URL that names no practitioner of this hospital is "not found" (404, the same for an unknown id and for another
+   * hospital's); an id sent in the request body is a bad value in the request (400).
+   */
+  private async assertPractitioner(db: Db, ctx: RequestContext, practitionerId: string, mustBeActive: boolean, from: "body" | "path" = "body") {
     const p = await db.practitioner.findFirst({
       where: { id: practitionerId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, ...(mustBeActive ? { status: "ACTIVE" as const } : {}) },
       select: { id: true, departmentId: true, userId: true },
     });
+    if (!p && from === "path") throw new DomainError("NOT_FOUND", "Resource not found", 404);
     if (!p) throw new DomainError("VALIDATION_FAILED", "Practitioner not found or inactive at this facility", 400);
     return p;
   }
@@ -658,9 +681,24 @@ export class AppointmentsService {
     if (startAt.getTime() < Date.now() - 15 * 60_000) throw new DomainError("VALIDATION_FAILED", "The appointment time is in the past", 400);
   }
 
+  /** The length of the doctor's slot that contains this start time, or null when the doctor has no session then. */
+  private async slotLengthAt(tx: Db, ctx: RequestContext, practitionerId: string, startAt: Date, tz: string): Promise<number | null> {
+    const startMin = localMinutes(startAt, tz);
+    const w = await tx.practitionerSchedule.findFirst({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId, status: "ACTIVE", dayOfWeek: localParts(startAt, tz).weekday, startMinute: { lte: startMin }, endMinute: { gt: startMin } },
+      select: { slotMinutes: true },
+    });
+    return w?.slotMinutes ?? null;
+  }
+
   private async assertWithinSchedule(tx: Db, ctx: RequestContext, practitionerId: string, startAt: Date, endAt: Date, tz: string): Promise<void> {
     const windows = await tx.practitionerSchedule.findMany({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, practitionerId, status: "ACTIVE" } });
-    if (windows.length === 0) return; // no schedule defined: the practitioner is open at any time
+    if (windows.length === 0) {
+      // A schedule that was never set leaves the practitioner open at any time; one that was saved with no sessions means no bookable time at all.
+      const p = await tx.practitioner.findFirst({ where: { id: practitionerId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { scheduleSet: true } });
+      if (p?.scheduleSet) throw new DomainError("SLOT_UNAVAILABLE", "The practitioner is not available at that time", 409);
+      return;
+    }
     const s = localParts(startAt, tz);
     const sameDay = localDateStr(endAt, tz) === s.dateStr || (localMinutes(endAt, tz) === 0 && endAt.getTime() - startAt.getTime() < 24 * 3600_000);
     const startMin = localMinutes(startAt, tz);

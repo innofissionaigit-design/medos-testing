@@ -34,3 +34,13 @@ test("dates and money use the chosen language but always Latin digits, so amount
     assert.match(new Intl.NumberFormat(localeFor(l), { style: "currency", currency: "INR" }).format(1234.5), /1,234\.50/);
   }
 });
+test("labels are translated but data is shown exactly as entered", () => {
+  // Interface words
+  assert.equal(translate("bn", "Video consultations"), "ভিডিও পরামর্শ");
+  assert.equal(translate("hi", "Advance payments"), "अग्रिम भुगतान");
+  assert.equal(translate("bn", "pharmacy"), translate("bn", "Pharmacy"), "a lower-case badge finds the Capitalised entry");
+  // Data: names, MRNs, bed codes, invoice numbers, free text are not in any dictionary, so they come back untouched
+  for (const data of ["Rina Mukherjee", "DEMO-000061", "G1", "INV-2026-000008", "Paracetamol 500 mg", "Fever for 3 days"]) {
+    for (const l of ["bn", "hi"] as const) assert.equal(translate(l, data), data, `${data} must not be translated`);
+  }
+});

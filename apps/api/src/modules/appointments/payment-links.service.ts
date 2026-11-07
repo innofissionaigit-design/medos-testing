@@ -4,6 +4,8 @@ import { randomBytes } from "node:crypto";
 import { AuditService } from "../../common/audit.service";
 import { CONFIG, type AppConfig } from "../../common/config";
 import { logJson } from "../../common/logger";
+import { EmailService } from "../email/email.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import { tenantScope } from "../../common/tenant-scope";
 import { RemindersService } from "../follow-ups/reminders.service";
@@ -37,6 +39,8 @@ export class PaymentLinksService {
     private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly settings: SettingsService,
     private readonly reminders: RemindersService, @Inject(PAYMENT_LINK_PROVIDER) private readonly provider: PaymentLinkProvider,
     @Inject(CONFIG) private readonly config: AppConfig,
+    private readonly notifications: NotificationsService,
+    private readonly email: EmailService,
   ) {}
 
   /**
@@ -112,6 +116,8 @@ export class PaymentLinksService {
       action: "APPOINTMENT_AUTO_CANCELLED", entityType: "Appointment", entityId: appt.id,
       metadata: { reason: AUTO_CANCEL_REASON, fee: state.fee ?? "0.00", paid: state.paid, dueBy: link.dueBy.toISOString(), linkId: link.id, remindersCancelled },
     });
+    await this.email.appointmentEmail(tx, { tenantId: link.tenantId, facilityId: link.facilityId }, appt.id, "APPOINTMENT_CANCELLED");
+    await this.notifications.notifyPermission(tx, ["APPOINTMENT_CANCEL"], { tenantId: link.tenantId, facilityId: link.facilityId, type: "BOOKING_AUTO_CANCELLED", entityType: "Appointment", entityId: appt.id, dedupeKey: `BOOKING_AUTO_CANCELLED:${appt.id}` });
     logJson("info", "appointment_auto_cancelled", { appointmentId: appt.id, linkId: link.id });
     return "cancelled";
   }

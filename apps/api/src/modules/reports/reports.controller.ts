@@ -1,8 +1,8 @@
-import { Controller, Get, Query } from "@nestjs/common";
+import { Body, Controller, Get, Post, Query } from "@nestjs/common";
 import { Feature } from "../../common/feature.guard";
 import { Ctx, parse, RequireAnyPermission } from "../../common/http";
 import type { RequestContext } from "../../common/request-context";
-import { expirySchema, outstandingSchema, rangeSchema, ReportsService } from "./reports.service";
+import { exportLogSchema, expirySchema, outstandingSchema, rangeSchema, ReportsService } from "./reports.service";
 
 /**
  * Operational reports only. All are read-only, facility-scoped from the session, and bounded (date ranges ≤ 93 days).
@@ -11,6 +11,11 @@ import { expirySchema, outstandingSchema, rangeSchema, ReportsService } from "./
 @Controller("reports")
 export class ReportsController {
   constructor(private readonly reports: ReportsService) {}
+
+  /** Called just before a report is saved as a file, so every export is on the audit trail. The report-specific permission is checked in the service. */
+  @RequireAnyPermission("REPORT_READ", "REPORT_OPD", "REPORT_FINANCE", "REPORT_IPD", "REPORT_PHARMACY", "REPORT_MY_PRACTICE")
+  @Post("export-log")
+  async exportLog(@Ctx() ctx: RequestContext, @Body() body: unknown) { return { data: await this.reports.logExport(ctx, parse(exportLogSchema, body)) }; }
 
   @RequireAnyPermission("REPORT_READ", "REPORT_OPD")
   @Get("opd/daily")

@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Gate } from "@/components/gate";
+import { VitalsCard } from "@/components/ipd-extras";
 import { Badge, Button, Card, ErrorNote, Modal, Field, Input, Notice, PageHeader, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api, ApiError } from "@/lib/api";
 import { useMe } from "@/lib/me";
@@ -21,6 +22,8 @@ export default function QueuePage() {
   const qc = useQueryClient();
   const [doctor, setDoctor] = useState("");
   const [cancelId, setCancelId] = useState<string | null>(null);
+  // Nurses record the vitals of an OPD patient from here: they cannot open the doctor's visit page.
+  const [vitalsFor, setVitalsFor] = useState<{ encounterId: string; patient: string } | null>(null);
   const [reason, setReason] = useState("");
   const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: me.facility?.timezone ?? me.tenant.timezone });
   const list = useQuery({ queryKey: ["queue", doctor], queryFn: () => api.get<Entry[]>("/queue", doctor ? { practitionerId: doctor } : undefined), refetchInterval: 15_000 });
@@ -45,6 +48,7 @@ export default function QueuePage() {
   const callNext = useMutation({ mutationFn: () => api.post("/queue/call-next", doctor ? { practitionerId: doctor } : {}), onSuccess: refresh });
   const priority = useMutation({ mutationFn: ({ id, priority }: { id: string; priority: string }) => api.patch(`/queue/${id}/priority`, { priority }), onSuccess: refresh });
   const manage = can("QUEUE_MANAGE");
+  const canPrioritise = can("QUEUE_PRIORITY");
   const clinician = can("CONSULTATION_CREATE");
 
   return (
@@ -90,11 +94,12 @@ export default function QueuePage() {
                       {(waiting || called) && clinician && <Button onClick={() => act.mutate({ id: e.id, action: "start" })}>Start</Button>}
                       {inConsult && e.encounterId && can("CONSULTATION_READ") && <Button onClick={() => router.push(`/visits/${e.encounterId}`)}>Open visit</Button>}
                       {inConsult && clinician && <Button variant="secondary" onClick={() => act.mutate({ id: e.id, action: "complete", encounterId: e.encounterId })}>Complete</Button>}
-                      {(waiting || called) && manage && (
+                      {(waiting || called) && canPrioritise && (
                         <select aria-label={`Priority for ${e.patientName}`} value={e.priority} disabled={priority.isPending} onChange={(ev) => priority.mutate({ id: e.id, priority: ev.target.value })} className="rounded-md border border-slate-300 bg-white px-2 py-1 text-sm">
                           <option value="NORMAL">Normal</option><option value="PRIORITY">Priority</option><option value="EMERGENCY">Emergency</option>
                         </select>
                       )}
+                      {(waiting || called || inConsult) && e.encounterId && can("VITALS_CREATE") && !can("CONSULTATION_READ") && <Button variant="secondary" onClick={() => setVitalsFor({ encounterId: e.encounterId as string, patient: e.patientName })}>Record vitals</Button>}
                       {(waiting || called) && manage && <Button variant="ghost" onClick={() => act.mutate({ id: e.id, action: "skip" })}>Skip</Button>}
                       {e.status === "SKIPPED" && manage && <Button variant="secondary" onClick={() => act.mutate({ id: e.id, action: "requeue" })}>Requeue</Button>}
                       {(waiting || called || e.status === "SKIPPED") && manage && <Button variant="ghost" onClick={() => { setCancelId(e.id); setReason(""); }}>Cancel</Button>}
@@ -115,6 +120,11 @@ export default function QueuePage() {
               <Button variant="danger" disabled={reason.trim().length < 3} onClick={() => { act.mutate({ id: cancelId, action: "cancel", body: { reason: reason.trim() } }); setCancelId(null); }}>Cancel visit</Button>
             </div>
           </div>
+        </Modal>
+      )}
+      {vitalsFor && (
+        <Modal title={`Vitals: ${vitalsFor.patient}`} onClose={() => setVitalsFor(null)} wide>
+          <VitalsCard encounterId={vitalsFor.encounterId} open />
         </Modal>
       )}
     </Gate>

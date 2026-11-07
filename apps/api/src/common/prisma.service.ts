@@ -1,6 +1,7 @@
 import { availableParallelism } from "node:os";
 import { Inject, Injectable } from "@nestjs/common";
 import { Prisma, PrismaClient } from "@medos/database";
+import { afterCommit } from "./after-commit";
 import { CONFIG, type AppConfig } from "./config";
 import { logJson } from "./logger";
 import { tenantScope } from "./tenant-scope";
@@ -110,14 +111,15 @@ class DbCore {
     if (this.on && r.unprotected > 0) throw new Error(`${r.unprotected} table(s) have no row-level security policy: apply the database migrations first`);
   }
 
+  /** Work registered with afterCommit() while the transaction runs is fired once it has committed, and dropped if it rolls back. */
   async transaction(arg: unknown, options?: TxOptions): Promise<unknown> {
-    if (!this.on) return (this.base.$transaction as (a: unknown, o?: TxOptions) => Promise<unknown>)(arg, options);
+    if (!this.on) return afterCommit.around(() => (this.base.$transaction as (a: unknown, o?: TxOptions) => Promise<unknown>)(arg, options));
     if (typeof arg !== "function") throw new Error("Batch transactions are not supported while the tenant context is on");
     const scope = this.requireScope();
-    return this.base.$transaction(async (tx) => {
+    return afterCommit.around(() => this.base.$transaction(async (tx) => {
       for (const stmt of this.entry(scope, tx)) await stmt;
       return (arg as (t: Prisma.TransactionClient) => Promise<unknown>)(tx);
-    }, options);
+    }, options));
   }
 
   raw(name: RawName, args: unknown[]): unknown {

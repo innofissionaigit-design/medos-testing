@@ -25,6 +25,14 @@ model Teleconsult {
   consentAt       DateTime?         @db.Timestamptz(3)
   doctorJoinedAt  DateTime?         @db.Timestamptz(3)
   patientJoinedAt DateTime?         @db.Timestamptz(3)
+  /// The wording of the consent the patient agreed to (docs/telemedicine.md), so a later change of wording never rewrites what they agreed to.
+  consentVersion  String?
+  /// Waiting room: the patient pressed "I am here" in the app. Cleared never; it only says when they first arrived.
+  patientWaitingAt DateTime?        @db.Timestamptz(3)
+  /// Identity check by the doctor before the call starts: who confirmed it, when and how (a fixed list; see teleconsult_values).
+  identityVerifiedAt   DateTime?    @db.Timestamptz(3)
+  identityVerifiedById String?      @db.Uuid
+  identityMethod       String?
   endedAt         DateTime?         @db.Timestamptz(3)
   cancelReason    String?
   createdById     String            @db.Uuid

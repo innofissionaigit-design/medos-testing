@@ -1,7 +1,7 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { startApp, type TestApp, type TestTenant } from "../../test/harness";
+import { PASSWORD, startApp, type TestApp, type TestTenant } from "../../test/harness";
 
 describe("tenant and facility isolation", () => {
   let t: TestApp;
@@ -101,11 +101,17 @@ describe("tenant and facility isolation", () => {
   it("revoking facility access takes effect on already-issued tokens", async () => {
     const u = await t.makeUser(a, ["RECEPTIONIST"], { facilityIds: [a.facilityId, a.facility2Id] });
     assert.equal((await t.api("get", "/auth/me", u.token)).status, 200);
+    const other = await t.login(a.code, u.username, PASSWORD, a.facility2Id);
+    assert.equal(other.status, 200, JSON.stringify(other.body));
     const r = await t.api("put", `/users/${u.id}/facilities`, a.admin.token).send({ facilityIds: [a.facility2Id] });
     assert.equal(r.status, 200);
+    // The session at the facility they lost ends at once (its refresh token is revoked with the access), so the old token is refused outright.
     const after = await t.api("get", "/auth/me", u.token);
-    assert.equal(after.status, 403);
-    assert.equal(after.body.error.code, "UNAUTHORIZED_FACILITY");
+    assert.equal(after.status, 401);
+    assert.equal(after.body.error.code, "UNAUTHENTICATED");
+    assert.equal((await t.http().post("/api/v1/auth/refresh").send({ refreshToken: "x".repeat(43) })).status, 401);
+    // Their session at the facility they still have is untouched.
+    assert.equal((await t.api("get", "/auth/me", other.body.data.tokens.accessToken)).status, 200);
   });
 
   it("validates facility input, keeps codes unique per tenant, and allows same code in another tenant", async () => {

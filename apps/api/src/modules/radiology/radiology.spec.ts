@@ -131,6 +131,9 @@ describe("radiology: studies, reports, amendments and critical findings", () => 
     assert.ok(list.some((c) => c.studyId === x.studyId));
     assert.ok(((await t.api("get", "/rad/worklist?state=CRITICAL&pageSize=100", tech.token)).body.data.items as { testOrderId: string; critical: boolean }[]).some((i) => i.testOrderId === x.orderId && i.critical));
     assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "RAD_CRITICAL_FINDING", entityId: x.studyId } }));
+    // The doctor of the visit is told once (notifications.md); another doctor is not.
+    assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: d1.userId, type: "CRITICAL_RAD_FINDING", entityId: x.studyId } }), 1);
+    assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: d2.userId, entityId: x.studyId } }), 0);
     assert.equal((await t.api("post", `/rad/studies/${x.studyId}/acknowledge`, d2.token)).status, 404, "another doctor's patient");
     assert.equal((await t.api("post", `/rad/studies/${x.studyId}/acknowledge`, rec.token)).status, 403);
     assert.equal((await t.api("post", `/rad/studies/${x.studyId}/acknowledge`, bRadiologist.token)).status, 404);
@@ -201,10 +204,106 @@ describe("radiology: studies, reports, amendments and critical findings", () => 
     assert.equal(await t.prisma.radStudy.count({ where: { testOrderId: o.orderId } }), 1);
   });
 
+  it("images: PNG, JPEG and DICOM files are attached to a study; the content is checked; the imaging staff add and remove; a removed image stays on the record", async () => {
+    const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("not-really-pixels")]);
+    const JPG = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.from("not-really-jpeg")]);
+    const DCM = Buffer.concat([Buffer.alloc(128), Buffer.from("DICM"), Buffer.from("not-really-dicom")]);
+    const x = await performed();
+    const up = (studyId: string, tok: string, body: Buffer | string, type: string, query: Record<string, string> = { filename: "chest.png" }) => t.api("post", `/rad/studies/${studyId}/images`, tok).query(query).set("Content-Type", type).send(body);
+
+    const ok = await up(x.studyId, tech.token, PNG, "image/png", { filename: "chest-pa.png", description: "PA view" });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.deepEqual([ok.body.data.contentType, ok.body.data.fileName, ok.body.data.description, ok.body.data.sizeBytes], ["image/png", "chest-pa.png", "PA view", PNG.length]);
+    assert.equal((await up(x.studyId, tech.token, JPG, "image/jpeg", { filename: "lateral.jpg" })).status, 201);
+    const dcm = await up(x.studyId, tech.token, DCM, "application/dicom", { filename: "slice-01.dcm" });
+    assert.equal(dcm.status, 201, JSON.stringify(dcm.body));
+
+    // who may add, and what is refused
+    assert.equal((await up(x.studyId, radiologist.token, PNG, "image/png")).status, 403, "the radiologist reports; the radiographer adds images");
+    assert.equal((await up(x.studyId, nurse.token, PNG, "image/png")).status, 403);
+    assert.equal((await up(x.studyId, rec.token, PNG, "image/png")).status, 403);
+    assert.equal((await up(x.studyId, bTech.token, PNG, "image/png")).status, 404, "another hospital's staff cannot reach this study");
+    assert.equal((await up(x.studyId, tech.token, "<html><script>alert(1)</script></html>", "image/png")).status, 415, "HTML disguised as an image");
+    assert.equal((await up(x.studyId, tech.token, PNG, "image/jpeg")).status, 415, "type must match the content");
+    assert.equal((await up(x.studyId, tech.token, Buffer.concat([Buffer.from("DICM"), Buffer.alloc(200)]), "application/dicom")).status, 415, "DICM must sit after the 128-byte preamble");
+    assert.equal((await up(x.studyId, tech.token, Buffer.concat([PNG, Buffer.alloc(10 * 1024 * 1024)]), "image/png")).status, 413, "over 10 MB");
+    assert.equal((await up(x.studyId, tech.token, PNG, "image/png", { filename: "" })).status, 400);
+    assert.equal((await up(randomUUID(), tech.token, PNG, "image/png")).status, 404);
+
+    // who may look
+    const list = await t.api("get", `/rad/studies/${x.studyId}/images`, radiologist.token);
+    assert.deepEqual(list.body.data.map((i: { fileName: string }) => i.fileName), ["chest-pa.png", "lateral.jpg", "slice-01.dcm"]);
+    assert.equal((await t.api("get", `/rad/studies/${x.studyId}/images`, d1.token)).status, 200, "the doctor of the visit");
+    assert.equal((await t.api("get", `/rad/studies/${x.studyId}/images`, d2.token)).status, 404, "another doctor's patient");
+    assert.equal((await t.api("get", `/rad/studies/${x.studyId}/images`, bRadiologist.token)).status, 404, "another hospital");
+    assert.equal((await t.api("get", `/rad/studies/${x.studyId}/images`, rec.token)).status, 403);
+
+    const pngId = ok.body.data.id as string;
+    const got = await t.api("get", `/rad/images/${pngId}/content`, radiologist.token).buffer(true).parse((res, cb) => { const chunks: Buffer[] = []; res.on("data", (c: Buffer) => chunks.push(c)); res.on("end", () => cb(null, Buffer.concat(chunks))); });
+    assert.equal(got.status, 200);
+    assert.deepEqual([got.headers["content-type"], got.headers["x-content-type-options"], got.headers["cache-control"]], ["image/png", "nosniff", "private, no-store"]);
+    assert.ok((got.body as Buffer).equals(PNG), "the same bytes come back");
+    assert.match(String((await t.api("get", `/rad/images/${dcm.body.data.id}/content`, d1.token)).headers["content-disposition"]), /^attachment/, "DICOM downloads rather than opening in the browser");
+    assert.equal((await t.api("get", `/rad/images/${pngId}/content`, d2.token)).status, 404);
+    assert.equal((await t.api("get", `/rad/images/${pngId}/content`, bRadiologist.token)).status, 404);
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "RAD_IMAGE_VIEWED", entityId: pngId, actorUserId: radiologist.id } }), "opening an image is audited");
+
+    // removing: a reason, the imaging staff only, and the record stays
+    assert.equal((await t.api("post", `/rad/images/${pngId}/remove`, radiologist.token).send({ reason: "Wrong patient image" })).status, 403);
+    assert.equal((await t.api("post", `/rad/images/${pngId}/remove`, tech.token).send({ reason: "no" })).status, 400);
+    assert.equal((await t.api("post", `/rad/images/${pngId}/remove`, bTech.token).send({ reason: "Wrong patient image" })).status, 404);
+    assert.equal((await t.api("post", `/rad/images/${pngId}/remove`, tech.token).send({ reason: "Wrong patient image" })).status, 200);
+    assert.equal((await t.api("post", `/rad/images/${pngId}/remove`, tech.token).send({ reason: "Wrong patient image" })).status, 409);
+    assert.equal((await t.api("get", `/rad/images/${pngId}/content`, tech.token)).status, 404, "a removed image no longer opens");
+    assert.equal((await t.api("get", `/rad/studies/${x.studyId}/images`, tech.token)).body.data.length, 2);
+    const row = await t.prisma.radImage.findFirstOrThrow({ where: { id: pngId } });
+    assert.deepEqual([row.status, row.removeReason, row.removedById], ["REMOVED", "Wrong patient image", tech.id], "kept, with who and why");
+    const actions = (await t.prisma.auditEvent.findMany({ where: { tenantId: a.tenantId, entityId: pngId } })).map((e) => e.action).sort();
+    assert.deepEqual(actions, ["RAD_IMAGE_ADDED", "RAD_IMAGE_REMOVED", "RAD_IMAGE_VIEWED"]);
+
+    // database rules
+    await assert.rejects(t.prisma.$executeRawUnsafe(`DELETE FROM "RadImage" WHERE id = '${pngId}'::uuid`), /append-only/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "RadImage" SET "fileName" = 'other.png' WHERE id = '${pngId}'::uuid`), /cannot be edited/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "RadImage" SET status = 'ACTIVE' WHERE id = '${pngId}'::uuid`), /cannot be restored/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "RadImage" SET "removeReason" = 'Changed my mind later' WHERE id = '${pngId}'::uuid`), /cannot be changed/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`INSERT INTO "RadImage" ("tenantId", "facilityId", "patientId", "studyId", "fileName", "contentType", "sizeBytes", sha256, "storageKey", "uploadedById") VALUES ('${a.tenantId}'::uuid, '${a.facilityId}'::uuid, '${randomUUID()}'::uuid, '${x.studyId}'::uuid, 'x.png', 'image/png', 10, 'abc', 'k', '${tech.id}'::uuid)`), /same patient and facility/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`INSERT INTO "RadImage" ("tenantId", "facilityId", "patientId", "studyId", "fileName", "contentType", "sizeBytes", sha256, "storageKey", "uploadedById") VALUES ('${a.tenantId}'::uuid, '${a.facilityId}'::uuid, '${x.patient.id}'::uuid, '${x.studyId}'::uuid, 'x.svg', 'image/svg+xml', 10, 'abc', 'k', '${tech.id}'::uuid)`), /check/i);
+  });
+
+  it("images: a study holds at most 20; removing one makes room", async () => {
+    const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("x")]);
+    const x = await performed();
+    const up = () => t.api("post", `/rad/studies/${x.studyId}/images`, tech.token).query({ filename: "k.png" }).set("Content-Type", "image/png").send(PNG);
+    const ids: string[] = [];
+    for (let i = 0; i < 20; i++) { const r = await up(); assert.equal(r.status, 201, JSON.stringify(r.body)); ids.push(r.body.data.id as string); }
+    assert.equal((await up()).status, 409);
+    assert.equal((await t.api("post", `/rad/images/${ids[0]}/remove`, tech.token).send({ reason: "Duplicate image" })).status, 200);
+    assert.equal((await up()).status, 201);
+  });
+
   it("the radiology roles exist with the permissions they need", async () => {
     for (const [role, perms] of [["RADIOGRAPHER", ["RAD_READ", "RAD_PERFORM"]], ["RADIOLOGIST", ["RAD_READ", "RAD_REPORT"]]] as const) {
       const r = await t.prisma.role.findFirstOrThrow({ where: { tenantId: a.tenantId, name: role, isSystem: true }, include: { permissions: true } });
       for (const p of perms) assert.ok(r.permissions.some((x) => x.permission === p), `${role} has ${p}`);
     }
   });
+
+  it("signing a report emails the patient that one is ready (never what it says), with their agreement", async () => {
+    assert.equal((await t.api("put", "/settings/EMAIL_ENABLED", a.admin.token).send({ value: true })).status, 200);
+    try {
+      const x = await performed();
+      const patientId = (await t.prisma.testOrder.findFirstOrThrow({ where: { id: x.orderId }, select: { encounter: { select: { patientId: true } } } })).encounter.patientId;
+      const address = `rad${uniqueWord(6)}@example.org`.toLowerCase();
+      await t.prisma.patient.update({ where: { id: patientId }, data: { email: address } });
+      await t.prisma.patientConsent.create({ data: { tenantId: a.tenantId, patientId, purpose: "EMAIL_MESSAGES", status: "GRANTED", method: "VERBAL", recordedById: rec.id } });
+      assert.equal((await report(x.studyId, radiologist.token, { findings: "Tension pneumothorax on the left.", impression: "Pneumothorax", critical: true })).status, 200);
+      const mail = await t.prisma.emailOutbox.findMany({ where: { tenantId: a.tenantId, patientId } });
+      assert.equal(mail.length, 1);
+      assert.deepEqual([mail[0]!.templateKey, mail[0]!.toAddress, mail[0]!.entityType, mail[0]!.entityId], ["REPORT_READY", address, "RadStudy", x.studyId]);
+      assert.ok(!/pneumothorax|tension/i.test(mail[0]!.bodyText + mail[0]!.subject), "no finding in the email, not even a critical one");
+    } finally {
+      await t.api("put", "/settings/EMAIL_ENABLED", a.admin.token).send({ value: false });
+    }
+  });
+
 });

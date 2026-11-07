@@ -17,3 +17,10 @@ export function roomUrl(template: string, roomToken: string): string {
 
 /** An appointment can still have its video call while it has not been cancelled, missed or finished. */
 export const LIVE_APPOINTMENT = ["BOOKED", "CHECKED_IN", "WAITING", "IN_CONSULTATION"] as const;
+
+/** The wording version of the consent a patient agrees to before a video consultation; recorded with the agreement so a later change never rewrites it. */
+export const CONSENT_VERSION = "TELE-1";
+
+/** How the doctor confirmed who they are talking to, recorded before the call starts. */
+export const IDENTITY_METHODS = ["KNOWN_PATIENT", "PHOTO_ID_SHOWN", "APP_SIGN_IN", "OTHER"] as const;
+export type IdentityMethod = (typeof IDENTITY_METHODS)[number];

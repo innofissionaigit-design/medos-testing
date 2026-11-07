@@ -4,7 +4,7 @@ import { Ctx, id, parse, RequirePermissions } from "../../common/http";
 import { parseIdempotencyKey } from "../../common/idempotency.service";
 import type { RequestContext } from "../../common/request-context";
 import {
-  ClaimsService, closeSchema, createClaimSchema, decisionSchema, insurerSchema, listClaimsSchema, policySchema, policyStatusSchema, preauthDecisionSchema, preauthSchema, querySchema, resubmitSchema, settleSchema, submitSchema,
+  ClaimsService, closeSchema, copayPreviewSchema, createClaimSchema, decisionSchema, insurerSchema, listClaimsSchema, policyCopaySchema, policySchema, policyStatusSchema, preauthDecisionSchema, preauthSchema, querySchema, resubmitSchema, settleSchema, submitSchema,
 } from "./claims.service";
 
 /** Insurance claims (docs/claims.md): insurers, policies, and a claim's steps from pre-authorisation to settlement. */
@@ -35,6 +35,15 @@ export class ClaimsController {
   @RequirePermissions("CLAIM_MANAGE")
   @Put("policies/:id")
   async policyStatus(@Ctx() ctx: RequestContext, @Param("id") policyId: string, @Body() body: unknown) { return { data: await this.claims.setPolicyStatus(ctx, id(policyId), parse(policyStatusSchema, body)) }; }
+
+  @RequirePermissions("CLAIM_MANAGE")
+  @Put("policies/:id/copay")
+  async policyCopay(@Ctx() ctx: RequestContext, @Param("id") policyId: string, @Body() body: unknown) { return { data: await this.claims.setPolicyCopay(ctx, id(policyId), parse(policyCopaySchema, body)) }; }
+
+  @RequirePermissions("CLAIM_MANAGE")
+  @Post("claims/:id/copay-preview")
+  @HttpCode(200)
+  async copayPreview(@Ctx() ctx: RequestContext, @Param("id") claimId: string, @Body() body: unknown) { return { data: await this.claims.copayPreview(ctx, id(claimId), parse(copayPreviewSchema, body)) }; }
 
   @RequirePermissions("CLAIM_READ")
   @Get("claims/summary")

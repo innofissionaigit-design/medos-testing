@@ -51,14 +51,14 @@ export async function refreshSession(): Promise<string | null> {
   return tokens.accessToken;
 }
 
-export interface ForwardInit { method?: string; body?: BodyInit | null; headers?: Record<string, string> }
+export interface ForwardInit { method?: string; body?: BodyInit | null; headers?: Record<string, string>; signal?: AbortSignal }
 
 /** Calls the API as the logged-in user; refreshes the session once if the access token is missing or rejected. */
 export async function authedFetch(path: string, init: ForwardInit = {}): Promise<Response> {
   const jar = await cookies();
   let at: string | null = jar.get(AT)?.value ?? (await refreshSession());
   if (!at) return new Response(JSON.stringify({ error: { code: "UNAUTHENTICATED", message: "Please sign in" } }), { status: 401, headers: { "content-type": "application/json" } });
-  const call = (token: string) => fetch(`${API_URL}${path}`, { method: init.method ?? "GET", body: init.body ?? null, headers: { ...init.headers, authorization: `Bearer ${token}` }, cache: "no-store" });
+  const call = (token: string) => fetch(`${API_URL}${path}`, { method: init.method ?? "GET", body: init.body ?? null, headers: { ...init.headers, authorization: `Bearer ${token}` }, cache: "no-store", ...(init.signal ? { signal: init.signal } : {}) });
   let res = await call(at);
   if (res.status === 401) {
     at = await refreshSession();

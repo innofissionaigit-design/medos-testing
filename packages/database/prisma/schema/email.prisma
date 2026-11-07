@@ -1,0 +1,83 @@
+// Email (docs/email.md): outbound email to patients and staff with templates, a delivery log, a suppression list and test sends. It is a queue (the outbox) that a worker
+// sends from, so a slow or failing provider never slows down or breaks the screen that asked for the email. The rendered subject and text are kept, because they are what
+// was sent; they carry the patient's first name and appointment details, never clinical content.
+
+enum EmailStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELLED
+  /// Not sent on purpose: at the moment of sending the patient had withdrawn, the address was suppressed, or email had been switched off.
+  SKIPPED
+}
+
+enum EmailSuppressionReason {
+  UNSUBSCRIBED
+  BOUNCED
+  COMPLAINT
+  MANUAL
+}
+
+model EmailOutbox {
+  id              String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String      @db.Uuid
+  facilityId      String      @db.Uuid
+  templateKey     String
+  language        String
+  /// The patient it is about, when there is one (a test email has none).
+  patientId       String?     @db.Uuid
+  toAddress       String
+  subject         String
+  bodyText        String
+  status          EmailStatus @default(PENDING)
+  attempts        Int         @default(0)
+  nextAttemptAt   DateTime    @default(now()) @db.Timestamptz(3)
+  /// A short, safe reason (never the provider's raw reply).
+  lastError       String?
+  providerMessageId String?
+  sentAt          DateTime?   @db.Timestamptz(3)
+  entityType      String?
+  entityId        String?     @db.Uuid
+  /// Stops the same event emailing the same address twice (for example "APPOINTMENT_BOOKED:<appointment id>").
+  dedupeKey       String?
+  createdById     String?     @db.Uuid
+  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, dedupeKey])
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, patientId])
+}
+
+/// A hospital's own wording for one template in one language. With no row the built-in wording is used.
+model EmailTemplate {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  templateKey String
+  language    String
+  subject     String
+  body        String
+  /// Counts the edits of this template; the audit trail records each one.
+  version     Int      @default(1)
+  updatedById String   @db.Uuid
+  updatedAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([tenantId, templateKey, language])
+}
+
+/// Addresses that must not be emailed (unsubscribed, bounced, complained, or added by hand). Lower-case.
+model EmailSuppression {
+  id          String                 @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String                 @db.Uuid
+  address     String
+  reason      EmailSuppressionReason
+  note        String?
+  createdById String?                @db.Uuid
+  createdAt   DateTime               @default(now()) @db.Timestamptz(3)
+
+  @@unique([tenantId, address])
+}

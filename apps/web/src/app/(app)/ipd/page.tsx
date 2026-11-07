@@ -8,6 +8,7 @@ import { Gate } from "@/components/gate";
 import { PatientPicker, useAvailableBeds, type PickedPatient } from "@/components/pickers";
 import { Button, Card, ErrorNote, Field, Input, Modal, PageHeader, Select, Spinner, StatusBadge, Table, Tabs, Td } from "@/components/ui";
 import { api, newKey } from "@/lib/api";
+import { useT } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
 
 interface Bed { id: string; code: string; status: string; dailyRate: string; occupant: { admissionId: string; admissionNumber: string; patientName: string; mrn: string | null; since: string } | null }
@@ -45,6 +46,7 @@ function Admit({ initial, onClose }: { initial: PickedPatient | null; onClose: (
 
 function IpdInner() {
   const { can, dateTime } = useMe();
+  const t = useT();
   const qc = useQueryClient();
   const params = useSearchParams();
   const pre = params.get("admit");
@@ -60,7 +62,7 @@ function IpdInner() {
       <Tabs tabs={[{ id: "board", label: "Bed board" }, { id: "list", label: "Admitted patients" }]} value={tab} onChange={setTab} />
       {tab === "board" && (board.isLoading ? <Spinner /> : board.data && (
         <div className="space-y-4">
-          <div className="flex flex-wrap gap-3 text-sm">{Object.entries(board.data.summary).map(([k, v]) => <span key={k} className="rounded-full bg-white px-3 py-1 shadow-sm ring-1 ring-slate-200">{k === "total" ? "Total" : k.toLowerCase()}: <b>{v}</b></span>)}</div>
+          <div className="flex flex-wrap gap-3 text-sm">{Object.entries(board.data.summary).map(([k, v]) => <span key={k} className="rounded-full bg-white px-3 py-1 shadow-sm ring-1 ring-slate-200">{k === "total" ? t("Total") : t(k.toLowerCase())}: <b>{v}</b></span>)}</div>
           <ErrorNote error={setStatus.error} />
           {board.data.wards.map((w) => (
             <Card key={w.id} title={w.name}>
@@ -71,7 +73,7 @@ function IpdInner() {
                     {r.beds.map((b) => (
                       <div key={b.id} className={clsx("rounded-md border p-2 text-sm", BED_STYLE[b.status])}>
                         <div className="flex items-center justify-between"><b>{b.code}</b><StatusBadge value={b.status} /></div>
-                        {b.occupant ? <Link href={`/ipd/${b.occupant.admissionId}`} className="mt-1 block text-brand-700 hover:underline">{b.occupant.patientName}<div className="text-xs text-slate-500">{b.occupant.mrn} · since {dateTime(b.occupant.since)}</div></Link> : null}
+                        {b.occupant ? <Link href={`/ipd/${b.occupant.admissionId}`} className="mt-1 block text-brand-700 hover:underline">{b.occupant.patientName}<div className="text-xs text-slate-600">{b.occupant.mrn} · {t("since")} {dateTime(b.occupant.since)}</div></Link> : null}
                         {b.status === "CLEANING" && can("NURSING_DOCUMENT", "ADMIN_MASTERS") && <button className="mt-1 text-xs text-brand-700 hover:underline" onClick={() => setStatus.mutate({ id: b.id, status: "AVAILABLE" })}>Mark clean</button>}
                       </div>
                     ))}

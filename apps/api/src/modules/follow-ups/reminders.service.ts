@@ -20,6 +20,12 @@ export function reminderText(a: { doctor: string; facility: string; startAt: Dat
   return `Reminder: your follow-up with ${a.doctor} at ${a.facility} is on ${when}. Please bring your previous prescription.`;
 }
 
+/** The text message before a video consultation: when to join and where. No patient name, no clinical detail, no room address. */
+export function videoReminderText(a: { doctor: string; facility: string; startAt: Date; timezone: string }): string {
+  const when = new Intl.DateTimeFormat("en-IN", { timeZone: a.timezone, weekday: "short", day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }).format(a.startAt);
+  return `Reminder: your video consultation with ${a.doctor} at ${a.facility} is on ${when}. Open the patient app and press Join video call.`;
+}
+
 @Injectable()
 export class RemindersService {
   constructor(
@@ -44,6 +50,20 @@ export class RemindersService {
     await tx.appointmentReminder.createMany({
       data: due.map((r) => ({ tenantId: appt.tenantId, facilityId: appt.facilityId, appointmentId: appt.id, offsetMinutes: r.offsetMinutes, appointmentStartAt: appt.startAt, sendAt: r.sendAt })),
     });
+  }
+
+  /**
+   * One text message shortly before a video consultation (TELECONSULT_REMINDER_MINUTES, 0 = none), planned when the appointment is made a video consultation.
+   * It is skipped at send time if the appointment has moved or is no longer booked, like every reminder.
+   */
+  async planVideo(tx: Db, appt: { id: string; tenantId: string; facilityId: string; patientId: string; startAt: Date }, now = new Date()): Promise<void> {
+    await this.cancelPending(tx, appt.tenantId, appt.id);
+    const minutes = await this.settings.get(tx, appt.tenantId, appt.facilityId, "TELECONSULT_REMINDER_MINUTES");
+    if (minutes <= 0) return;
+    if (!(await this.mayRemind(tx, appt.tenantId, appt.facilityId, appt.patientId))) return;
+    const sendAt = new Date(appt.startAt.getTime() - minutes * 60_000);
+    if (sendAt <= now) return;
+    await tx.appointmentReminder.create({ data: { tenantId: appt.tenantId, facilityId: appt.facilityId, appointmentId: appt.id, offsetMinutes: minutes, appointmentStartAt: appt.startAt, sendAt } });
   }
 
   /** Cancelled, no-show and checked-in follow-ups must never be reminded about. */
@@ -98,7 +118,7 @@ export class RemindersService {
     const where = { id: r.id, tenantId: r.tenantId };
     const appt = await tx.appointment.findFirst({
       where: { id: r.appointmentId, tenantId: r.tenantId },
-      select: { status: true, startAt: true, patientId: true, facilityId: true, patient: { select: { mobile: true } }, practitioner: { select: { displayName: true } }, facility: { select: { name: true, timezone: true } } },
+      select: { status: true, startAt: true, patientId: true, facilityId: true, patient: { select: { mobile: true } }, practitioner: { select: { displayName: true } }, facility: { select: { name: true, timezone: true } }, teleconsults: { where: { status: "SCHEDULED" }, select: { id: true }, take: 1 } },
     });
     const skip = async (reason: string): Promise<Outcome> => {
       await tx.appointmentReminder.updateMany({ where, data: { status: "SKIPPED", lastError: reason } });
@@ -115,7 +135,7 @@ export class RemindersService {
     try {
       const d = await provider.send({
         reminderId: r.id, appointmentId: r.appointmentId, to: appt.patient.mobile,
-        text: reminderText({ doctor: appt.practitioner.displayName, facility: appt.facility.name, startAt: appt.startAt, timezone: appt.facility.timezone }),
+        text: (appt.teleconsults.length > 0 ? videoReminderText : reminderText)({ doctor: appt.practitioner.displayName, facility: appt.facility.name, startAt: appt.startAt, timezone: appt.facility.timezone }),
       });
       await tx.appointmentReminder.updateMany({ where, data: { status: "SENT", sentAt: now, attempts, providerMessageId: d.providerMessageId.slice(0, 200), lastError: null } });
       return "sent";

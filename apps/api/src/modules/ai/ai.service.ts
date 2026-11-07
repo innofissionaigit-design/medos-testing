@@ -167,10 +167,10 @@ export class AiService {
       select: {
         startedAt: true, diagnoses: { where: { status: "ACTIVE", supersededAtVersion: null }, orderBy: { recordedAt: "asc" }, select: { text: true } },
         documents: { where: { kind: "CONSULTATION", status: { in: ["SIGNED", "AMENDED"] } }, select: { versions: { orderBy: { version: "desc" }, take: 1, select: { content: true } } } },
-        medicationOrders: { where: { status: "SIGNED" }, orderBy: { signedAt: "desc" }, take: 1, select: { items: this.ITEM } },
+        medicationOrders: { where: { status: "SIGNED" }, orderBy: { signedAt: "asc" }, take: 20, select: { items: this.ITEM } },
       },
     });
-    return rows.map((e) => { const c = e.documents[0]?.versions[0]?.content; return { when: day(e.startedAt), complaint: str(c, "chiefComplaint"), advice: str(c, "advice"), diagnoses: e.diagnoses.map((d) => d.text), medicines: this.medicines(e.medicationOrders[0]?.items ?? []) }; });
+    return rows.map((e) => { const c = e.documents[0]?.versions[0]?.content; return { when: day(e.startedAt), complaint: str(c, "chiefComplaint"), advice: str(c, "advice"), diagnoses: e.diagnoses.map((d) => d.text), medicines: this.medicines(e.medicationOrders.flatMap((o) => o.items)) }; });
   }
 
   /** The visit in front of the doctor, as it stands now: draft or signed. */
@@ -180,13 +180,13 @@ export class AiService {
       select: {
         startedAt: true, diagnoses: { where: { status: "ACTIVE", supersededAtVersion: null }, orderBy: { recordedAt: "asc" }, select: { text: true } },
         documents: { where: { kind: "CONSULTATION" }, select: { status: true, draft: true, versions: { orderBy: { version: "desc" }, take: 1, select: { content: true } } } },
-        medicationOrders: { where: { status: { in: ["DRAFT", "SIGNED"] } }, orderBy: { createdAt: "desc" }, take: 1, select: { items: this.ITEM } },
+        medicationOrders: { where: { status: { in: ["DRAFT", "SIGNED"] } }, orderBy: { createdAt: "asc" }, take: 20, select: { items: this.ITEM } },
       },
     });
     const doc = e.documents[0];
     const content = doc ? (doc.status === "DRAFT" ? doc.draft : doc.versions[0]?.content) : null;
     const inner = content && typeof content === "object" && "content" in (content as object) ? (content as { content: unknown }).content : content;
-    return { when: day(e.startedAt), complaint: str(inner, "chiefComplaint"), advice: str(inner, "advice"), diagnoses: e.diagnoses.map((d) => d.text), medicines: this.medicines(e.medicationOrders[0]?.items ?? []) };
+    return { when: day(e.startedAt), complaint: str(inner, "chiefComplaint"), advice: str(inner, "advice"), diagnoses: e.diagnoses.map((d) => d.text), medicines: this.medicines(e.medicationOrders.flatMap((o) => o.items)) };
   }
 
   async draft(ctx: RequestContext, encounterId: string, input: z.infer<typeof draftSchema>) {

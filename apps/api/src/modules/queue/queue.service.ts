@@ -163,6 +163,11 @@ export class QueueService {
     return this.prisma.$transaction(async (tx) => {
       const entry = await tx.queueEntry.findFirst({ where: { id, tenantId: ctx.tenantId, facilityId: ctx.facilityId } });
       if (!entry) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      if (!ctx.permissions.has("QUEUE_MANAGE")) {
+        // Without queue management a person may only change the priority of patients waiting for themselves.
+        const owner = await tx.practitioner.findFirst({ where: { id: entry.practitionerId, tenantId: ctx.tenantId }, select: { userId: true } });
+        this.authorize(ctx, owner?.userId ?? null, false);
+      }
       if (entry.status !== "WAITING" && entry.status !== "CALLED") throw new DomainError("INVALID_STATE", "Priority can only be changed while the patient is waiting", 409);
       await tx.queueEntry.updateMany({ where: { id, tenantId: ctx.tenantId, status: { in: ["WAITING", "CALLED"] } }, data: { priority, version: { increment: 1 } } });
       await this.audit.record(tx, actorOf(ctx), { action: "QUEUE_PRIORITY_CHANGED", entityType: "QueueEntry", entityId: id, metadata: { from: entry.priority, to: priority } });

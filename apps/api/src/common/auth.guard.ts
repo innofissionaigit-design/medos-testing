@@ -16,7 +16,8 @@ import type { AuthedRequest } from "./request-context";
 export const API_KEY_PREFIX = "mdk_";
 export const hashApiKey = (key: string): string => createHash("sha256").update(key).digest("hex");
 
-export interface AccessClaims { sub: string; tid: string; fid: string; typ: "access" }
+/** `sid` is the session the token belongs to (the refresh-token family): it is alive only while that family has an unused, unexpired refresh token. */
+export interface AccessClaims { sub: string; tid: string; fid: string; sid: string; typ: "access" }
 
 /**
  * Global guard. For every non-public route it:
@@ -48,10 +49,10 @@ export class AuthGuard implements CanActivate {
     let claims: AccessClaims;
     try {
       const decoded = jwt.verify(raw, this.config.JWT_ACCESS_SECRET, { algorithms: ["HS256"] }) as jwt.JwtPayload;
-      if (decoded["typ"] !== "access" || typeof decoded.sub !== "string" || typeof decoded["tid"] !== "string" || typeof decoded["fid"] !== "string") {
+      if (decoded["typ"] !== "access" || typeof decoded.sub !== "string" || typeof decoded["tid"] !== "string" || typeof decoded["fid"] !== "string" || typeof decoded["sid"] !== "string") {
         throw new Error("bad claims");
       }
-      claims = { sub: decoded.sub, tid: decoded["tid"] as string, fid: decoded["fid"] as string, typ: "access" };
+      claims = { sub: decoded.sub, tid: decoded["tid"] as string, fid: decoded["fid"] as string, sid: decoded["sid"] as string, typ: "access" };
     } catch {
       throw new DomainError("UNAUTHENTICATED", "Authentication required", 401);
     }
@@ -65,6 +66,9 @@ export class AuthGuard implements CanActivate {
         tenantId: claims.tid,
         status: "ACTIVE",
         tenant: { status: "ACTIVE" },
+        // The session must still be alive: signing out, a password reset or change, a refresh-token reuse alarm or the session running out ends it at once, not
+        // when the access token's own 15 minutes are up. (Rotating the refresh token keeps the session: the family always holds the newest unused one.)
+        tokens: { some: { familyId: claims.sid, tenantId: claims.tid, revokedAt: null, expiresAt: { gt: new Date() } } },
       },
       select: {
         facilities: { where: { facilityId: claims.fid, tenantId: claims.tid, facility: { status: "ACTIVE" } }, select: { facilityId: true } },

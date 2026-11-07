@@ -6,6 +6,7 @@ import { z } from "zod";
 import { AuditService, actorOf } from "../../common/audit.service";
 import { IdempotencyService } from "../../common/idempotency.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
+import { NotificationsService } from "../notifications/notifications.service";
 import type { RequestContext } from "../../common/request-context";
 import { chartPatientIds } from "../patients/patient-links";
 import { fmt, round2 } from "../billing/billing.domain";
@@ -67,7 +68,7 @@ export class DispensingService {
   constructor(
     private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly stock: StockService,
     private readonly numbering: NumberingService, private readonly idempotency: IdempotencyService, private readonly invoices: InvoicesService,
-    private readonly ledger: LedgerService, private readonly allergies: AllergiesService, private readonly testOrders: TestOrdersService,
+    private readonly notifications: NotificationsService, private readonly ledger: LedgerService, private readonly allergies: AllergiesService, private readonly testOrders: TestOrdersService,
   ) {}
 
   // ───── prescription queue ─────
@@ -210,6 +211,8 @@ export class DispensingService {
           lines: lines.map((l) => ({ description: l.label, quantity: new Decimal(l.quantity), unitPrice: l.unitPrice, taxPercent: new Decimal(0), sourceType: "DISPENSE", sourceId: l.id, hsnSac: l.hsn })),
         });
         invoice = { id: created.id, invoiceNumber: created.invoiceNumber };
+        // The pharmacy does not take payment (docs/billing-roles.md): the cashiers are told a bill is waiting.
+        await this.notifications.notifyPermission(tx, ["PAYMENT_CREATE"], { tenantId: ctx.tenantId, facilityId: ctx.facilityId, type: "PHARMACY_BILL_WAITING", entityType: "Invoice", entityId: created.id, dedupeKey: `PHARMACY_BILL_WAITING:${created.id}` });
         await tx.dispense.create({
           data: { id: header.id, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId, medicationOrderId: order?.id ?? null, encounterId: order?.encounterId ?? scan?.encounterId ?? null, prescriptionScanId: scan?.id ?? null, dispenseNumber, invoiceId: invoice.id, subtotal: total.minus(gstIncluded).toFixed(2), taxTotal: gstIncluded.toFixed(2), total: total.toFixed(2), notes: input.notes ?? null, dispensedById: ctx.userId },
         });
@@ -224,7 +227,7 @@ export class DispensingService {
         if (done.count !== 1) throw new DomainError("INVALID_STATE", "This handwritten prescription was already dealt with by the pharmacy", 409);
       }
       await this.audit.record(tx, actorOf(ctx), { action: "PHARMACY_DISPENSED", entityType: "Dispense", entityId: header.id, metadata: { scanId: scan?.id ?? null, handwrittenVerified: scan ? true : undefined, completesPrescription: scan ? input.completesPrescription !== false : undefined, dispenseNumber, lines: lines.length, total: fmt(total), orderNumber: order?.orderNumber ?? null, invoiceNumber: invoice?.invoiceNumber ?? null, chargedToAdmission: !!input.chargeToAdmission } });
-      if (warnings.length) await this.audit.record(tx, actorOf(ctx), { action: "DISPENSE_ALLERGY_ACKNOWLEDGED", entityType: "Dispense", entityId: header.id, metadata: { allergies: warnings.map((w) => w.allergen) } });
+      if (warnings.length) await this.audit.record(tx, actorOf(ctx), { action: "DISPENSE_ALLERGY_ACKNOWLEDGED", entityType: "Dispense", entityId: header.id, metadata: { allergyIds: warnings.map((w) => w.allergyId), severities: warnings.map((w) => w.severity) } });
       return { dispense: await this.view(tx, ctx, header.id) };
     });
   }

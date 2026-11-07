@@ -7,6 +7,8 @@ import { visitScope } from "../../common/data-scope";
 import { PrismaService } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { NumberingService } from "../numbering/numbering.service";
+import { EmailService } from "../email/email.service";
+import { NotificationsService } from "../notifications/notifications.service";
 
 const MODALITIES = ["XRAY", "ULTRASOUND", "CT", "MRI", "MAMMOGRAPHY", "OTHER"] as const;
 
@@ -38,7 +40,7 @@ const nameOf = (p: { firstName: string; lastName: string | null }) => [p.firstNa
  */
 @Injectable()
 export class RadiologyService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService, private readonly notifications: NotificationsService, private readonly email: EmailService) {}
 
   async worklist(ctx: RequestContext, q: z.infer<typeof worklistSchema>) {
     const search: Prisma.TestOrderWhereInput[] = q.q ? [
@@ -125,6 +127,8 @@ export class RadiologyService {
       await tx.radStudy.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: s.id } }, data: { status: "REPORTED", currentVersion: 1, hasCritical: input.critical } });
       await this.audit.record(tx, actorOf(ctx), { action: "RAD_REPORT_SIGNED", entityType: "RadStudy", entityId: s.id, metadata: { testOrderId: s.testOrderId, version: 1, critical: input.critical } });
       if (input.critical) await this.audit.record(tx, actorOf(ctx), { action: "RAD_CRITICAL_FINDING", entityType: "RadStudy", entityId: s.id, metadata: { testOrderId: s.testOrderId, version: 1 } });
+      if (input.critical) await this.notifications.criticalResult(tx, ctx, "RAD", s.testOrderId, s.id, 1);
+      await this.email.reportReadyEmail(tx, ctx, s.testOrderId, s.id, "RadStudy");
       return { id: s.id, status: "REPORTED" as const, currentVersion: 1, hasCritical: input.critical };
     });
   }
@@ -140,6 +144,7 @@ export class RadiologyService {
       await tx.radStudy.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: s.id } }, data: { currentVersion: next, hasCritical: input.critical, ...(input.critical ? { criticalAckById: null, criticalAckAt: null } : {}) } });
       await this.audit.record(tx, actorOf(ctx), { action: "RAD_REPORT_AMENDED", entityType: "RadStudy", entityId: s.id, metadata: { testOrderId: s.testOrderId, version: next, reason: input.reason } });
       if (input.critical) await this.audit.record(tx, actorOf(ctx), { action: "RAD_CRITICAL_FINDING", entityType: "RadStudy", entityId: s.id, metadata: { testOrderId: s.testOrderId, version: next } });
+      if (input.critical) await this.notifications.criticalResult(tx, ctx, "RAD", s.testOrderId, s.id, next);
       return { id: s.id, status: "REPORTED" as const, currentVersion: next, hasCritical: input.critical };
     });
   }

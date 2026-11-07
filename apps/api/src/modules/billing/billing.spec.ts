@@ -95,6 +95,35 @@ describe("billing, payments, refunds and cashier shifts", () => {
       assert.equal(search.body.data[0].code, "DRESS");
     });
 
+    it("the price list screen's operations: every field can be edited, a service is switched off and on (never deleted), the old code gives a clear message, and a switched-off service cannot be billed", async () => {
+      const made = await t.api("post", "/services", a.admin.token).send({ code: "dress2", name: "Dressing", category: "INJECTION_DRESSING", price: "120", taxPercent: "5", sacCode: "999316" });
+      assert.equal(made.status, 201, JSON.stringify(made.body));
+      assert.equal(made.body.data.sacCode, "999316");
+      const id = made.body.data.id as string;
+      const edit = await t.api("patch", `/services/${id}`, a.admin.token).send({ name: "Dressing (large)", category: "PROCEDURE", price: "180.50", taxPercent: "12", sacCode: null });
+      assert.deepEqual([edit.status, edit.body.data.name, edit.body.data.category, edit.body.data.price, edit.body.data.taxPercent, edit.body.data.sacCode], [200, "Dressing (large)", "PROCEDURE", "180.50", "12.00", null]);
+      assert.equal((await t.api("patch", `/services/${id}`, a.admin.token).send({ sacCode: "12" })).status, 400, "SAC/HSN is 4 to 8 digits");
+      assert.equal((await t.api("patch", `/services/${id}`, a.admin.token).send({ price: "-1" })).status, 400);
+      assert.equal((await t.api("patch", `/services/${id}`, a.admin.token).send({ code: "NEW" })).status, 400, "the code does not change");
+      const dup = await t.api("post", "/services", a.admin.token).send({ code: "DRESS2", name: "Again", category: "OTHER", price: 1 });
+      assert.deepEqual([dup.status, dup.body.error.code], [409, "CONFLICT"]);
+      assert.match(dup.body.error.message, /code already exists/);
+      // Switched off: gone from everyday lists and from new invoices, still there for the administrator, and can come back.
+      assert.equal((await t.api("patch", `/services/${id}`, a.admin.token).send({ status: "INACTIVE" })).status, 200);
+      assert.ok(!(await t.api("get", "/services?q=large", rec.token)).body.data.some((x: { id: string }) => x.id === id));
+      const off = (await t.api("get", "/services?includeInactive=true&q=large", a.admin.token)).body.data.find((x: { id: string }) => x.id === id);
+      assert.equal(off.status, "INACTIVE");
+      const p = await registerPatient(t, rec.token);
+      const refused = await t.api("post", "/invoices", cashier.token).send({ patientId: p.id, lines: [{ serviceId: id, quantity: 1 }] });
+      assert.equal(refused.status, 400, "a switched-off service cannot be billed");
+      assert.equal((await t.api("patch", `/services/${id}`, a.admin.token).send({ status: "ACTIVE" })).status, 200);
+      assert.equal((await t.api("post", "/invoices", cashier.token).send({ patientId: p.id, lines: [{ serviceId: id, quantity: 1 }] })).status, 201);
+      assert.equal((await t.api("delete", `/services/${id}`, a.admin.token)).status, 404, "there is no delete: history stays complete");
+      // Paging: the list reports the total and honours page and pageSize.
+      const page = await t.api("get", "/services?pageSize=1&page=2", a.admin.token);
+      assert.deepEqual([page.status, page.body.data.length, page.body.meta.pageSize, page.body.meta.total > 1], [200, 1, 1, true]);
+    });
+
     it("price changes are audited with before/after, and never alter existing invoices", async () => {
       const p = await registerPatient(t, rec.token);
       const d = await draft(p.id, [{ serviceId: svc.consult, quantity: 1 }]);

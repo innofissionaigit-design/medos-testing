@@ -211,11 +211,83 @@ describe("appointments", () => {
       assert.equal((await book(rec.token, { patientId: p.id, practitionerId: d.practitionerId, startAt: otherDay })).status, 409, "no schedule on that weekday");
     });
 
+    it("an appointment takes the length of the doctor's slot when no length is given", async () => {
+      const doc = await makeDoctor(t, a);
+      const put = (windows: unknown[]) => t.api("put", `/practitioners/${doc.practitionerId}/schedule`, a.admin.token).send({ windows });
+      assert.equal((await put([{ dayOfWeek: weekday, start: "09:00", end: "10:00", slotMinutes: 10 }])).status, 200);
+      const at = (hm: number) => zonedToUtc(dayAhead(21), hm, IST).toISOString();
+      const lengthOf = (r: { body: { data: { startAt: string; endAt: string } } }) => (new Date(r.body.data.endAt).getTime() - new Date(r.body.data.startAt).getTime()) / 60_000;
+      const [p1, p2, p3] = await Promise.all([1, 2, 3].map(() => registerPatient(t, rec.token)));
+      // 10-minute slots: with no length given, the booking is 10 minutes (it used to be a fixed 15, which also used up the next slot).
+      const first = await book(rec.token, { patientId: p1!.id, practitionerId: doc.practitionerId, startAt: at(9 * 60) });
+      assert.equal(first.status, 201, JSON.stringify(first.body));
+      assert.equal(lengthOf(first), 10);
+      const second = await book(rec.token, { patientId: p2!.id, practitionerId: doc.practitionerId, startAt: at(9 * 60 + 10) });
+      assert.equal(second.status, 201, "the next slot is still free");
+      assert.equal(lengthOf(second), 10);
+      // Outside the doctor's sessions is still refused; the times the screen offers are the slot starts.
+      const outside = await book(rec.token, { patientId: p3!.id, practitionerId: doc.practitionerId, startAt: at(10 * 60 + 30) });
+      assert.deepEqual([outside.status, outside.body.error.code], [409, "SLOT_UNAVAILABLE"]);
+      // An explicit length is respected. A doctor with no schedule keeps the 15 minute default.
+      const long = await book(rec.token, { patientId: (await registerPatient(t, rec.token)).id, practitionerId: doc.practitionerId, startAt: at(9 * 60 + 40), durationMinutes: 20 });
+      assert.equal(lengthOf(long), 20);
+      const open = await makeDoctor(t, a);
+      const plain = await book(rec.token, { patientId: (await registerPatient(t, rec.token)).id, practitionerId: open.practitionerId, startAt: at(14 * 60 + 7) });
+      assert.equal(lengthOf(plain), 15);
+    });
+
+    it("a doctor with no schedule saved is open at any time; once a schedule is saved, only its sessions can be booked, and saving none closes the doctor", async () => {
+      const doc = await makeDoctor(t, a);
+      const p = await registerPatient(t, rec.token);
+      const night = zonedToUtc(dayAhead(20), 23 * 60, IST).toISOString();
+      assert.equal((await t.api("get", `/practitioners`, a.admin.token)).body.data.find((x: { id: string }) => x.id === doc.practitionerId).scheduleSet, false);
+      assert.equal((await book(rec.token, { patientId: p.id, practitionerId: doc.practitionerId, startAt: night })).status, 201, "never configured: open at any time");
+      // The administrator opens the sessions, then clears them all: the doctor can no longer be booked, and offers no slots.
+      assert.equal((await t.api("put", `/practitioners/${doc.practitionerId}/schedule`, a.admin.token).send({ windows: [{ dayOfWeek: weekday, start: "09:00", end: "10:00" }] })).status, 200);
+      assert.equal((await t.api("put", `/practitioners/${doc.practitionerId}/schedule`, a.admin.token).send({ windows: [] })).status, 200);
+      assert.equal((await t.api("get", `/practitioners`, a.admin.token)).body.data.find((x: { id: string }) => x.id === doc.practitionerId).scheduleSet, true);
+      const p2 = await registerPatient(t, rec.token);
+      const closed = await book(rec.token, { patientId: p2.id, practitionerId: doc.practitionerId, startAt: zonedToUtc(date, 10 * 60, IST).toISOString() });
+      assert.deepEqual([closed.status, closed.body.error.code], [409, "SLOT_UNAVAILABLE"]);
+      assert.deepEqual((await t.api("get", `/practitioners/${doc.practitionerId}/availability`, rec.token).query({ date })).body.data, []);
+      // Saving an empty schedule for a doctor who never had one closes them too, and a later schedule opens only its own sessions.
+      const fresh = await makeDoctor(t, a);
+      assert.equal((await t.api("put", `/practitioners/${fresh.practitionerId}/schedule`, a.admin.token).send({ windows: [] })).status, 200);
+      assert.equal((await book(rec.token, { patientId: p2.id, practitionerId: fresh.practitionerId, startAt: night })).status, 409);
+      assert.equal((await t.api("put", `/practitioners/${fresh.practitionerId}/schedule`, a.admin.token).send({ windows: [{ dayOfWeek: weekday, start: "09:00", end: "12:00", slotMinutes: 30 }] })).status, 200);
+      assert.equal((await book(rec.token, { patientId: p2.id, practitionerId: fresh.practitionerId, startAt: zonedToUtc(date, 10 * 60, IST).toISOString(), durationMinutes: 30 })).status, 201);
+    });
+
+    it("switching a doctor off reports the booked visits still waiting, keeps them, and stops new bookings; editing details never frees or steals a login", async () => {
+      const doc = await makeDoctor(t, a);
+      const p = await registerPatient(t, rec.token);
+      const booked = await book(rec.token, { patientId: p.id, practitionerId: doc.practitionerId, startAt: inMinutes(24 * 60 * 6) });
+      assert.equal(booked.status, 201);
+      const off = await t.api("patch", `/practitioners/${doc.practitionerId}`, a.admin.token).send({ status: "INACTIVE" });
+      assert.equal(off.status, 200);
+      assert.equal(off.body.data.upcomingBooked, 1);
+      assert.equal((await t.prisma.appointment.findFirstOrThrow({ where: { id: booked.body.data.id } })).status, "BOOKED", "nothing is cancelled for them");
+      const evt = await t.prisma.auditEvent.findFirstOrThrow({ where: { tenantId: a.tenantId, action: "PRACTITIONER_UPDATED", entityId: doc.practitionerId } });
+      assert.equal((evt.metadata as { upcomingBooked: number }).upcomingBooked, 1);
+      const p2 = await registerPatient(t, rec.token);
+      assert.equal((await book(rec.token, { patientId: p2.id, practitionerId: doc.practitionerId, startAt: inMinutes(24 * 60 * 7) })).status, 400, "no new bookings");
+      assert.ok(!(await t.api("get", "/practitioners", rec.token)).body.data.some((x: { id: string }) => x.id === doc.practitionerId), "hidden from the booking lists");
+      assert.ok((await t.api("get", "/practitioners?includeInactive=true", a.admin.token)).body.data.some((x: { id: string }) => x.id === doc.practitionerId), "still listed for the administrator");
+      const on = await t.api("patch", `/practitioners/${doc.practitionerId}`, a.admin.token).send({ status: "ACTIVE", specialty: "Cardiology", registrationNo: "WBMC-777" });
+      assert.deepEqual([on.status, on.body.data.upcomingBooked, on.body.data.specialty], [200, 0, "Cardiology"]);
+      // Saving the doctor's own login again is fine; giving it to a second doctor is refused with a plain message.
+      assert.equal((await t.api("patch", `/practitioners/${doc.practitionerId}`, a.admin.token).send({ userId: doc.userId })).status, 200);
+      const second = await makeDoctor(t, a);
+      const clash = await t.api("patch", `/practitioners/${second.practitionerId}`, a.admin.token).send({ userId: doc.userId });
+      assert.deepEqual([clash.status, clash.body.error.code], [409, "CONFLICT"]);
+    });
+
     it("cannot configure schedules for another tenant's practitioner", async () => {
       const bDoc = await makeDoctor(t, b);
       const r = await t.api("put", `/practitioners/${bDoc.practitionerId}/schedule`, a.admin.token).send({ windows: [] });
-      assert.equal(r.status, 400);
-      assert.equal((await t.api("get", `/practitioners/${bDoc.practitionerId}/schedule`, a.admin.token)).status, 400);
+      assert.equal(r.status, 404, "another hospital's practitioner is simply not found");
+      assert.equal((await t.api("get", `/practitioners/${bDoc.practitionerId}/schedule`, a.admin.token)).status, 404);
+      assert.equal((await t.api("get", `/practitioners/${bDoc.practitionerId}/availability?date=2026-11-02`, a.admin.token)).status, 404);
     });
   });
 

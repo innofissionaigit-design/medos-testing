@@ -2,9 +2,9 @@
 import { FillFromScan, type FillResult } from "@/components/scan-prescription";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Button, Card, ErrorNote, Field, Input, Notice, Select, StatusBadge, Textarea, useDebounced } from "@/components/ui";
-import { FOOD_OPTIONS, toPayload, type RxItem } from "@/components/rx-editor";
-import { api, errorText } from "@/lib/api";
+import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, StatusBadge, Textarea, useDebounced } from "@/components/ui";
+import { FOOD_OPTIONS, RxRows, toPayload, type RxItem } from "@/components/rx-editor";
+import { api, ApiError, errorText } from "@/lib/api";
 import { useMe } from "@/lib/me";
 
 /** The parts of a prescription besides the medicines. */
@@ -292,6 +292,88 @@ interface ShareRow { id: string; status: "ACTIVE" | "EXPIRED" | "REVOKED"; creat
 interface SendConfig { provider: string; connected: boolean; autoSend: boolean; channel: "WHATSAPP" | "SMS"; linkDays: number }
 interface SendRow { id: string; channel: string; to: string; trigger: "AUTO" | "MANUAL"; status: "PENDING" | "SENT" | "FAILED"; attempts: number; createdAt: string; sentAt: string | null; sentForReal: boolean; error: string | null; by: string | null }
 interface ShareCreated { id: string; expiresAt: string; recipientMask: string | null; path: string; whatsappNumber: string | null }
+
+/**
+ * Changes one medicine of a signed prescription (dose, how often, how long, a different brand or medicine). The old medicine stays on the record as stopped; the new
+ * one is signed as a one-medicine prescription with its own number. The signed note is not touched.
+ */
+export function AmendMedicine({ item, onClose, onDone }: { item: RxItem & { id: string }; onClose: () => void; onDone: () => void }) {
+  const [rows, setRows] = useState<RxItem[]>([{ ...item, qtyAuto: false }]);
+  const [reason, setReason] = useState("");
+  const [warnings, setWarnings] = useState<{ allergen: string; matchedItem: string }[] | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const save = useMutation({
+    mutationFn: () => api.post(`/medication-order-items/${item.id}/amend`, { reason: reason.trim(), item: toPayload(rows[0]!), ...(confirmed ? { acknowledgeAllergyWarnings: true } : {}) }),
+    onSuccess: onDone,
+    onError: (e) => { if (e instanceof ApiError && e.code === "ALLERGY_CONFLICT") setWarnings(((e.details as { allergyWarnings?: { allergen: string; matchedItem: string }[] } | undefined)?.allergyWarnings) ?? []); },
+  });
+  return (
+    <Modal title={`Change ${item.genericName}`} onClose={onClose} wide>
+      <div className="space-y-3">
+        <Notice tone="info">The signed prescription stays as it was signed. {item.genericName} is marked stopped (with your reason) and the new medicine is signed now as its own prescription.{(item.dispensedQuantity ?? 0) > 0 ? ` The pharmacy has already given ${item.dispensedQuantity} of the old one.` : ""}</Notice>
+        <RxRows items={rows} setItems={setRows} disabled={false} />
+        <Field label="Why is it being changed?" hint="At least 3 characters; kept with the record"><Input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+        {warnings && warnings.length > 0 && (
+          <div className="space-y-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm">
+            <p className="font-medium text-red-900">Allergy alert: {warnings.map((w) => `${w.matchedItem} matches ${w.allergen}`).join("; ")}</p>
+            <label className="flex items-center gap-2"><input type="checkbox" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} /> I have reviewed this and still want to prescribe it</label>
+          </div>
+        )}
+        <ErrorNote error={warnings ? null : save.error} />
+        <div className="flex gap-2">
+          <Button loading={save.isPending} disabled={reason.trim().length < 3 || !rows[0]?.genericName.trim() || (!!warnings && warnings.length > 0 && !confirmed)} onClick={() => save.mutate()}>Sign the change</Button>
+          <Button variant="secondary" onClick={onClose}>Keep it as it is</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/**
+ * Stops a medicine of a signed prescription (for example after a reaction, or one the pharmacy has already given, which an amendment cannot replace). The signed
+ * note stays as signed; the stop is kept as a separate record with the doctor's name, time and reason, and the pharmacy and nurses stop giving it.
+ */
+export function StopMedicinesCard({ orders, canStop, onChanged }: { orders: { id: string; status: string; items: RxItem[] }[]; canStop: boolean; onChanged: () => void }) {
+  const [stopping, setStopping] = useState<{ id: string; name: string; given: number } | null>(null);
+  const [reason, setReason] = useState("");
+  const [changing, setChanging] = useState<(RxItem & { id: string }) | null>(null);
+  const stop = useMutation({ mutationFn: (v: { id: string; reason: string }) => api.post(`/medication-order-items/${v.id}/stop`, { reason: v.reason }), onSuccess: () => { setStopping(null); setReason(""); onChanged(); } });
+  const signed = orders.filter((o) => o.status === "SIGNED");
+  if (signed.length === 0) return null;
+  return (
+    <Card title="Signed medicines">
+      {signed.map((o) => (
+        <ul key={o.id} className="divide-y divide-slate-100 text-sm">
+          {o.items.flatMap((i) => (i.id ? [{ ...i, id: i.id }] : [])).map((i) => {
+            const name = [i.genericName, i.strength].filter(Boolean).join(" ");
+            return (
+              <li key={i.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
+                <div><span className={i.status === "STOPPED" ? "font-medium text-slate-500 line-through" : "font-medium"}>{name}</span> <span className="text-slate-600">{i.dosage}, {i.frequency === "OTHER" ? i.frequencyText ?? "as directed" : i.frequency}</span>
+                  {(i.dispensedQuantity ?? 0) > 0 && <span className="ml-2 text-xs text-slate-500">{i.dispensedQuantity} given by pharmacy</span>}
+                  {i.status === "STOPPED" && <div className="text-xs text-red-700">Stopped{i.stopReason ? `: ${i.stopReason}` : ""}</div>}
+                </div>
+                {i.status === "ACTIVE" && canStop && <div className="flex gap-2"><Button variant="secondary" onClick={() => setChanging(i)}>Change</Button><Button variant="secondary" onClick={() => { stop.reset(); setReason(""); setStopping({ id: i.id, name, given: i.dispensedQuantity ?? 0 }); }}>Stop</Button></div>}
+                {i.status === "STOPPED" && i.stopReason?.startsWith("Amended:") && <span className="text-xs text-slate-500">replaced</span>}
+              </li>
+            );
+          })}
+        </ul>
+      ))}
+      {changing && <AmendMedicine item={changing} onClose={() => setChanging(null)} onDone={() => { setChanging(null); onChanged(); }} />}
+      {stopping && (
+        <div className="mt-3 space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3">
+          <Notice tone="warn">Stop {stopping.name}? The signed prescription stays as it was signed; this is recorded as stopped with your name and reason, and the pharmacy will not give any more.{stopping.given > 0 ? ` ${stopping.given} already given cannot be taken back.` : ""}</Notice>
+          <Field label="Reason for stopping" hint="At least 3 characters"><Input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+          <div className="flex gap-2">
+            <Button variant="danger" loading={stop.isPending} disabled={reason.trim().length < 3} onClick={() => stop.mutate({ id: stopping.id, reason: reason.trim() })}>Stop medicine</Button>
+            <Button variant="secondary" onClick={() => { setStopping(null); setReason(""); }}>Keep it</Button>
+          </div>
+          <ErrorNote error={stop.error} />
+        </div>
+      )}
+    </Card>
+  );
+}
 
 /** Give the patient their signed prescription: a link that opens the prescription (and its PDF) without signing in. Nothing is sent by the system; staff copy the
  *  link or open WhatsApp with the message ready. The link is shown once, expires, and can be revoked. */

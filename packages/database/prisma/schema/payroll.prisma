@@ -32,6 +32,8 @@ model Employee {
   user       User?             @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
   structures SalaryStructure[]
   payslips   Payslip[]
+  attendance AttendanceDay[]
+  leave      LeaveRequest[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, employeeCode])
@@ -100,6 +102,9 @@ model Payslip {
   hra              Decimal  @db.Decimal(14, 2)
   otherAllowance   Decimal  @db.Decimal(14, 2)
   bonus            Decimal  @default(0) @db.Decimal(14, 2)
+  /// Pay owed for earlier months (a backdated raise or a correction), added on top of this month's pay.
+  arrears          Decimal  @default(0) @db.Decimal(14, 2)
+  arrearsNote      String?
   gross            Decimal  @db.Decimal(14, 2)
   pfEmployee       Decimal  @db.Decimal(14, 2)
   esiEmployee      Decimal  @db.Decimal(14, 2)
@@ -116,7 +121,134 @@ model Payslip {
   run       PayrollRun      @relation(fields: [tenantId, runId], references: [tenantId, id], onDelete: Restrict)
   employee  Employee        @relation(fields: [tenantId, employeeId], references: [tenantId, id], onDelete: Restrict)
   structure SalaryStructure @relation(fields: [tenantId, structureId], references: [tenantId, id], onDelete: Restrict)
+  arrearsPaid    PayslipArrearsCover[] @relation("ArrearsPaidBy")
+  arrearsCovered PayslipArrearsCover[] @relation("ArrearsCovered")
 
   @@unique([tenantId, id])
   @@unique([tenantId, runId, employeeId])
+}
+
+// Attendance and leave (docs/payroll.md): a day-by-day attendance record per employee, and leave applications that an approver accepts or rejects. Approved leave
+// writes ON_LEAVE days; the monthly run turns absent days, half days and unpaid leave into days of loss of pay. Days of a month that has a live payroll run are frozen.
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  HALF_DAY
+  ON_LEAVE
+  WEEKLY_OFF
+  HOLIDAY
+}
+
+enum LeaveRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+/// A kind of leave the hospital gives (casual, sick, earned, unpaid...). A null yearly allowance means no limit (normally unpaid leave).
+model LeaveType {
+  id              String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String       @db.Uuid
+  facilityId      String       @db.Uuid
+  name            String
+  isPaid          Boolean      @default(true)
+  yearlyAllowance Decimal?     @db.Decimal(5, 1)
+  /// The most unused days of last year that are added to this year (0 = none are carried forward).
+  carryForwardMax Decimal      @default(0) @db.Decimal(5, 1)
+  status          ActiveStatus @default(ACTIVE)
+  createdById     String       @db.Uuid
+  createdAt       DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime     @updatedAt @db.Timestamptz(3)
+
+  requests LeaveRequest[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, name])
+}
+
+model LeaveRequest {
+  id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String             @db.Uuid
+  facilityId    String             @db.Uuid
+  employeeId    String             @db.Uuid
+  leaveTypeId   String             @db.Uuid
+  fromDate      DateTime           @db.Date
+  toDate        DateTime           @db.Date
+  /// Calendar days actually taken; set when the leave is approved (days already marked as a weekly off or holiday are not counted).
+  days          Decimal?           @db.Decimal(5, 1)
+  /// Half a day of leave on a single day (the other half is worked).
+  halfDay       Boolean            @default(false)
+  reason        String?
+  status        LeaveRequestStatus @default(PENDING)
+  requestedById String             @db.Uuid
+  decidedById   String?            @db.Uuid
+  decidedAt     DateTime?          @db.Timestamptz(3)
+  decisionNote  String?
+  createdAt     DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime           @updatedAt @db.Timestamptz(3)
+
+  employee   Employee        @relation(fields: [tenantId, employeeId], references: [tenantId, id], onDelete: Restrict)
+  leaveType  LeaveType       @relation(fields: [tenantId, leaveTypeId], references: [tenantId, id], onDelete: Restrict)
+  attendance AttendanceDay[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, status, fromDate(sort: Desc)])
+  @@index([tenantId, employeeId, fromDate(sort: Desc)])
+}
+
+model AttendanceDay {
+  id             String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String           @db.Uuid
+  facilityId     String           @db.Uuid
+  employeeId     String           @db.Uuid
+  date           DateTime         @db.Date
+  status         AttendanceStatus
+  leaveRequestId String?          @db.Uuid
+  /// Only with ON_LEAVE: half a day of leave, the rest of the day worked.
+  halfDay        Boolean          @default(false)
+  note           String?
+  markedById     String           @db.Uuid
+  createdAt      DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime         @updatedAt @db.Timestamptz(3)
+
+  employee     Employee      @relation(fields: [tenantId, employeeId], references: [tenantId, id], onDelete: Restrict)
+  leaveRequest LeaveRequest? @relation(fields: [tenantId, leaveRequestId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, employeeId, date])
+  @@index([tenantId, facilityId, date])
+}
+
+/// A day the facility is closed for everyone (a public holiday). Weekly offs are a setting (PAYROLL_WEEKLY_OFF_DAYS), not rows.
+model PayrollHoliday {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  date        DateTime @db.Date
+  name        String
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, date])
+}
+
+/// Records that an earlier month's payslip has had its pay difference paid as arrears on a later payslip, so it is never suggested twice.
+model PayslipArrearsCover {
+  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String   @db.Uuid
+  payslipId        String   @db.Uuid
+  coveredPayslipId String   @db.Uuid
+  amount           Decimal  @db.Decimal(14, 2)
+  createdById      String   @db.Uuid
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+
+  payslip        Payslip @relation("ArrearsPaidBy", fields: [tenantId, payslipId], references: [tenantId, id], onDelete: Restrict)
+  coveredPayslip Payslip @relation("ArrearsCovered", fields: [tenantId, coveredPayslipId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, coveredPayslipId])
+  @@index([tenantId, payslipId])
 }

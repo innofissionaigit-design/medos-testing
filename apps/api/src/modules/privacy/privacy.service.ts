@@ -11,7 +11,7 @@ import { dateOnly, localDateStr } from "../../common/time";
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use YYYY-MM-DD").refine((s) => !Number.isNaN(dateOnly(s).getTime()) && dateOnly(s).toISOString().startsWith(s), "Not a real date");
 
 export const recordConsentSchema = z.object({
-  purpose: z.enum(["PRIVACY_NOTICE_ACKNOWLEDGED", "APPOINTMENT_REMINDERS"]),
+  purpose: z.enum(["PRIVACY_NOTICE_ACKNOWLEDGED", "APPOINTMENT_REMINDERS", "EMAIL_MESSAGES"]),
   status: z.enum(["GRANTED", "WITHDRAWN"]),
   method: z.enum(["VERBAL", "WRITTEN", "DIGITAL"]),
   noticeVersion: z.string().trim().min(1).max(60).optional(),

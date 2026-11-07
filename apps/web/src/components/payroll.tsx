@@ -8,7 +8,7 @@ import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Spinner, T
 interface Structure { id: string; effectiveFrom: string; basic: string; hra: string; otherAllowance: string; gross: string }
 interface Employee { id: string; employeeCode: string; fullName: string; designation: string; department: string | null; joinedOn: string; status: string; bankAccount: string | null; current: Structure | null }
 interface RunRow { id: string; month: string; status: string; gross: string; net: string; payslips: number }
-interface Slip { id: string; employee: { code: string; name: string }; daysInMonth: number; lopDays: string; basic: string; hra: string; otherAllowance: string; bonus: string; gross: string; pfEmployee: string; esiEmployee: string; professionalTax: string; tds: string; otherDeduction: string; totalDeductions: string; net: string; note: string | null }
+interface Slip { id: string; employee: { code: string; name: string }; daysInMonth: number; lopDays: string; basic: string; hra: string; otherAllowance: string; bonus: string; arrears: string; arrearsNote: string | null; gross: string; pfEmployee: string; esiEmployee: string; professionalTax: string; tds: string; otherDeduction: string; totalDeductions: string; net: string; note: string | null }
 interface RunDetail extends RunRow { deductions: string; employerCost: string; preparedBy: string | null; approvedBy: string | null; paidBy: string | null; paidOn: string | null; cancelReason: string | null; slips: Slip[] }
 interface Mine extends Slip { month: string; runStatus: string }
 
@@ -18,18 +18,35 @@ const thisMonth = () => today().slice(0, 7);
 
 function SlipEditor({ runId, slip, onClose }: { runId: string; slip: Slip; onClose: () => void }) {
   const qc = useQueryClient();
-  const [f, setF] = useState({ lopDays: slip.lopDays, bonus: slip.bonus, tds: slip.tds, otherDeduction: slip.otherDeduction, note: slip.note ?? "" });
-  const save = useMutation({ mutationFn: () => api.put(`/payroll/runs/${runId}/payslips/${slip.id}`, { lopDays: Number(f.lopDays), bonus: f.bonus, tds: f.tds, otherDeduction: f.otherDeduction, note: f.note.trim() || null }), onSuccess: () => { void qc.invalidateQueries({ queryKey: ["payroll-run", runId] }); onClose(); } });
-  const num = (k: "lopDays" | "bonus" | "tds" | "otherDeduction") => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value.replace(/[^0-9.]/g, "") });
+  const [f, setF] = useState({ lopDays: slip.lopDays, bonus: slip.bonus, arrears: slip.arrears, arrearsNote: slip.arrearsNote ?? "", tds: slip.tds, otherDeduction: slip.otherDeduction, note: slip.note ?? "" });
+  // Pay owed for earlier months (a backdated raise): suggested from the approved payslips of the last year, added once each.
+  const sug = useQuery({ queryKey: ["payroll-arrears", runId, slip.id], queryFn: () => api.get<{ payslipId: string; month: string; paid: string; shouldHaveBeen: string; amount: string }[]>(`/payroll/runs/${runId}/payslips/${slip.id}/arrears`) });
+  const [picked, setPicked] = useState<string[]>([]);
+  const addSuggested = useMutation({ mutationFn: () => api.post<Slip>(`/payroll/runs/${runId}/payslips/${slip.id}/arrears`, { payslipIds: picked }), onSuccess: (s) => { setF((x) => ({ ...x, arrears: s.arrears, arrearsNote: s.arrearsNote ?? "" })); setPicked([]); void sug.refetch(); void qc.invalidateQueries({ queryKey: ["payroll-run", runId] }); } });
+  const save = useMutation({ mutationFn: () => api.put(`/payroll/runs/${runId}/payslips/${slip.id}`, { lopDays: Number(f.lopDays), bonus: f.bonus, arrears: f.arrears || "0", arrearsNote: f.arrearsNote.trim() || null, tds: f.tds, otherDeduction: f.otherDeduction, note: f.note.trim() || null }), onSuccess: () => { void qc.invalidateQueries({ queryKey: ["payroll-run", runId] }); onClose(); } });
+  const num = (k: "lopDays" | "bonus" | "arrears" | "tds" | "otherDeduction") => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: e.target.value.replace(/[^0-9.]/g, "") });
   return (
     <Modal title={`${slip.employee.name}: pay for this month`} onClose={onClose}>
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-2">
           <Field label={`Days of loss of pay (of ${slip.daysInMonth})`}><Input inputMode="decimal" value={f.lopDays} onChange={num("lopDays")} /></Field>
           <Field label="Bonus"><Input inputMode="decimal" value={f.bonus} onChange={num("bonus")} /></Field>
+          <Field label="Arrears (pay owed for earlier months)"><Input inputMode="decimal" value={f.arrears} onChange={num("arrears")} /></Field>
+          <Field label="Arrears for"><Input value={f.arrearsNote} placeholder="e.g. raise from December" onChange={(e) => setF({ ...f, arrearsNote: e.target.value })} /></Field>
           <Field label="Income tax (TDS)"><Input inputMode="decimal" value={f.tds} onChange={num("tds")} /></Field>
           <Field label="Other deductions"><Input inputMode="decimal" value={f.otherDeduction} onChange={num("otherDeduction")} /></Field>
         </div>
+        {(sug.data?.length ?? 0) > 0 && (
+          <div className="space-y-2 rounded-md border border-blue-200 bg-blue-50 p-3 text-sm">
+            <p className="font-medium">Pay owed for earlier months</p>
+            {sug.data!.map((s) => (
+              <label key={s.payslipId} className="flex items-center gap-2"><input type="checkbox" checked={picked.includes(s.payslipId)} onChange={(e) => setPicked(e.target.checked ? [...picked, s.payslipId] : picked.filter((x) => x !== s.payslipId))} /> {s.month}: paid {s.paid}, should have been {s.shouldHaveBeen} <b>(owed {s.amount})</b></label>
+            ))}
+            <Button variant="secondary" disabled={picked.length === 0} loading={addSuggested.isPending} onClick={() => addSuggested.mutate()}>Add to this payslip</Button>
+            <ErrorNote error={addSuggested.error} />
+            <p className="text-xs text-slate-600">Each month can be added once. Arrears are paid on top of this month's pay; provident fund, ESI and professional tax are not recalculated for them.</p>
+          </div>
+        )}
         <Field label="Note"><Input value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} /></Field>
         <p className="text-xs text-slate-500">Provident fund, ESI and professional tax are worked out for you when you save.</p>
         <ErrorNote error={save.error} />
@@ -93,7 +110,8 @@ export function PayrollRuns() {
   const [month, setMonth] = useState(thisMonth());
   const [open, setOpen] = useState<string | null>(null);
   const [skipped, setSkipped] = useState<string[]>([]);
-  const create = useMutation({ mutationFn: () => api.post<{ id: string; skipped: { fullName: string; reason: string }[] }>("/payroll/runs", { month }), onSuccess: (r) => { setSkipped(r.skipped.map((s) => `${s.fullName}: ${s.reason}`)); void qc.invalidateQueries({ queryKey: ["payroll-runs"] }); setOpen(r.id); } });
+  const [incomplete, setIncomplete] = useState<string[]>([]);
+  const create = useMutation({ mutationFn: () => api.post<{ id: string; skipped: { fullName: string; reason: string }[]; incomplete: { fullName: string; unmarkedDays: number }[] }>("/payroll/runs", { month }), onSuccess: (r) => { setSkipped(r.skipped.map((s) => `${s.fullName}: ${s.reason}`)); setIncomplete(r.incomplete.map((s) => `${s.fullName} (${s.unmarkedDays})`)); void qc.invalidateQueries({ queryKey: ["payroll-runs"] }); setOpen(r.id); } });
   return (
     <Card title="Monthly payroll">
       {can("PAYROLL_MANAGE") && (
@@ -104,6 +122,7 @@ export function PayrollRuns() {
       )}
       <ErrorNote error={create.error} />
       {skipped.length > 0 && <Notice tone="warn">Left out: {skipped.join("; ")}</Notice>}
+      {incomplete.length > 0 && <Notice tone="warn">Attendance not marked for some days (not charged as loss of pay): {incomplete.join("; ")}. Days of loss of pay can still be edited on each payslip while the run is a draft.</Notice>}
       {list.isLoading ? <Spinner /> : (
         <Table head={["Month", "Status", "Payslips", "Gross", "Net", ""]} {...(list.data?.length === 0 ? { empty: "No payroll run yet." } : {})}>
           {list.data?.map((r) => <tr key={r.id}><Td>{r.month}</Td><Td><Badge tone={TONE[r.status] ?? "gray"}>{r.status.toLowerCase()}</Badge></Td><Td>{r.payslips}</Td><Td>{money(r.gross)}</Td><Td>{money(r.net)}</Td><Td><Button variant="secondary" onClick={() => setOpen(r.id)}>Open</Button></Td></tr>)}

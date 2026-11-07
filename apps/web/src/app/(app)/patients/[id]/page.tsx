@@ -1,5 +1,6 @@
 "use client";
 import Link from "next/link";
+import { T } from "@/lib/i18n";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -13,13 +14,14 @@ import { MergeCard } from "@/components/patient-merge";
 import { RegistrationFeeCard } from "@/components/registration-fee";
 import { EditPatientModal, FilesCard, PatientPhoto, type EditablePatient } from "@/components/patient-extras";
 import { AbhaCard } from "@/components/abdm";
+import { IdentifiersCard } from "@/components/patient-identifiers";
 import { Button, Card, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api, newKey, printUrl } from "@/lib/api";
 import { ageText, type AgeValue } from "@/lib/format";
 import { useMe } from "@/lib/me";
 
 interface Patient {
-  id: string; mrn: string | null; firstName: string; lastName: string | null; gender: string; dateOfBirth: string | null; age: AgeValue; mobile: string | null;
+  id: string; mrn: string | null; firstName: string; lastName: string | null; gender: string; dateOfBirth: string | null; age: AgeValue; mobile: string | null; email?: string | null;
   addressLine: string | null; city: string | null; district: string | null; state: string | null; postalCode: string | null; bloodGroup: string | null; version: number; status: string;
   guardianName: string | null; guardianRelation: string | null; guardianMobile: string | null; emergencyContactName: string | null; emergencyContactMobile: string | null;
   mergedInto?: { id: string; mrn: string | null } | null; mergedFrom?: { id: string; mrn: string | null }[];
@@ -60,7 +62,7 @@ function Allergies({ patientId }: { patientId: string }) {
   });
   return (
     <Card title="Allergies">
-      {list.isLoading ? <Spinner /> : list.data?.length === 0 ? <p className="text-sm text-slate-500">No known allergies recorded.</p> : (
+      {list.isLoading ? <Spinner /> : list.data?.length === 0 ? <p className="text-sm text-slate-500"><T>No known allergies recorded.</T></p> : (
         <ul className="mb-3 space-y-1">{list.data?.map((a) => <li key={a.id} className="text-sm"><span className="font-medium text-red-700">{a.allergen}</span> <span className="text-slate-500">· {a.type.toLowerCase()} · {a.severity.toLowerCase().replace("_", " ")}{a.reaction ? ` · ${a.reaction}` : ""}</span></li>)}</ul>
       )}
       {can("ALLERGY_WRITE") && (
@@ -104,12 +106,12 @@ export default function PatientPage() {
         title={name} icon={<PatientPhoto patientId={pt.id} />} subtitle={`MRN ${pt.mrn ?? "—"} · ${pt.gender.toLowerCase()}${ageText(pt.age) ? `, ${ageText(pt.age)}` : ""}`}
         actions={<>
           {!pt.mergedInto && can("APPOINTMENT_CREATE") && <Button disabled={mustPayFirst} title={mustPayFirst ? "Pay the OPD consultation bill first" : undefined} onClick={() => setVisit(true)}>Start OPD visit</Button>}
-          {!pt.mergedInto && can("INVOICE_CREATE") && <Link href={`/billing?patient=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">New bill</Link>}
-          {!pt.mergedInto && can("ADMISSION_CREATE") && features.IPD_ENABLED && <Link href={`/ipd?admit=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Admit</Link>}
+          {!pt.mergedInto && can("INVOICE_CREATE") && <Link href={`/billing?patient=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>New bill</T></Link>}
+          {!pt.mergedInto && can("ADMISSION_CREATE") && features.IPD_ENABLED && <Link href={`/ipd?admit=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Admit</T></Link>}
           {!pt.mergedInto && can("PATIENT_UPDATE") && <Button variant="secondary" onClick={() => setEditing(true)}>Edit details</Button>}
           {!pt.mergedInto && can("PATIENT_MERGE") && <Button variant="secondary" onClick={() => setMerging(true)}>Merge duplicate…</Button>}
-          <a href={printUrl(`patient-labels/${pt.id}`)} target="_blank" rel="noreferrer" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Print label</a>
-          <a href={`${printUrl(`patient-labels/${pt.id}`)}?format=pdf&download=1`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50">Label PDF</a>
+          <a href={printUrl(`patient-labels/${pt.id}`)} target="_blank" rel="noreferrer" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Print label</T></a>
+          <a href={`${printUrl(`patient-labels/${pt.id}`)}?format=pdf&download=1`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Label PDF</T></a>
         </>}
       />
       {pt.mergedInto
@@ -127,7 +129,7 @@ export default function PatientPage() {
       <div className="grid gap-4 lg:grid-cols-3">
         <Card title="Details" className="lg:col-span-1">
           <dl className="grid grid-cols-2 gap-3">
-            <KV label="Mobile">{pt.mobile}</KV><KV label="Date of birth">{pt.dateOfBirth ? date(pt.dateOfBirth) : null}</KV>
+            <KV label="Mobile">{pt.mobile}</KV><KV label="Email">{pt.email}</KV><KV label="Date of birth">{pt.dateOfBirth ? date(pt.dateOfBirth) : null}</KV>
             <KV label="Blood group">{pt.bloodGroup?.replace("_POS", "+").replace("_NEG", "−")}</KV><KV label="City">{pt.city}</KV>
             <div className="col-span-2"><KV label="Address">{[pt.addressLine, pt.district, pt.state, pt.postalCode].filter(Boolean).join(", ") || null}</KV></div>
             {(pt.guardianName || pt.emergencyContactName) && <div className="col-span-2"><KV label="Guardian / emergency contact">{[pt.guardianName && `${pt.guardianName}${pt.guardianRelation ? ` (${pt.guardianRelation})` : ""} ${pt.guardianMobile ?? ""}`, pt.emergencyContactName && `${pt.emergencyContactName} ${pt.emergencyContactMobile ?? ""}`].filter(Boolean).join(" · ")}</KV></div>}
@@ -138,6 +140,7 @@ export default function PatientPage() {
           {!pt.mergedInto && <AdvanceCard patientId={pt.id} />}
           <LedgerCard patientId={pt.id} />
           {can("PATIENT_READ") && <ConsentCard patientId={pt.id} />}
+          {can("PATIENT_READ") && <IdentifiersCard patientId={pt.id} canEdit={can("PATIENT_UPDATE") && !pt.mergedInto} />}
           {can("PATIENT_READ") && !pt.mergedInto && <AbhaCard patientId={pt.id} />}
           <RegistrationFeeCard patientId={pt.id} />
           <FilesCard patientId={pt.id} />

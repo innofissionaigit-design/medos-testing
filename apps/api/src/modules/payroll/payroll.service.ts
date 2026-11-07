@@ -8,7 +8,9 @@ import type { RequestContext } from "../../common/request-context";
 import { fmt } from "../billing/billing.domain";
 import { amount } from "../billing/money.schema";
 import { NumberingService } from "../numbering/numbering.service";
-import { computePay, daysIn } from "./payroll.domain";
+import { SettingsService } from "../settings/settings.service";
+import { AttendanceService } from "./attendance.service";
+import { computePay, daysIn, ratesFromSetting } from "./payroll.domain";
 
 const uuid = z.string().uuid();
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-11-02");
@@ -26,8 +28,9 @@ export const structureSchema = z.object({
 }).strict();
 export const createRunSchema = z.object({ month: z.string().regex(/^\d{4}-(0[1-9]|1[0-2])$/, "Use a month like 2026-11") }).strict();
 export const adjustSlipSchema = z.object({
-  lopDays: z.number().min(0).max(31).multipleOf(0.5).optional(), bonus: amount().optional(), tds: amount().optional(), otherDeduction: amount().optional(), note: text(200).nullable().optional(),
+  lopDays: z.number().min(0).max(31).multipleOf(0.5).optional(), bonus: amount().optional(), arrears: amount().optional(), arrearsNote: text(200).nullable().optional(), tds: amount().optional(), otherDeduction: amount().optional(), note: text(200).nullable().optional(),
 }).strict();
+export const addArrearsSchema = z.object({ payslipIds: z.array(uuid).min(1).max(12) }).strict();
 export const paySchema = z.object({ paidOn: day, reference: z.string().trim().min(4).max(60).optional() }).strict();
 export const cancelSchema = z.object({ reason: z.string().trim().min(5).max(300) }).strict();
 export const listEmployeesSchema = z.object({ q: z.string().trim().min(2).max(60).optional(), status: z.enum(["ACTIVE", "INACTIVE"]).optional(), page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(50) }).strict();
@@ -46,7 +49,7 @@ type SlipRow = Prisma.PayslipGetPayload<{ include: { employee: { select: { emplo
  */
 @Injectable()
 export class PayrollService {
-  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService) {}
+  constructor(private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService, private readonly attendance: AttendanceService, private readonly settings: SettingsService) {}
 
   // ───── employees and structures ─────
 
@@ -146,28 +149,36 @@ export class PayrollService {
       const run = await tx.payrollRun.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, month: start, createdById: ctx.userId }, select: { id: true } });
       const dim = daysIn(start);
       const skipped: { employeeCode: string; fullName: string; reason: string }[] = [];
+      const incomplete: { employeeCode: string; fullName: string; unmarkedDays: number }[] = [];
+      const marks = await this.attendance.forPayroll(tx, ctx, start, end, emps);
+      const rates = ratesFromSetting(await this.settings.get(tx, ctx.tenantId, ctx.facilityId, "PAYROLL_STATUTORY_RATES"));
       for (const e of emps) {
         const s = e.structures[0];
         if (!s) { skipped.push({ employeeCode: e.employeeCode, fullName: e.fullName, reason: "No salary structure" }); continue; }
         const before = e.joinedOn > start ? Math.round((e.joinedOn.getTime() - start.getTime()) / 86_400_000) : 0;
         const after = e.exitedOn && e.exitedOn < end ? Math.round((end.getTime() - e.exitedOn.getTime()) / 86_400_000) : 0;
-        const c = computePay(s, { daysInMonth: dim, lopDays: before + after });
-        await tx.payslip.create({ data: { tenantId: ctx.tenantId, runId: run.id, employeeId: e.id, structureId: s.id, daysInMonth: dim, lopDays: before + after, ...this.money(c) } });
+        // Days of loss of pay: days outside the employee's time at the hospital, plus absences, half days and unpaid leave from the attendance sheet (at most the days in the month).
+        const m = marks.get(e.id)!;
+        const lop = Decimal.min(new Decimal(before + after).plus(m.lossOfPay), dim);
+        const c = computePay(s, { daysInMonth: dim, lopDays: lop }, rates);
+        const why = [m.absent ? `${m.absent} absent` : "", m.halfDay ? `${m.halfDay} half day` : "", m.unpaidLeave ? `${m.unpaidLeave} unpaid leave` : ""].filter(Boolean).join(", ");
+        if (m.unmarked > 0) incomplete.push({ employeeCode: e.employeeCode, fullName: e.fullName, unmarkedDays: m.unmarked });
+        await tx.payslip.create({ data: { tenantId: ctx.tenantId, runId: run.id, employeeId: e.id, structureId: s.id, daysInMonth: dim, lopDays: lop.toFixed(1), note: why ? `From attendance: ${why}` : null, ...this.money(c) } });
       }
-      await this.audit.record(tx, actorOf(ctx), { action: "PAYROLL_RUN_CREATED", entityType: "PayrollRun", entityId: run.id, metadata: { month: input.month, payslips: emps.length - skipped.length, skipped: skipped.length } });
-      return { id: run.id, month: input.month, payslips: emps.length - skipped.length, skipped };
+      await this.audit.record(tx, actorOf(ctx), { action: "PAYROLL_RUN_CREATED", entityType: "PayrollRun", entityId: run.id, metadata: { month: input.month, payslips: emps.length - skipped.length, skipped: skipped.length, incompleteAttendance: incomplete.length } });
+      return { id: run.id, month: input.month, payslips: emps.length - skipped.length, skipped, incomplete };
     });
   }
 
   private money(c: ReturnType<typeof computePay>) {
     const f = (d: Decimal) => d.toFixed(2);
-    return { basic: f(c.basic), hra: f(c.hra), otherAllowance: f(c.otherAllowance), bonus: f(c.bonus), gross: f(c.gross), pfEmployee: f(c.pfEmployee), esiEmployee: f(c.esiEmployee), professionalTax: f(c.professionalTax), tds: f(c.tds), otherDeduction: f(c.otherDeduction), totalDeductions: f(c.totalDeductions), net: f(c.net), pfEmployer: f(c.pfEmployer), esiEmployer: f(c.esiEmployer) };
+    return { basic: f(c.basic), hra: f(c.hra), otherAllowance: f(c.otherAllowance), bonus: f(c.bonus), arrears: f(c.arrears), gross: f(c.gross), pfEmployee: f(c.pfEmployee), esiEmployee: f(c.esiEmployee), professionalTax: f(c.professionalTax), tds: f(c.tds), otherDeduction: f(c.otherDeduction), totalDeductions: f(c.totalDeductions), net: f(c.net), pfEmployer: f(c.pfEmployer), esiEmployer: f(c.esiEmployer) };
   }
 
   private slipView(p: SlipRow) {
     return {
       id: p.id, runId: p.runId, employee: { id: p.employeeId, code: p.employee.employeeCode, name: p.employee.fullName, designation: p.employee.designation, department: p.employee.department, bankAccount: mask(p.employee.bankAccount), pan: mask(p.employee.pan), uan: p.employee.uan, esiNumber: p.employee.esiNumber },
-      daysInMonth: p.daysInMonth, lopDays: p.lopDays.toString(), basic: fmt(p.basic), hra: fmt(p.hra), otherAllowance: fmt(p.otherAllowance), bonus: fmt(p.bonus), gross: fmt(p.gross),
+      daysInMonth: p.daysInMonth, lopDays: p.lopDays.toString(), basic: fmt(p.basic), hra: fmt(p.hra), otherAllowance: fmt(p.otherAllowance), bonus: fmt(p.bonus), arrears: fmt(p.arrears), arrearsNote: p.arrearsNote, gross: fmt(p.gross),
       pfEmployee: fmt(p.pfEmployee), esiEmployee: fmt(p.esiEmployee), professionalTax: fmt(p.professionalTax), tds: fmt(p.tds), otherDeduction: fmt(p.otherDeduction), totalDeductions: fmt(p.totalDeductions), net: fmt(p.net), pfEmployer: fmt(p.pfEmployer), esiEmployer: fmt(p.esiEmployer), note: p.note,
     };
   }
@@ -196,10 +207,80 @@ export class PayrollService {
       if (!p) throw new DomainError("NOT_FOUND", "Resource not found", 404);
       const lop = input.lopDays ?? Number(p.lopDays);
       if (lop > p.daysInMonth) throw new DomainError("VALIDATION_FAILED", `The month has only ${p.daysInMonth} days`, 400, [{ path: "lopDays", message: "More than the days in the month" }]);
-      const c = computePay(p.structure, { daysInMonth: p.daysInMonth, lopDays: lop, bonus: input.bonus ?? p.bonus.toString(), tds: input.tds ?? p.tds.toString(), otherDeduction: input.otherDeduction ?? p.otherDeduction.toString() });
+      const rates = ratesFromSetting(await this.settings.get(tx, ctx.tenantId, ctx.facilityId, "PAYROLL_STATUTORY_RATES"));
+      const c = computePay(p.structure, { daysInMonth: p.daysInMonth, lopDays: lop, bonus: input.bonus ?? p.bonus.toString(), arrears: input.arrears ?? p.arrears.toString(), tds: input.tds ?? p.tds.toString(), otherDeduction: input.otherDeduction ?? p.otherDeduction.toString() }, rates);
       if (c.net.lt(0)) throw new DomainError("VALIDATION_FAILED", "The deductions are more than the pay", 400, [{ path: "tds", message: "Net pay would be negative" }]);
-      await tx.payslip.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: p.id } }, data: { lopDays: lop, ...this.money(c), ...(input.note !== undefined ? { note: input.note } : {}) } });
+      await tx.payslip.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: p.id } }, data: { lopDays: lop, ...this.money(c), ...(input.note !== undefined ? { note: input.note } : {}), ...(input.arrearsNote !== undefined ? { arrearsNote: input.arrearsNote } : {}) } });
       await this.audit.record(tx, actorOf(ctx), { action: "PAYROLL_SLIP_ADJUSTED", entityType: "Payslip", entityId: p.id, metadata: { runId, fields: Object.keys(input) } });
+      return this.slipView(await tx.payslip.findFirstOrThrow({ where: { id: p.id, tenantId: ctx.tenantId }, include: PayrollService.SLIP_INCLUDE }));
+    });
+  }
+
+  // ───── arrears ─────
+
+  /**
+   * Pay owed for earlier months of the same employee (within a year): for each approved or paid month, what the salary structure that applies to that month
+   * today would have paid for the days worked, less what the payslip paid. Only a positive difference is suggested, and a month already added to a payslip of a
+   * run that is not cancelled is never suggested again.
+   */
+  private async arrearsCandidates(tx: Db, ctx: RequestContext, slip: { id: string; employeeId: string }, runMonth: Date) {
+    const rates = ratesFromSetting(await this.settings.get(tx, ctx.tenantId, ctx.facilityId, "PAYROLL_STATUTORY_RATES"));
+    const from = new Date(Date.UTC(runMonth.getUTCFullYear(), runMonth.getUTCMonth() - 12, 1));
+    const earlier = await tx.payslip.findMany({
+      where: { tenantId: ctx.tenantId, employeeId: slip.employeeId, id: { not: slip.id }, run: { facilityId: ctx.facilityId, status: { in: ["APPROVED", "PAID"] }, month: { gte: from, lt: runMonth } } },
+      include: { run: { select: { month: true } } }, orderBy: { run: { month: "asc" } }, take: 12,
+    });
+    if (earlier.length === 0) return [];
+    const covered = new Set((await tx.payslipArrearsCover.findMany({ where: { tenantId: ctx.tenantId, coveredPayslipId: { in: earlier.map((e) => e.id) }, payslip: { run: { status: { not: "CANCELLED" } } } }, select: { coveredPayslipId: true } })).map((c) => c.coveredPayslipId));
+    const structures = await tx.salaryStructure.findMany({ where: { tenantId: ctx.tenantId, employeeId: slip.employeeId }, orderBy: { effectiveFrom: "desc" } });
+    const out: { payslipId: string; month: string; paid: Decimal; shouldHaveBeen: Decimal; amount: Decimal }[] = [];
+    for (const e of earlier) {
+      if (covered.has(e.id)) continue;
+      const monthEnd = new Date(Date.UTC(e.run.month.getUTCFullYear(), e.run.month.getUTCMonth() + 1, 0));
+      const st = structures.find((x) => x.effectiveFrom <= monthEnd);
+      if (!st) continue;
+      const c = computePay(st, { daysInMonth: e.daysInMonth, lopDays: e.lopDays.toString() }, rates);
+      const should = c.basic.plus(c.hra).plus(c.otherAllowance);
+      const paid = new Decimal(e.basic.toString()).plus(e.hra.toString()).plus(e.otherAllowance.toString());
+      const diff = should.minus(paid);
+      if (diff.gt(0)) out.push({ payslipId: e.id, month: iso(e.run.month).slice(0, 7), paid, shouldHaveBeen: should, amount: diff });
+    }
+    return out;
+  }
+
+  private async draftSlip(tx: Db, ctx: RequestContext, runId: string, slipId: string) {
+    const run = await this.lockRun(tx, ctx, runId);
+    if (run.status !== "DRAFT") throw new DomainError("INVALID_STATE", "Only a draft payroll run can be changed", 409);
+    const p = await tx.payslip.findFirst({ where: { id: slipId, tenantId: ctx.tenantId, runId }, include: { structure: true } });
+    if (!p) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+    return { run, p };
+  }
+
+  async arrearsSuggestions(ctx: RequestContext, runId: string, slipId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const { run, p } = await this.draftSlip(tx, ctx, runId, slipId);
+      const rows = await this.arrearsCandidates(tx, ctx, p, run.month);
+      return rows.map((r) => ({ payslipId: r.payslipId, month: r.month, paid: fmt(r.paid), shouldHaveBeen: fmt(r.shouldHaveBeen), amount: fmt(r.amount) }));
+    });
+  }
+
+  /** Adds the chosen earlier months' differences to this draft payslip as arrears. Each month can be added once. */
+  async addArrears(ctx: RequestContext, runId: string, slipId: string, input: z.infer<typeof addArrearsSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      const { run, p } = await this.draftSlip(tx, ctx, runId, slipId);
+      const candidates = await this.arrearsCandidates(tx, ctx, p, run.month);
+      const chosen = [...new Set(input.payslipIds)].map((id) => candidates.find((c) => c.payslipId === id));
+      if (chosen.some((c) => !c)) throw new DomainError("CONFLICT", "One of those months has nothing owed, or was already added to a payslip", 409);
+      const rows = chosen as NonNullable<(typeof chosen)[number]>[];
+      const total = rows.reduce((a, r) => a.plus(r.amount), new Decimal(0));
+      for (const r of rows) await tx.payslipArrearsCover.create({ data: { tenantId: ctx.tenantId, payslipId: p.id, coveredPayslipId: r.payslipId, amount: r.amount.toFixed(2), createdById: ctx.userId } });
+      const rates = ratesFromSetting(await this.settings.get(tx, ctx.tenantId, ctx.facilityId, "PAYROLL_STATUTORY_RATES"));
+      const arrears = new Decimal(p.arrears.toString()).plus(total);
+      const c = computePay(p.structure, { daysInMonth: p.daysInMonth, lopDays: p.lopDays.toString(), bonus: p.bonus.toString(), arrears, tds: p.tds.toString(), otherDeduction: p.otherDeduction.toString() }, rates);
+      const label = `Arrears for ${rows.map((r) => r.month).join(", ")}`;
+      const note = [p.arrearsNote, label].filter(Boolean).join("; ").slice(0, 200);
+      await tx.payslip.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: p.id } }, data: { ...this.money(c), arrearsNote: note } });
+      await this.audit.record(tx, actorOf(ctx), { action: "PAYROLL_ARREARS_ADDED", entityType: "Payslip", entityId: p.id, metadata: { runId, months: rows.map((r) => r.month), amount: fmt(total) } });
       return this.slipView(await tx.payslip.findFirstOrThrow({ where: { id: p.id, tenantId: ctx.tenantId }, include: PayrollService.SLIP_INCLUDE }));
     });
   }

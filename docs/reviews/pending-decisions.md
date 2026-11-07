@@ -20,7 +20,7 @@ MedOS records and enforces what is below as **provisional defaults**. None has b
 | # | Decision needed | Implemented default | If the reviewer disagrees |
 |---|---|---|---|
 | D1 | Reminders: opt-in or opt-out | **Opt-out** (`REMINDERS_REQUIRE_CONSENT` = off): sent unless the patient withdrew. Hospital can switch to opt-in in Settings | Flip the default in `settings.service.ts` |
-| D2 | Which consent purposes exist; notice wording and versions | Two purposes (privacy notice acknowledged, appointment reminders); free-text notice version | Add or rename purposes (enum migration); build notice management |
+| D2 | Which consent purposes exist; notice wording and versions | Three purposes (privacy notice acknowledged, appointment reminders, email messages); free-text notice version | Add or rename purposes (enum migration); build notice management |
 | D3 | Form of consent (verbal, written, digital) and what proof is needed | All three accepted; no attachment of a signed form | Add file attachment, require method per purpose |
 | D4 | Data-request types, answer deadlines, who may handle them | Four types; due date informational; `PRIVACY_MANAGE` held by Administrator | Types and deadlines; role assignment |
 | D5 | Erasure vs retention of clinical and financial records | Records are never deleted; an erasure request is logged and its outcome recorded, nothing is erased | A retention and anonymisation design (needs the legal answer first) |
@@ -29,6 +29,7 @@ MedOS records and enforces what is below as **provisional defaults**. None has b
 | D8 | Children and guardians | Guardian fields exist on the patient; consent is recorded against the patient only | Guardian-as-consenter model |
 | D9 | Staff access: break-glass reason, access reviews | Audit log only | Reason prompt and a review report |
 | D10 | Fiduciary/processor roles, data-processing agreement, hosting location | Not decided; not a software question | Contract and hosting decisions |
+| D11 | Email: opt-in or opt-out, and what an email may contain | **Opt-in** (`EMAIL_REQUIRE_CONSENT` = on): only patients who agreed (the email consent) are emailed; a withdrawal is always respected. No clinical content, no attachments, no mobile or record number in any email ([../email.md](../email.md)) | Switch the setting; widen or narrow the templates |
 
 ## Clinical safety (reviewer: clinician and clinical-safety officer; brief: [clinical-safety.md](clinical-safety.md))
 

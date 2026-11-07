@@ -34,8 +34,8 @@ test("OPD: register → check in → queue → consult → sign → dispense →
   await page.getByLabel("Complaint").fill("Fever and cough for three days");
   await page.getByLabel("Examination").fill("Throat congested, chest clear");
   await page.getByLabel("Diagnosis", { exact: true }).fill("Acute viral fever");
-  await page.getByRole("button", { name: "Add", exact: true }).click();
-  await expect(page.getByText("Acute viral fever")).toBeVisible();
+  await page.locator("form", { has: page.getByLabel("Diagnosis", { exact: true }) }).getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("listitem").getByText("Acute viral fever")).toBeVisible();
 
   await page.getByRole("button", { name: "Add medicine" }).click();
   await page.getByLabel("Medicine", { exact: true }).fill("Paracetamol");
@@ -57,18 +57,24 @@ test("OPD: register → check in → queue → consult → sign → dispense →
   await row.getByRole("button", { name: "Dispense" }).click();
   const dlg = page.getByRole("dialog", { name: /^Dispense —/ });
   await dlg.getByLabel("Medicine").fill("Parac");
-  await dlg.getByRole("listitem").first().click();
+  await dlg.getByRole("listitem").getByRole("button").first().click();
   await dlg.getByRole("button", { name: "Dispense", exact: true }).click();
   await expect(page.getByRole("dialog", { name: /^Dispensed —/ })).toBeVisible();
-  await page.getByRole("button", { name: /^Receive/ }).click();
-  await expect(page.getByText("Open your cashier shift before taking cash")).toBeVisible();
-  await page.getByRole("button", { name: /Open my cash shift/ }).click();
-  await expect(page.getByRole("dialog")).toBeHidden();
+  await page.getByRole("button", { name: "Done" }).click();
 
-  // The prescription has left the queue, and the pharmacy bill is paid.
+  // The pharmacy does not take payment: the prescription has left its queue and the bill waits at the cashier, who collects it.
   await page.goto("/pharmacy");
   await expect(page.getByRole("row", { name: new RegExp(p.first) })).toHaveCount(0);
   await loginAs(page, "cashier1");
+  await page.goto("/billing");
+  await page.getByLabel("Status").selectOption("OUTSTANDING");
+  await page.getByRole("row", { name: new RegExp(p.first) }).first().getByRole("link").first().click();
+  await page.getByRole("button", { name: "Take payment" }).click();
+  const pay = page.getByRole("dialog", { name: /^Take payment/ });
+  await pay.getByLabel("Mode").selectOption("UPI");
+  await pay.getByLabel("Reference").fill("UPI-E2E-0001");
+  await pay.getByRole("button", { name: "Receive payment" }).click();
+  await expect(page.getByRole("dialog")).toBeHidden();
   await page.goto("/billing");
   await page.getByLabel("Status").selectOption("PAID");
   await expect(page.getByRole("row", { name: new RegExp(`${p.first}.*paid|paid.*${p.first}`, "i") }).first()).toBeVisible();

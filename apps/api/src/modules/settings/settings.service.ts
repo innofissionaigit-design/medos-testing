@@ -6,6 +6,7 @@ import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { DEFAULT_CONSENT } from "../print/admission-form-text";
+import { DEFAULT_RATES_SETTING } from "../payroll/payroll.domain";
 
 /** Registry of supported settings: each key has a strict schema and a safe default. Unknown keys are rejected. */
 export const SETTINGS = {
@@ -46,6 +47,11 @@ export const SETTINGS = {
   BOOKING_FEE_CANCEL_CHARGE_PERCENT: { schema: z.number().int().min(0).max(100), default: 0, description: "Share of the booking fee kept as a cancellation charge when a paid booking is cancelled later than the free period (0 = always refundable)" },
   BOOKING_PAYMENT_LINK_ENABLED: { schema: z.boolean(), default: false, description: "Send a payment link on WhatsApp after a booking that carries a booking fee, and cancel the appointment automatically if it is not paid in time (WhatsApp sending is a placeholder for now: docs/booking-payment-link.md)" },
   BOOKING_PAYMENT_WINDOW_MINUTES: { schema: z.number().int().min(15).max(10_080), default: 60, description: "How long the patient has to pay after booking before the appointment is cancelled automatically (15 minutes to 7 days)" },
+  EMAIL_ENABLED: { schema: z.boolean(), default: false, description: "Send appointment, receipt and report-ready emails to patients, and queue test emails (docs/email.md). Off: nothing is queued." },
+  EMAIL_FROM_NAME: { schema: z.string().trim().max(80).refine((v) => !/[\r\n<>"]/.test(v), "Use plain text"), default: "", description: "The name patients see as the sender. Empty: the facility name." },
+  EMAIL_REPLY_TO: { schema: z.string().trim().max(254).refine((v) => v === "" || /^[^@\s]+@[^@\s]+[.][^@\s]+$/.test(v), "Enter an email address or leave it empty"), default: "", description: "Where a patient's reply goes. Empty: no reply address." },
+  EMAIL_REQUIRE_CONSENT: { schema: z.boolean(), default: true, description: "Email only patients who have agreed (the email consent on the patient record). Off: email unless the patient has withdrawn. A legal decision: see docs/reviews/pending-decisions.md." },
+  EMAIL_LANGUAGE: { schema: z.enum(["en", "bn", "hi"]), default: "en", description: "The language emails are written in: English, Bengali or Hindi." },
   PRESCRIPTION_UPLOAD_ENABLED: { schema: z.boolean(), default: false, description: "Let doctors attach a photo or scan of a handwritten prescription to a visit (docs/prescriptions.md)" },
   PRESCRIPTION_OCR_ENABLED: { schema: z.boolean(), default: false, description: "Read uploaded handwritten prescriptions with the OCR service connected to the server. The image is sent to that service; the text it returns is a draft for the doctor to check (docs/prescriptions.md)" },
   EARNINGS_MODEL: { schema: z.enum(["BOTH", "COMMISSION", "FIXED_VALUE"]), default: "BOTH", description: "How doctors are paid from what is collected: a commission (percentage), a fixed value for each visit, or either one per doctor. New earnings rules must follow it (docs/earnings-and-reports.md)" },
@@ -53,7 +59,22 @@ export const SETTINGS = {
   PRESCRIPTION_AUTO_SEND: { schema: z.boolean(), default: false, description: "When a prescription is signed, send the patient a link to it on their own mobile through the connected message provider (docs/prescriptions.md). Staff can also send it by hand" },
   PATIENT_PORTAL_ENABLED: { schema: z.boolean(), default: false, description: "Let patients sign in to the patient app with a code sent to their registered mobile number, to see their appointments, prescriptions, reports and bills, and to ask for an appointment (docs/patient-app.md). Off until the hospital has connected a message provider" },
   TELECONSULT_VIDEO_URL: { schema: z.string().trim().max(200).refine((v) => v === "" || (/^https:\/\//.test(v) && v.includes("{room}")), "Use an https address that contains {room}, for example https://video.example.org/{room}"), default: "", description: "The address of the hospital's video service, with {room} where the name of each consultation's room goes (docs/telemedicine.md). Video consultations cannot be made until it is set. The room name is random and different for every consultation" },
+  TELECONSULT_FEE_AMOUNT: { schema: z.string().trim().regex(/^\d{1,8}(\.\d{1,2})?$/, "Enter an amount with at most 2 decimals"), default: "0.00", description: "Fee for a video consultation in rupees, put on the appointment when it is made a video consultation and the appointment has no booking fee yet (0 = no video fee; docs/telemedicine.md)" },
+  TELECONSULT_PAY_BEFORE_JOIN: { schema: z.boolean(), default: false, description: "Doctor and patient cannot join a video consultation until its fee is paid or skipped (docs/telemedicine.md)" },
+  TELECONSULT_REMINDER_MINUTES: { schema: z.number().int().min(0).max(120), default: 10, description: "Text message to the patient this many minutes before a video consultation, telling them to join from the patient app (0 = no reminder)" },
   AI_ASSISTANT_ENABLED: { schema: z.boolean(), default: false, description: "Let doctors ask the AI assistant for a draft summary of a patient's earlier visits or draft advice for a visit (docs/ai-assistant.md). Drafts are for the doctor to check and are never put on the chart by the assistant. Needs the hospital's own AI provider to be connected, tested and its data sharing confirmed under Administration, AI. Off by default" },
+  PAYROLL_STATUTORY_RATES: {
+    schema: z.object({
+      pfWageCeiling: z.number().min(0).max(1_000_000), pfRate: z.number().min(0).max(1), esiGrossCeiling: z.number().min(0).max(1_000_000), esiEmployeeRate: z.number().min(0).max(1), esiEmployerRate: z.number().min(0).max(1),
+      ptSlabs: z.array(z.object({ upTo: z.number().min(0).max(10_000_000), tax: z.number().min(0).max(100_000) }).strict()).max(10).refine((a) => a.every((x, i) => i === 0 || x.upTo > a[i - 1]!.upTo), "Each slab must end higher than the one before"),
+      ptTop: z.number().min(0).max(100_000),
+    }).strict(),
+    default: DEFAULT_RATES_SETTING,
+    description: "The rates payroll uses: provident fund (rate and wage ceiling), ESI (employee and employer rates, gross ceiling) and the professional tax slabs (monthly gross up to each amount pays that tax; ptTop applies above the last slab). The starting values are common Indian defaults that have not been checked against current law: the hospital's accountant must confirm them (docs/payroll.md). A change applies to payslips calculated afterwards",
+  },
+  INVOICE_TAX_SPLIT: { schema: z.boolean(), default: false, description: "Show and calculate each invoice's tax as two equal halves, CGST and SGST (each worked out and rounded on its own). Applies to invoices created from now on; every invoice keeps the rule it was created with. Whether and how GST applies to your services is for your accountant to decide (docs/gst-and-rounding.md)" },
+  INVOICE_ROUND_OFF: { schema: z.boolean(), default: false, description: "Round each new invoice's total to the nearest whole rupee (50 paise and above rounds up) and show the difference as a round-off line. Applies to invoices created from now on; every invoice keeps the rule it was created with" },
+  PAYROLL_WEEKLY_OFF_DAYS: { schema: z.array(z.number().int().min(0).max(6)).max(6).refine((a) => new Set(a).size === a.length, "Duplicate day"), default: [] as number[], description: "The weekly off days of staff, as day numbers (0 = Sunday, 1 = Monday ... 6 = Saturday). Those days are treated as a weekly off in attendance and are not charged as loss of pay; empty means no common weekly off" },
   PRESCRIPTION_SEND_CHANNEL: { schema: z.enum(["WHATSAPP", "SMS"]), default: "WHATSAPP", description: "How prescription links are sent to patients" },
   PRESCRIPTION_LINK_DAYS: { schema: z.number().int().min(1).max(30), default: 7, description: "How many days a prescription link sent to a patient stays valid" },
   FOLLOWUP_REMINDER_OFFSETS_MINUTES: {

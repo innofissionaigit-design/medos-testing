@@ -1,0 +1,17 @@
+{
+  "name": "MedOS patient app",
+  "short_name": "My health",
+  "description": "See your appointments, prescriptions, reports and bills, and ask for an appointment.",
+  "id": "/patient",
+  "start_url": "/patient",
+  "scope": "/patient",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f8fafc",
+  "theme_color": "#0f766e",
+  "icons": [
+    { "src": "/patient/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/patient/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/patient/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

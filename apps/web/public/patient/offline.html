@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f766e">
+  <title>You are offline</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; background: #f8fafc; color: #0f172a; text-align: center; padding: 24px; }
+    main { max-width: 22rem; }
+    img { width: 72px; height: 72px; border-radius: 16px; }
+    h1 { font-size: 1.25rem; margin: 16px 0 8px; }
+    p { color: #475569; line-height: 1.5; margin: 0 0 16px; }
+    button { background: #0f766e; color: #fff; border: 0; border-radius: 8px; padding: 12px 20px; font-size: 1rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="/patient/icon-192.png" alt="">
+    <h1>You are offline</h1>
+    <p>Your records are not stored on this phone, so they cannot be shown without a connection. Connect to the internet and try again.</p>
+    <button onclick="location.reload()">Try again</button>
+  </main>
+</body>
+</html>

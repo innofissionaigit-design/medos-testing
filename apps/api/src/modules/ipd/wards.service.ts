@@ -64,8 +64,8 @@ export class WardsService {
     });
   }
 
-  async listRooms(ctx: RequestContext, wardId: string | undefined) {
-    return this.prisma.room.findMany({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE", ...(wardId ? { wardId } : {}) }, select: { id: true, name: true, code: true, wardId: true, status: true }, orderBy: { name: "asc" } });
+  async listRooms(ctx: RequestContext, wardId: string | undefined, includeInactive = false) {
+    return this.prisma.room.findMany({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, ...(includeInactive ? {} : { status: "ACTIVE" as const }), ...(wardId ? { wardId } : {}) }, select: { id: true, name: true, code: true, wardId: true, status: true }, orderBy: { name: "asc" } });
   }
 
   async createRoom(ctx: RequestContext, input: z.infer<typeof createRoomSchema>) {
@@ -85,6 +85,10 @@ export class WardsService {
       if (input.status === "INACTIVE" && (await tx.bed.count({ where: { tenantId: ctx.tenantId, roomId: id, status: { in: ["OCCUPIED", "RESERVED"] } } })) > 0) {
         throw new DomainError("INVALID_STATE", "This room still has occupied or reserved beds", 409);
       }
+      if (input.status === "ACTIVE" && ex.status !== "ACTIVE") {
+        const ward = await tx.ward.findFirst({ where: { id: ex.wardId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { status: true } });
+        if (ward?.status !== "ACTIVE") throw new DomainError("INVALID_STATE", "Switch the ward back on first", 409);
+      }
       const r = await tx.room.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id } }, data: input, select: { id: true, name: true, code: true, wardId: true, status: true } });
       await this.audit.record(tx, actorOf(ctx), { action: "ROOM_UPDATED", entityType: "Room", entityId: id, metadata: { changed: Object.keys(input) } });
       return r;
@@ -95,6 +99,8 @@ export class WardsService {
     return this.prisma.$transaction(async (tx) => {
       const room = await tx.room.findFirst({ where: { id: input.roomId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE" } });
       if (!room) throw new DomainError("VALIDATION_FAILED", "Room not found or inactive", 400, [{ path: "roomId", message: "Unknown room" }]);
+      const ward = await tx.ward.findFirst({ where: { id: room.wardId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE" }, select: { id: true } });
+      if (!ward) throw new DomainError("VALIDATION_FAILED", "The ward of this room is switched off", 400, [{ path: "roomId", message: "Ward is inactive" }]);
       const b = await tx.bed.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, wardId: room.wardId, roomId: room.id, code: input.code, dailyRate: input.dailyRate.toFixed(2) }, select: BED });
       await this.audit.record(tx, actorOf(ctx), { action: "BED_CREATED", entityType: "Bed", entityId: b.id, metadata: { code: b.code } });
       return toBed(b);
@@ -106,6 +112,13 @@ export class WardsService {
       const ex = await tx.bed.findFirst({ where: { id, tenantId: ctx.tenantId, facilityId: ctx.facilityId } });
       if (!ex) throw new DomainError("NOT_FOUND", "Resource not found", 404);
       if (input.active === "INACTIVE" && (ex.status === "OCCUPIED" || ex.status === "RESERVED")) throw new DomainError("BED_NOT_AVAILABLE", "An occupied or reserved bed cannot be retired", 409);
+      if (input.active === "ACTIVE" && ex.active !== "ACTIVE") {
+        const [ward, room] = await Promise.all([
+          tx.ward.findFirst({ where: { id: ex.wardId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { status: true } }),
+          tx.room.findFirst({ where: { id: ex.roomId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { status: true } }),
+        ]);
+        if (ward?.status !== "ACTIVE" || room?.status !== "ACTIVE") throw new DomainError("INVALID_STATE", "Switch the ward and room back on first", 409);
+      }
       const b = await tx.bed.update({
         where: { tenantId_id: { tenantId: ctx.tenantId, id } },
         data: { ...(input.dailyRate !== undefined ? { dailyRate: input.dailyRate.toFixed(2) } : {}), ...(input.active ? { active: input.active } : {}), version: { increment: 1 } }, select: BED,

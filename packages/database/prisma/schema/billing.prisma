@@ -69,6 +69,11 @@ model Invoice {
   subtotal       Decimal       @default(0) @db.Decimal(14, 2)
   discountTotal  Decimal       @default(0) @db.Decimal(14, 2)
   taxTotal       Decimal       @default(0) @db.Decimal(14, 2)
+  /// Set when the invoice is created, from the facility settings, and never changed: tax is shown and calculated as equal CGST and SGST halves.
+  taxSplit       Boolean       @default(false)
+  /// Set when the invoice is created and never changed: the total is rounded to the whole rupee and the difference is kept in roundOff.
+  roundsToRupee  Boolean       @default(false)
+  roundOff       Decimal       @default(0) @db.Decimal(4, 2)
   total          Decimal       @default(0) @db.Decimal(14, 2)
   paidTotal      Decimal       @default(0) @db.Decimal(14, 2)
   refundedTotal  Decimal       @default(0) @db.Decimal(14, 2)

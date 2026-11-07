@@ -59,6 +59,8 @@ export class CatalogService {
 
   async create(ctx: RequestContext, input: z.infer<typeof createServiceSchema>) {
     return this.prisma.$transaction(async (tx) => {
+      const dup = await tx.service.findFirst({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, code: input.code }, select: { id: true } });
+      if (dup) throw new DomainError("CONFLICT", "A service with this code already exists. Choose another code, or switch the old one back on.", 409, [{ path: "code", message: "Already used" }]);
       const s = await tx.service.create({ data: { ...input, tenantId: ctx.tenantId, facilityId: ctx.facilityId, price: input.price.toFixed(2), taxPercent: input.taxPercent.toFixed(2) }, select: SELECT });
       await this.audit.record(tx, actorOf(ctx), { action: "SERVICE_CREATED", entityType: "Service", entityId: s.id, metadata: { code: s.code, price: s.price.toFixed(2), taxPercent: s.taxPercent.toFixed(2) } });
       return toServiceView(s);

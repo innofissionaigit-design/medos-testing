@@ -9,7 +9,7 @@ $env:PGOPTIONS = '-c client_min_messages=warning'
 & "$pg\psql.exe" -h 127.0.0.1 -p $port -U medos -d postgres -c "DROP DATABASE IF EXISTS medos_e2e WITH (FORCE)" | Out-Null
 & "$pg\psql.exe" -h 127.0.0.1 -p $port -U medos -d postgres -c "CREATE DATABASE medos_e2e" | Out-Null
 $env:DATABASE_URL = 'postgresql://medos@127.0.0.1:54329/medos_e2e'
-$env:PRISMA_ENGINES_CACHE_DIR = 'D:\.cache\prisma'
+if (-not $env:PRISMA_ENGINES_CACHE_DIR) { $env:PRISMA_ENGINES_CACHE_DIR = 'D:\.cache\prisma' }
 $env:JWT_ACCESS_SECRET = 'e2e-only-secret-e2e-only-secret-0001'
 $env:ARGON2_MEMORY_KIB = '1024'; $env:ARGON2_PASSES = '1'
 $env:SEED_PASSWORD = 'E2e-Passw0rd-2026!'

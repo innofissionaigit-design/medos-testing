@@ -11,7 +11,7 @@ import { VitalsCard } from "@/components/ipd-extras";
 import { VisitLabResults } from "@/components/lab";
 import { AiAssist } from "@/components/ai";
 import { VisitRadiology } from "@/components/radiology";
-import { HandwrittenCard, InvestigationsPicker, RxPreview, ShareCard, TemplatesBar } from "@/components/prescription-extras";
+import { HandwrittenCard, InvestigationsPicker, RxPreview, ShareCard, StopMedicinesCard, TemplatesBar } from "@/components/prescription-extras";
 import type { FillResult } from "@/components/scan-prescription";
 import { blankItem, RxRows, toPayload, type RxItem } from "@/components/rx-editor";
 import { api, ApiError, printUrl } from "@/lib/api";
@@ -19,7 +19,7 @@ import { ageText, type AgeValue } from "@/lib/format";
 import { useMe } from "@/lib/me";
 
 interface Workspace {
-  header: { patientId: string; mrn: string | null; name: string; gender: string; age: AgeValue; bloodGroup: string | null; encounterId: string; encounterNumber: string; visitStatus: string; startedAt: string; practitionerId: string | null; practitionerName: string | null; practitionerSpecialty: string | null; practitionerRegistrationNo: string | null; departmentName: string | null };
+  header: { patientId: string; mrn: string | null; name: string; gender: string; age: AgeValue; bloodGroup: string | null; encounterId: string; encounterNumber: string; visitStatus: string; startedAt: string; practitionerId: string | null; practitionerName: string | null; practitionerSpecialty: string | null; practitionerRegistrationNo: string | null; departmentName: string | null; consultedByVideo?: boolean };
   allergies: { id: string; allergen: string; severity: string; reaction: string | null }[];
   latestVitals: Record<string, { value: string; unit: string; recordedAt: string }>;
   previousVisits: { id: string; encounterNumber: string; startedAt: string; practitionerName: string | null; diagnoses?: { text: string }[]; summary?: string | null }[];
@@ -88,7 +88,8 @@ export default function VisitPage() {
     });
     if (r.items.length > 0) setItems([...items.filter((i) => i.genericName.trim()), ...r.items]);
   };
-  const resync = (part: "note" | "rx" | "all") => { setSynced((x) => ({ note: part === "rx" ? x.note : null, rx: part === "note" ? x.rx : null })); void reload(); };
+  // Fetch the saved copy FIRST, then refill the boxes from it. Refilling from the copy loaded before the save would blank the text just typed.
+  const resync = async (part: "note" | "rx" | "all") => { await reload(); setSynced((x) => ({ note: part === "rx" ? x.note : null, rx: part === "note" ? x.rx : null })); };
 
   const saveNote = useMutation({ mutationFn: () => api.put<{ version: number }>(`/encounters/${id}/consultation`, { content: clean(note), ...(doc ? { version: doc.version } : {}) }), onSuccess: () => resync("note") });
   const saveRx = useMutation({ mutationFn: () => api.put(`/encounters/${id}/prescription`, { items: items.filter((i) => i.genericName.trim()).map(toPayload) }), onSuccess: () => resync("rx") });
@@ -124,6 +125,7 @@ export default function VisitPage() {
       <PageHeader
         title={h.name} subtitle={`MRN ${h.mrn ?? "—"} · ${h.gender.toLowerCase()}${ageText(h.age) ? `, ${ageText(h.age)}` : ""}${h.bloodGroup ? ` · ${h.bloodGroup.replace("_POS", "+").replace("_NEG", "−")}` : ""} · ${h.encounterNumber} · started ${dateTime(h.startedAt)}`}
         actions={<>
+          {h.consultedByVideo && <Badge tone="blue">Consulted by video</Badge>}
           <StatusBadge value={signed ? "SIGNED" : h.visitStatus} />
           {signed && can("CONSULTATION_AMEND") && <Button variant="secondary" onClick={() => setAmending(true)}>Amend…</Button>}
           {signed && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`prescriptions/${id}`)} target="_blank" rel="noreferrer">Print prescription</a>}
@@ -204,6 +206,7 @@ export default function VisitPage() {
           </Card>
 
           {signed && <ShareCard encounterId={id} />}
+          {signed && <StopMedicinesCard orders={digital} canStop={can("PRESCRIPTION_SIGN")} onChanged={() => void reload()} />}
           <HandwrittenCard encounterId={id} open={h.visitStatus !== "CANCELLED"} onFill={canWrite ? fillFromScan : undefined} />
 
           <Card title="Prescription preview" actions={signed ? <Badge tone="green">signed</Badge> : <Badge tone="amber">draft</Badge>}>

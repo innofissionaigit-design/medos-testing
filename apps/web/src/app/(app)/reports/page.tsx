@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Gate } from "@/components/gate";
 import { todayIn } from "@/components/pickers";
 import { Button, Card, ErrorNote, Input, KV, PageHeader, Select, Spinner, Table, Td } from "@/components/ui";
@@ -65,7 +65,7 @@ function Render({ data }: { data: Record<string, unknown> }) {
   );
 }
 
-function download(title: string, base: string, data: Record<string, unknown>) {
+function saveFile(title: string, base: string, data: Record<string, unknown>) {
   // The byte-order mark makes Excel read the file as UTF-8, so ₹ and Bengali/Hindi names are not garbled.
   const blob = new Blob(["\uFEFF", reportToCsv(title, data)], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -74,6 +74,9 @@ function download(title: string, base: string, data: Record<string, unknown>) {
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+/** Number of table rows in a report, for the audit entry (the rows themselves are not sent). */
+const rowCount = (data: Record<string, unknown>): number => Object.values(data).reduce<number>((n, v) => n + (Array.isArray(v) ? v.length : 0), 0);
 
 export default function ReportsPage() {
   const { me, features, can } = useMe();
@@ -84,6 +87,13 @@ export default function ReportsPage() {
   const [to, setTo] = useState(todayIn(tz));
   const [days, setDays] = useState("90");
   const def = available.find((r) => r.id === id) ?? available[0];
+  // The export is written to the audit trail first; if that fails the file is not saved, so no export goes unrecorded.
+  const exportCsv = useMutation({
+    mutationFn: async (d: { def: ReportDef; data: Record<string, unknown> }) => {
+      await api.post("/reports/export-log", { report: d.def.id, ...(d.def.ranged ? { from, to } : {}), rows: rowCount(d.data) });
+      saveFile(d.def.label, d.def.ranged ? `${d.def.id}_${from}_${to}` : d.def.id, d.data);
+    },
+  });
   const q = useQuery({
     queryKey: ["report", def?.id, from, to, days],
     queryFn: () => api.get<Record<string, unknown>>(`/reports/${def!.path}`, def!.ranged ? { from, to } : def!.id === "expiry" ? { withinDays: days } : undefined),
@@ -97,8 +107,9 @@ export default function ReportsPage() {
           <Select aria-label="Report" className="w-64" value={def.id} onChange={(e) => setId(e.target.value)}>{available.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}</Select>
           {def.ranged && <><Input type="date" aria-label="From" className="w-40" value={from} onChange={(e) => setFrom(e.target.value)} /><Input type="date" aria-label="To" className="w-40" value={to} onChange={(e) => setTo(e.target.value)} /></>}
           {def.id === "expiry" && <Input aria-label="Days" className="w-24" inputMode="numeric" value={days} onChange={(e) => setDays(e.target.value)} />}
-          <Button variant="secondary" disabled={!q.data} onClick={() => download(def.label, def.ranged ? `${def.id}_${from}_${to}` : def.id, q.data!)}>Download CSV</Button>
+          <Button variant="secondary" disabled={!q.data} loading={exportCsv.isPending} onClick={() => exportCsv.mutate({ def, data: q.data! })}>Download CSV</Button>
         </>}>
+          {exportCsv.error ? <ErrorNote error={exportCsv.error} /> : null}
           {q.isLoading ? <Spinner /> : q.error ? <ErrorNote error={q.error} /> : q.data ? <Render data={q.data} /> : null}
         </Card>
       )}

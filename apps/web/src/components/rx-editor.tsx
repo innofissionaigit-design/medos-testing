@@ -8,6 +8,8 @@ import { Input, Select, useDebounced } from "./ui";
 export interface RxItem {
   id?: string; medicineId?: string | undefined; genericName: string; brandName?: string | undefined; strength?: string | undefined; dosage: string; route: string; frequency: string;
   frequencyText?: string | undefined; durationDays?: number | undefined; quantity?: number | undefined; instructions?: string | undefined; status?: string; foodRelation?: string | null | undefined;
+  /** Set by the server on a signed prescription: how much the pharmacy has given and why a medicine was stopped. Never sent back. */
+  dispensedQuantity?: number | undefined; stopReason?: string | null | undefined;
   /** The quantity was worked out from dose, how often and days (not typed): it follows them until the doctor types a number. Not sent to the server. */
   qtyAuto?: boolean;
 }

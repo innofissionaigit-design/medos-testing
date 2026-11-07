@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Param, Post, Put } from "@nestjs/common";
 import { Ctx, id, parse, RequirePermissions } from "../../common/http";
 import type { RequestContext } from "../../common/request-context";
-import { PrescriptionsService, saveDraftSchema, signPrescriptionSchema, stopItemSchema } from "./prescriptions.service";
+import { amendItemSchema, PrescriptionsService, saveDraftSchema, signPrescriptionSchema, stopItemSchema } from "./prescriptions.service";
 
 @Controller()
 export class PrescriptionsController {
@@ -24,6 +24,13 @@ export class PrescriptionsController {
   @HttpCode(200)
   async sign(@Ctx() ctx: RequestContext, @Param("id") encounterId: string, @Body() body: unknown) {
     return { data: await this.prescriptions.signStandalone(ctx, id(encounterId), parse(signPrescriptionSchema, body ?? {}).acknowledgeAllergyWarnings === true) };
+  }
+
+  @RequirePermissions("PRESCRIPTION_SIGN")
+  @Post("medication-order-items/:id/amend")
+  @HttpCode(200)
+  async amend(@Ctx() ctx: RequestContext, @Param("id") itemId: string, @Body() body: unknown) {
+    return { data: await this.prescriptions.amendItem(ctx, id(itemId), parse(amendItemSchema, body)) };
   }
 
   @RequirePermissions("PRESCRIPTION_CREATE")

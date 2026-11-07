@@ -25,8 +25,8 @@ export default function NursingPage() {
                 <Td><b>{r.bed ?? "—"}</b><div className="text-xs text-slate-500">{r.ward}</div></Td>
                 <Td><Link className="font-medium text-brand-700 hover:underline" href={`/ipd/${r.admissionId}`}>{r.patientName}</Link><div className="text-xs text-slate-500">{r.mrn} · {r.admissionNumber}</div></Td>
                 <Td>{r.doctor}</Td>
-                <Td>{r.medicationOverdue > 0 ? <Badge tone="red">{r.medicationOverdue} overdue</Badge> : r.medicationDue > 0 ? <Badge tone="amber">{r.medicationDue} due</Badge> : <span className="text-slate-400">none due</span>}</Td>
-                <Td>{r.pendingTasks > 0 ? <span className="text-sm">{r.tasks.slice(0, 2).map((t) => `${t.title} (${dateTime(t.dueAt).split(", ").pop()})`).join("; ")}{r.overdueTasks > 0 ? <> <Badge tone="red">{r.overdueTasks} overdue</Badge></> : null}</span> : <span className="text-slate-400">—</span>}</Td>
+                <Td>{r.medicationOverdue > 0 ? <Badge tone="red">{r.medicationOverdue} overdue</Badge> : r.medicationDue > 0 ? <Badge tone="amber">{r.medicationDue} due</Badge> : <span className="text-slate-500">none due</span>}</Td>
+                <Td>{r.pendingTasks > 0 ? <span className="text-sm">{r.tasks.slice(0, 2).map((t) => `${t.title} (${dateTime(t.dueAt).split(", ").pop()})`).join("; ")}{r.overdueTasks > 0 ? <> <Badge tone="red">{r.overdueTasks} overdue</Badge></> : null}</span> : <span className="text-slate-500">—</span>}</Td>
                 <Td>{r.hasAllergies ? <Badge tone="red">allergy on record</Badge> : null} {r.vitalsDue ? <Badge tone="amber">vitals due</Badge> : null}</Td>
               </tr>
             ))}

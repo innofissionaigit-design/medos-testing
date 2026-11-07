@@ -44,7 +44,7 @@ export const createRoleSchema = z.object({
 export const setPermissionsSchema = z.object({ permissions: z.array(z.enum(PERMISSIONS)).min(1).max(PERMISSIONS.length) }).strict();
 
 const USER_SELECT = {
-  id: true, username: true, email: true, fullName: true, status: true, createdAt: true,
+  id: true, username: true, email: true, fullName: true, status: true, createdAt: true, lockedUntil: true,
   roles: { select: { role: { select: { id: true, name: true } } } },
   facilities: { select: { facility: { select: { id: true, name: true, code: true } } } },
   departments: { select: { department: { select: { id: true, name: true, code: true } } } },
@@ -52,7 +52,8 @@ const USER_SELECT = {
 
 function shape(u: { roles: { role: { id: string; name: string } }[]; facilities: { facility: { id: string; name: string; code: string } }[]; departments: { department: { id: string; name: string; code: string } }[] } & Record<string, unknown>) {
   const { roles, facilities, departments, ...rest } = u;
-  return { ...rest, roles: roles.map((r) => r.role), facilities: facilities.map((f) => f.facility), departments: departments.map((d) => d.department) };
+  const lockedUntil = rest["lockedUntil"] as Date | null | undefined;
+  return { ...rest, locked: !!lockedUntil && lockedUntil > new Date(), roles: roles.map((r) => r.role), facilities: facilities.map((f) => f.facility), departments: departments.map((d) => d.department) };
 }
 
 @Injectable()
@@ -179,9 +180,24 @@ export class UsersService {
     await this.prisma.$transaction(async (tx) => {
       const existing = await tx.user.findFirst({ where: { id, tenantId: ctx.tenantId } });
       if (!existing) throw new DomainError("NOT_FOUND", "Resource not found", 404);
-      await tx.user.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id } }, data: { passwordHash, failedLoginCount: 0, lockedUntil: null } });
+      await tx.user.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id } }, data: { passwordHash, failedLoginCount: 0, lockedUntil: null, lastFailedLoginAt: null } });
       await tx.refreshToken.updateMany({ where: { tenantId: ctx.tenantId, userId: id, revokedAt: null }, data: { revokedAt: new Date() } });
       await this.audit.record(tx, actorOf(ctx), { action: "PASSWORD_RESET", entityType: "User", entityId: id });
+    });
+  }
+
+  /**
+   * Lets a locked-out person in at once instead of making them wait for the lock to run out: clears the lock and the count of wrong tries. The password is not
+   * touched and nothing is revealed about it. Audited with who unlocked whom and whether the account was actually locked.
+   */
+  async unlock(ctx: RequestContext, id: string): Promise<{ id: string; unlocked: true; wasLocked: boolean }> {
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.findFirst({ where: { id, tenantId: ctx.tenantId }, select: { id: true, lockedUntil: true, failedLoginCount: true } });
+      if (!user) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      const wasLocked = !!user.lockedUntil && user.lockedUntil > new Date();
+      await tx.user.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id } }, data: { failedLoginCount: 0, lockedUntil: null, lastFailedLoginAt: null } });
+      await this.audit.record(tx, actorOf(ctx), { action: "USER_UNLOCKED", entityType: "User", entityId: id, metadata: { wasLocked, failedTries: user.failedLoginCount } });
+      return { id, unlocked: true as const, wasLocked };
     });
   }
 

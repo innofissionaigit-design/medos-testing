@@ -111,8 +111,8 @@ test("consultation: a signed note is amended with a reason and the history shows
   await page.getByRole("row", { name: new RegExp(p.first) }).getByRole("button", { name: "Start", exact: true }).click();
   await page.getByLabel("Complaint").fill("Cough for two days");
   await page.getByLabel("Diagnosis", { exact: true }).fill("Upper respiratory infection");
-  await page.getByRole("button", { name: "Add", exact: true }).click();
-  await expect(page.getByText("Upper respiratory infection")).toBeVisible();
+  await page.locator("form", { has: page.getByLabel("Diagnosis", { exact: true }) }).getByRole("button", { name: "Add", exact: true }).click();
+  await expect(page.getByRole("listitem").getByText("Upper respiratory infection")).toBeVisible();
   await page.getByRole("button", { name: "Sign consultation" }).click();
   await page.getByRole("button", { name: /^Yes, sign/ }).click();
   await expect(page.getByText(/This consultation is signed/)).toBeVisible();
@@ -128,7 +128,7 @@ test("consultation: a signed note is amended with a reason and the history shows
   await expect(history.getByText("v2 amended")).toBeVisible();
   await expect(history.getByText("v1 signed")).toBeVisible();
   await expect(history.getByText("Fever was missed in the first note")).toBeVisible();
-  await page.getByRole("link", { name: "PDF" }).isVisible();
+  await page.getByRole("link", { name: "PDF", exact: true }).isVisible();
 });
 
 test("appointments: book then reschedule to another time", async ({ page }) => {

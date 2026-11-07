@@ -36,6 +36,10 @@ model Practitioner {
   specialty      String?
   registrationNo String?
   status         ActiveStatus @default(ACTIVE)
+  /// True once an administrator has saved a weekly schedule (even an empty one). Until then the doctor is bookable at any time.
+  scheduleSet    Boolean      @default(false)
+  /// What this doctor charges for a video consultation (docs/telemedicine.md). Empty: the facility's TELECONSULT_FEE_AMOUNT applies; 0: free.
+  videoFee       Decimal?     @db.Decimal(12, 2)
   createdAt      DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
 
