@@ -1,0 +1,52 @@
+// ───────────────────────── patient photos and scanned documents ─────────────────────────
+
+enum PatientFileKind {
+  PHOTO
+  DOCUMENT
+}
+
+enum PatientFileStatus {
+  ACTIVE
+  REMOVED
+}
+
+/// Metadata for a stored file (bytes live in the storage driver, never in PostgreSQL). Never deleted or edited:
+/// removal only flips ACTIVE -> REMOVED with who/when/why, and the stored bytes are retained for the retention period.
+model PatientFile {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  facilityId   String            @db.Uuid
+  patientId    String            @db.Uuid
+  kind         PatientFileKind
+  title        String
+  fileName     String
+  contentType  String
+  sizeBytes    Int
+  sha256       String
+  storageKey   String
+  status       PatientFileStatus @default(ACTIVE)
+  uploadedById String            @db.Uuid
+  uploadedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  removedById  String?           @db.Uuid
+  removedAt    DateTime?         @db.Timestamptz(3)
+  removeReason String?
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  prescriptionScan PrescriptionScan?
+  scanPage PrescriptionScanPage?
+
+  @@unique([tenantId, id])
+  @@index([tenantId, patientId, status, uploadedAt(sort: Desc)])
+}
+
+// ───────────────────────── shared rate limiting ─────────────────────────
+
+/// Request counters for rate-limited routes (login, token refresh, password change), shared by every API instance.
+/// Not tenant data: the key is a hashed token or a client address plus the route. Rows expire and are swept.
+model RateLimitBucket {
+  key     String   @id
+  count   Int
+  resetAt DateTime @db.Timestamptz(3)
+
+  @@index([resetAt])
+}

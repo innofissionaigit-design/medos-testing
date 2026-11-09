@@ -1,0 +1,761 @@
+{
+  "info": {
+    "name": "MedOS API (local)",
+    "description": "Connectivity and workflow checks for the MedOS API. Sign in with a staff account (the default is Reception: it holds the permissions for patients, appointments, the OPD queue, admissions and billing; the Admin-only folder needs admin or the cashier). Fill the collection variable 'password' (nothing secret is stored in this file), run 'Login', and every other request uses the Bearer token it saves. The token lasts 15 minutes: run 'Refresh token' when requests return 401. These requests only read data.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{accessToken}}",
+        "type": "string"
+      }
+    ]
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:4000/api/v1"
+    },
+    {
+      "key": "tenantCode",
+      "value": "demo-hospital"
+    },
+    {
+      "key": "identifier",
+      "value": "reception1"
+    },
+    {
+      "key": "password",
+      "value": ""
+    },
+    {
+      "key": "facilityId",
+      "value": ""
+    },
+    {
+      "key": "accessToken",
+      "value": ""
+    },
+    {
+      "key": "refreshToken",
+      "value": ""
+    },
+    {
+      "key": "patientId",
+      "value": ""
+    },
+    {
+      "key": "currentRoles",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Authentication",
+      "description": "Health, login (Bearer token saved automatically), who-am-I, refresh and logout.",
+      "item": [
+        {
+          "name": "1. Health (no login needed)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "GET",
+            "url": "{{baseUrl}}/health",
+            "description": "Expect 200 {\"data\":{\"status\":\"ok\"}}. If this fails, the API is not running or the port is wrong."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('API is up', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2. Login",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantCode\": \"{{tenantCode}}\",\n  \"identifier\": \"{{identifier}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "description": "Body is exactly tenantCode, identifier (username or email) and password; extra fields are refused with 400. 200 with status AUTHENTICATED returns the tokens. If status is FACILITY_SELECTION_REQUIRED, put one of the listed facility ids in the facilityId variable and use 'Login (choose facility)'. Wrong credentials give 401 INVALID_CREDENTIALS. Login is limited to 10 attempts a minute per address."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('Login answered 200', () => pm.response.to.have.status(200));",
+                  "if (pm.response.code === 200 && j.data.status === 'AUTHENTICATED') {",
+                  "  pm.collectionVariables.set('accessToken', j.data.tokens.accessToken);",
+                  "  pm.collectionVariables.set('refreshToken', j.data.tokens.refreshToken);",
+                  "  pm.test('Token saved', () => pm.expect(pm.collectionVariables.get('accessToken')).to.be.a('string').and.not.empty);",
+                  "} else if (pm.response.code === 200) {",
+                  "  console.log('Choose a facility:', JSON.stringify(j.data.facilities));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "2b. Login with a facility (only if Login asked you to choose one)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/login",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenantCode\": \"{{tenantCode}}\",\n  \"identifier\": \"{{identifier}}\",\n  \"password\": \"{{password}}\",\n  \"facilityId\": \"{{facilityId}}\"\n}"
+            },
+            "description": "Only needed when 'Login' answers FACILITY_SELECTION_REQUIRED: copy one facility id from that answer into the facilityId variable, then run this. Skip it otherwise."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Not needed unless Login asked for a facility: skip the request instead of sending a login that would be refused.",
+                  "if (!pm.variables.get('facilityId') && pm.execution && pm.execution.skipRequest) { pm.execution.skipRequest(); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('facilityId')) { pm.test('Skipped: no facility needed', () => pm.expect(true).to.eql(true)); } else {",
+                  "  const j = pm.response.json();",
+                  "  if (pm.response.code === 200 && j.data && j.data.status === 'AUTHENTICATED') {",
+                  "    pm.collectionVariables.set('accessToken', j.data.tokens.accessToken);",
+                  "    pm.collectionVariables.set('refreshToken', j.data.tokens.refreshToken);",
+                  "  }",
+                  "  pm.test('Authenticated', () => pm.response.to.have.status(200));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3. Who am I (needs the token)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/auth/me",
+            "description": "Expect 200. Without a token, or with 'Authorization' not starting with 'Bearer ', the answer is 401 UNAUTHENTICATED: that is the API working as designed, not a fault."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Authenticated request works', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "7. Refresh token",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/refresh",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            },
+            "description": "Swaps the refresh token for a new pair (the old refresh token stops working). Run this when requests start returning 401 after 15 minutes."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "if (pm.response.code === 200) {",
+                  "  const t = j.data.tokens || j.data;",
+                  "  pm.collectionVariables.set('accessToken', t.accessToken);",
+                  "  pm.collectionVariables.set('refreshToken', t.refreshToken);",
+                  "}",
+                  "pm.test('Refreshed', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "8. Logout (revokes the refresh token)",
+          "request": {
+            "auth": {
+              "type": "noauth"
+            },
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{baseUrl}}/auth/logout",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Logged out (204)', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Patients",
+      "description": "Patient search needs at least 2 characters.",
+      "item": [
+        {
+          "name": "Search patients",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients?q=DEMO&pageSize=2",
+            "description": "Saves the first patient id in {{patientId}} for the next requests."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const rows = pm.response.json().data || [];",
+                  "if (rows[0]) pm.collectionVariables.set('patientId', rows[0].id);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get one patient",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients/{{patientId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Patient's appointments",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients/{{patientId}}/appointments"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Patient's visits",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients/{{patientId}}/encounters?pageSize=5"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Registration fee status",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients/{{patientId}}/registration-fee",
+            "description": "NOT_APPLICABLE for patients registered before the fee existed."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Registration fee settings",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients/registration-fee/config"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Appointments",
+      "description": null,
+      "item": [
+        {
+          "name": "List appointments",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/appointments?pageSize=5"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Doctors",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/practitioners"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Doctors with free times (bot route, staff may use it)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/booking/doctors?slots=2"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Is the OPD consultation paid first?",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients/{{patientId}}/consultation-payment"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OPD queue",
+      "description": null,
+      "item": [
+        {
+          "name": "OPD queue today",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/queue"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Admissions",
+      "description": null,
+      "item": [
+        {
+          "name": "Admissions",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/admissions?pageSize=5"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Wards and beds board",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/beds/board"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Billing",
+      "description": null,
+      "item": [
+        {
+          "name": "Bills",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/invoices?pageSize=5"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Price list",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/services?pageSize=5"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "My current cash shift",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/shifts/current",
+            "description": "Empty until the first cash payment; a shift then opens by itself."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Patient account statement (ledger)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/patients/{{patientId}}/ledger"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Admin only",
+      "description": "These three requests are role-aware. Administrator can open all three; Manager and Cashier can open the two reports (not OCR settings); Receptionist and other roles are refused with 403 FORBIDDEN, and the tests expect that. Sign in as admin (set identifier in the environment) to see 200 on all three.",
+      "item": [
+        {
+          "name": "Registrations report (today)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/reports/registrations"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Ask the API who is signed in, so the test below knows which answer to expect.",
+                  "pm.sendRequest({ url: pm.variables.get('baseUrl') + '/auth/me', method: 'GET', header: { Authorization: 'Bearer ' + pm.variables.get('accessToken') } }, (err, res) => {",
+                  "  const j = !err && res && res.code === 200 ? res.json() : null;",
+                  "  pm.collectionVariables.set('currentRoles', j && j.data && j.data.roles ? j.data.roles.join(',') : '');",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// needs REPORT_READ or REPORT_FINANCE. Allowed roles: ADMINISTRATOR, MANAGER, CASHIER. Every other role, Receptionist included, must be refused.",
+                  "const roles = (pm.collectionVariables.get('currentRoles') || '').split(',').filter(Boolean);",
+                  "const allowed = [\"ADMINISTRATOR\",\"MANAGER\",\"CASHIER\"];",
+                  "pm.test('The signed-in role is known', () => pm.expect(roles.length > 0).to.eql(true));",
+                  "const permitted = roles.some((x) => allowed.indexOf(x) >= 0);",
+                  "const expected = permitted ? 200 : 403;",
+                  "pm.test('As ' + roles.join('/') + ' the answer is ' + expected, () => pm.response.to.have.status(expected));",
+                  "if (permitted) { pm.test('The answer carries data', () => pm.expect(typeof pm.response.json().data).to.eql('object')); }",
+                  "else { pm.test('Refused as FORBIDDEN', () => pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN')); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Collections report (today)",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/reports/collections"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Ask the API who is signed in, so the test below knows which answer to expect.",
+                  "pm.sendRequest({ url: pm.variables.get('baseUrl') + '/auth/me', method: 'GET', header: { Authorization: 'Bearer ' + pm.variables.get('accessToken') } }, (err, res) => {",
+                  "  const j = !err && res && res.code === 200 ? res.json() : null;",
+                  "  pm.collectionVariables.set('currentRoles', j && j.data && j.data.roles ? j.data.roles.join(',') : '');",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// needs REPORT_READ or REPORT_FINANCE. Allowed roles: ADMINISTRATOR, MANAGER, CASHIER. Every other role, Receptionist included, must be refused.",
+                  "const roles = (pm.collectionVariables.get('currentRoles') || '').split(',').filter(Boolean);",
+                  "const allowed = [\"ADMINISTRATOR\",\"MANAGER\",\"CASHIER\"];",
+                  "pm.test('The signed-in role is known', () => pm.expect(roles.length > 0).to.eql(true));",
+                  "const permitted = roles.some((x) => allowed.indexOf(x) >= 0);",
+                  "const expected = permitted ? 200 : 403;",
+                  "pm.test('As ' + roles.join('/') + ' the answer is ' + expected, () => pm.response.to.have.status(expected));",
+                  "if (permitted) { pm.test('The answer carries data', () => pm.expect(typeof pm.response.json().data).to.eql('object')); }",
+                  "else { pm.test('Refused as FORBIDDEN', () => pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN')); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OCR connection settings",
+          "request": {
+            "method": "GET",
+            "url": "{{baseUrl}}/ocr/config",
+            "description": "Admin only; the API key is never returned."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Ask the API who is signed in, so the test below knows which answer to expect.",
+                  "pm.sendRequest({ url: pm.variables.get('baseUrl') + '/auth/me', method: 'GET', header: { Authorization: 'Bearer ' + pm.variables.get('accessToken') } }, (err, res) => {",
+                  "  const j = !err && res && res.code === 200 ? res.json() : null;",
+                  "  pm.collectionVariables.set('currentRoles', j && j.data && j.data.roles ? j.data.roles.join(',') : '');",
+                  "});"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// needs ADMIN_SETTINGS. Allowed roles: ADMINISTRATOR. Every other role, Receptionist included, must be refused.",
+                  "const roles = (pm.collectionVariables.get('currentRoles') || '').split(',').filter(Boolean);",
+                  "const allowed = [\"ADMINISTRATOR\"];",
+                  "pm.test('The signed-in role is known', () => pm.expect(roles.length > 0).to.eql(true));",
+                  "const permitted = roles.some((x) => allowed.indexOf(x) >= 0);",
+                  "const expected = permitted ? 200 : 403;",
+                  "pm.test('As ' + roles.join('/') + ' the answer is ' + expected, () => pm.response.to.have.status(expected));",
+                  "if (permitted) { pm.test('The answer carries data', () => pm.expect(typeof pm.response.json().data).to.eql('object')); }",
+                  "else { pm.test('Refused as FORBIDDEN', () => pm.expect(pm.response.json().error.code).to.eql('FORBIDDEN')); }"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Runs before every request: signs in again when the token is missing or about to expire, and picks a patient when patientId is empty.",
+          "const v = (k) => pm.variables.get(k);",
+          "const noAuth = pm.request.auth && pm.request.auth.type === 'noauth';",
+          "if (!noAuth) {",
+          "  const tokenOk = () => { try { const t = v('accessToken'); if (!t) return false; const p = JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); return p.exp * 1000 > Date.now() + 30000; } catch (e) { return false; } };",
+          "  const base = v('baseUrl');",
+          "  const signIn = (done) => {",
+          "    if (tokenOk() || !v('password')) return done();",
+          "    pm.sendRequest({ url: base + '/auth/login', method: 'POST', header: { 'Content-Type': 'application/json' },",
+          "      body: { mode: 'raw', raw: JSON.stringify({ tenantCode: v('tenantCode'), identifier: v('identifier'), password: v('password'), facilityId: v('facilityId') || undefined }) } }, (err, res) => {",
+          "      const j = !err && res && res.code === 200 ? res.json() : null;",
+          "      if (j && j.data && j.data.status === 'AUTHENTICATED') { pm.collectionVariables.set('accessToken', j.data.tokens.accessToken); pm.collectionVariables.set('refreshToken', j.data.tokens.refreshToken); }",
+          "      done();",
+          "    });",
+          "  };",
+          "  const pickPatient = () => {",
+          "    if (v('patientId') || JSON.stringify(pm.request.url).indexOf('patientId') < 0) return;",
+          "    pm.sendRequest({ url: base + '/patients?q=DEMO&pageSize=1', method: 'GET', header: { Authorization: 'Bearer ' + v('accessToken') } }, (err, res) => {",
+          "      const j = !err && res && res.code === 200 ? res.json() : null;",
+          "      if (j && j.data && j.data[0]) { pm.collectionVariables.set('patientId', j.data[0].id); }",
+          "    });",
+          "  };",
+          "  signIn(pickPatient);",
+          "}"
+        ]
+      }
+    }
+  ]
+}

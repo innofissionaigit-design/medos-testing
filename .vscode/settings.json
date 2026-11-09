@@ -1,0 +1,13 @@
+{
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+  "eslint.useFlatConfig": true,
+  "eslint.workingDirectories": [{ "mode": "auto" }],
+  "editor.formatOnSave": false,
+  "editor.codeActionsOnSave": { "source.fixAll.eslint": "explicit" },
+  "files.eol": "\n",
+  "files.exclude": { "**/node_modules": true, "**/.next": true, "**/dist": true, "**/dist-test": true },
+  "search.exclude": { "**/node_modules": true, "**/.next": true, "**/dist": true, "**/dist-test": true, "pnpm-lock.yaml": true, "**/migrations": false },
+  "tailwindCSS.experimental.classRegex": [["clsx\\(([^)]*)\\)", "[\"'`]([^\"'`]*).*?[\"'`]"]],
+  "[prisma]": { "editor.defaultFormatter": "Prisma.prisma" }
+}

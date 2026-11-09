@@ -1,0 +1,78 @@
+// ───────────────────────── Stage 5: hospital masters ─────────────────────────
+// Convention: REQUIRED references use composite (tenantId, id) FKs. OPTIONAL references use a
+// single-column FK plus the medos_same_tenant trigger (Prisma cannot model optional composite FKs).
+
+model Department {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String       @db.Uuid
+  facilityId String       @db.Uuid
+  name       String
+  code       String
+  status     ActiveStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
+
+  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facility      Facility       @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  practitioners Practitioner[]
+  encounters    Encounter[]
+  appointments  Appointment[]
+  queueEntries  QueueEntry[]
+  admissions    Admission[]
+  userDepartments UserDepartment[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, code])
+  @@index([tenantId, facilityId, status])
+}
+
+model Practitioner {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String       @db.Uuid
+  facilityId     String       @db.Uuid
+  userId         String?      @db.Uuid
+  departmentId   String?      @db.Uuid
+  displayName    String
+  specialty      String?
+  registrationNo String?
+  status         ActiveStatus @default(ACTIVE)
+  /// True once an administrator has saved a weekly schedule (even an empty one). Until then the doctor is bookable at any time.
+  scheduleSet    Boolean      @default(false)
+  /// What this doctor charges for a video consultation (docs/telemedicine.md). Empty: the facility's TELECONSULT_FEE_AMOUNT applies; 0: free.
+  videoFee       Decimal?     @db.Decimal(12, 2)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facility   Facility    @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  user       User?       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  shareRules DoctorShareRule[]
+  shareEntries DoctorShareEntry[]
+  payouts      DoctorPayout[]
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  encounters   Encounter[]
+  schedules    PractitionerSchedule[]
+  appointments Appointment[]
+  queueEntries QueueEntry[]
+  admissions   Admission[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, userId])
+  @@index([tenantId, facilityId, status])
+  @@index([departmentId])
+}
+
+/// Which departments a staff member belongs to. A user with at least one row sees only the data of those departments
+/// (docs/data-access.md); a user with none is not limited by department. Changed by an administrator and audited.
+model UserDepartment {
+  tenantId     String   @db.Uuid
+  userId       String   @db.Uuid
+  departmentId String   @db.Uuid
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+
+  user       User       @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+  department Department @relation(fields: [tenantId, departmentId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([userId, departmentId])
+  @@index([tenantId, departmentId])
+}

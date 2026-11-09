@@ -1,0 +1,192 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MedOS MLP-1 diagrams</title>
+<style>:root{--bg:#fff;--fg:#1a1a1a}@media(prefers-color-scheme:dark){:root{--bg:#161616;--fg:#eee}}body{background:var(--bg);color:var(--fg);font:15px system-ui;max-width:1100px;margin:0 auto;padding:16px}h2{margin-top:2.2em}h3{margin-top:1.6em}.mermaid{overflow:auto;background:#fff;border-radius:8px;padding:8px}</style></head><body><h1>MedOS MLP-1 — Architecture and flow diagrams</h1>
+<h2>1. Purpose and scope</h2>
+<h2>2. Design principles</h2>
+<h2>3. Architecture</h2>
+<h3>3.1 System context and containers</h3>
+<pre class="mermaid">flowchart LR
+  subgraph Users
+    R[Reception] --- D[Doctor] --- N[Nurse] --- C[Cashier] --- P[Pharmacist] --- M[Manager] --- A[Admin]
+  end
+  Users --&gt;|HTTPS| WEB
+  subgraph Web[&quot;Web app (Next.js 15, React 19)&quot;]
+    WEB[Pages: app router&lt;br/&gt;TanStack Query, RHF, Zod&lt;br/&gt;i18n en / bn / hi]
+    BFF[BFF route handlers&lt;br/&gt;/api/session/*&lt;br/&gt;httpOnly cookies medos_at, medos_rt]
+    GW[Same-origin proxy&lt;br/&gt;/api/proxy/**&lt;br/&gt;x-medos-csrf, auth/* blocked]
+    WEB --&gt; BFF
+    WEB --&gt; GW
+  end
+  GW --&gt;|Bearer access token| API
+  BFF --&gt;|login, refresh, logout| API
+  subgraph APIsub[&quot;API (NestJS 10, /api/v1)&quot;]
+    API[Global guards: Auth, Permission, Feature flags&lt;br/&gt;Zod validation, error filter, request id, rate limit]
+    MOD[Domain modules]
+    API --&gt; MOD
+  end
+  MOD --&gt;|Prisma + SQL| PG[(PostgreSQL 17&lt;br/&gt;source of truth)]
+  MOD --&gt;|bytes| FS[(Local disk&lt;br/&gt;STORAGE_DIR&lt;br/&gt;S3 later)]
+</pre>
+<h3>3.2 API module map (modular monolith)</h3>
+<pre class="mermaid">flowchart TB
+  subgraph Platform
+    auth[auth] --- tenants --- facilities --- users --- settings --- numbering --- audit
+  end
+  subgraph FrontDesk[&quot;Front desk&quot;]
+    patients --- appointments --- queue --- encounters
+    documents[documents&lt;br/&gt;patient files]
+  end
+  subgraph Clinical
+    consultation --- allergies --- prescriptions
+  end
+  subgraph Money
+    billing --- shifts[cashier shifts] --- pharmacy
+  end
+  subgraph Inpatient
+    ipd[beds + admissions] --- charges --- nursing[nursing + MAR] --- discharge
+  end
+  subgraph Read[&quot;Read side&quot;]
+    reports --- print[print HTML/PDF]
+  end
+  Platform -.-&gt; FrontDesk &amp; Clinical &amp; Money &amp; Inpatient &amp; Read
+  Clinical --&gt; encounters
+  Money --&gt; encounters
+  Inpatient --&gt; encounters
+</pre>
+<h3>3.3 Request pipeline</h3>
+<pre class="mermaid">sequenceDiagram
+  participant B as Browser
+  participant G as Next.js proxy
+  participant A as API
+  participant DB as PostgreSQL
+  B-&gt;&gt;G: fetch /api/proxy/... (cookie, x-medos-csrf)
+  G-&gt;&gt;A: Bearer token (+ Idempotency-Key)
+  A-&gt;&gt;DB: load user, tenant, facility, permissions
+  A-&gt;&gt;A: permission + feature check, Zod validate
+  A-&gt;&gt;DB: BEGIN, business write, audit event, COMMIT
+  DB--&gt;&gt;A: triggers enforce invariants
+  A--&gt;&gt;G: { data } or { error: {code,message,requestId} }
+  G--&gt;&gt;B: same body (401 → single-flight refresh)
+</pre>
+<h3>3.4 Deployment view (target; not yet run)</h3>
+<h2>4. Technology choices</h2>
+<h2>5. Security design</h2>
+<h2>6. Data model (summary)</h2>
+<pre class="mermaid">erDiagram
+  TENANT ||--o{ FACILITY : has
+  FACILITY ||--o{ DEPARTMENT : has
+  FACILITY ||--o{ WARD : has
+  WARD ||--o{ ROOM : has
+  ROOM ||--o{ BED : has
+  TENANT ||--o{ USER : employs
+  USER }o--o{ ROLE : assigned
+  ROLE }o--o{ PERMISSION : bundles
+  TENANT ||--o{ PATIENT : registers
+  PATIENT ||--o{ PATIENT_IDENTIFIER : has
+  PATIENT ||--o{ PATIENT_FILE : has
+  PATIENT ||--o{ ALLERGY : has
+  PATIENT ||--o{ APPOINTMENT : books
+  PATIENT ||--o{ ENCOUNTER : has
+  ENCOUNTER ||--o{ VITALS : records
+  ENCOUNTER ||--o{ CONSULTATION : has
+  CONSULTATION ||--o{ CONSULTATION_VERSION : keeps
+  ENCOUNTER ||--o{ DIAGNOSIS : has
+  ENCOUNTER ||--o{ PRESCRIPTION : has
+  PRESCRIPTION ||--o{ PRESCRIPTION_ITEM : lists
+  PRESCRIPTION_ITEM ||--o{ MED_ADMINISTRATION : &quot;given as&quot;
+  ENCOUNTER ||--o| ADMISSION : &quot;IPD only&quot;
+  ADMISSION ||--o{ BED_ASSIGNMENT : &quot;history&quot;
+  BED ||--o{ BED_ASSIGNMENT : hosts
+  ADMISSION ||--o{ CHARGE : accrues
+  ENCOUNTER ||--o{ INVOICE : billed
+  INVOICE ||--o{ INVOICE_LINE : has
+  INVOICE ||--o{ PAYMENT : receives
+  PAYMENT ||--o{ REFUND : reversed_by
+  INVOICE ||--o{ CREDIT_NOTE : adjusted_by
+  MEDICINE ||--o{ BATCH : stocked_as
+  BATCH ||--o{ STOCK_MOVEMENT : ledger
+  USER ||--o{ AUDIT_EVENT : acts
+</pre>
+<h2>7. Key business rules and where they are enforced</h2>
+<h2>8. State machines</h2>
+<pre class="mermaid">stateDiagram-v2
+  direction LR
+  state &quot;Appointment&quot; as AP {
+    [*] --&gt; BOOKED
+    BOOKED --&gt; CHECKED_IN
+    BOOKED --&gt; CANCELLED
+    BOOKED --&gt; NO_SHOW
+    CHECKED_IN --&gt; WAITING
+    WAITING --&gt; IN_CONSULTATION
+    IN_CONSULTATION --&gt; COMPLETED
+  }
+</pre>
+<pre class="mermaid">stateDiagram-v2
+  direction LR
+  [*] --&gt; DRAFT: consultation / invoice
+  DRAFT --&gt; SIGNED: sign (consultation)
+  SIGNED --&gt; AMENDED: amend with reason
+  DRAFT --&gt; ISSUED: issue (invoice)
+  ISSUED --&gt; PART_PAID
+  PART_PAID --&gt; PAID
+  ISSUED --&gt; PAID
+  ISSUED --&gt; CANCELLED
+  PAID --&gt; REFUNDED: full refund
+</pre>
+<h2>9. Business flow diagrams</h2>
+<h3>9.1 OPD (mandatory workflow, CLAUDE.md §36)</h3>
+<pre class="mermaid">flowchart TD
+  A[Reception logs in] --&gt; B[Register patient&lt;br/&gt;duplicate check]
+  B --&gt; C[Book or walk-in]
+  C --&gt; D[Check-in → token in OPD queue]
+  D --&gt; E[Doctor calls patient]
+  E --&gt; F[Vitals recorded]
+  F --&gt; G[Diagnosis + allergy check]
+  G --&gt; H[Prescription]
+  H --&gt; I[Sign consultation&lt;br/&gt;note locked]
+  I --&gt; J[Cashier issues invoice]
+  J --&gt; K[Split payment → receipt]
+  K --&gt; L[Pharmacy sees signed prescription]
+  L --&gt; M[FEFO dispense with allergy check]
+  M --&gt; N[Pharmacy receipt]
+  I -. needs change .-&gt; X[Amend with reason&lt;br/&gt;history kept]
+</pre>
+<h3>9.2 IPD (mandatory workflow, CLAUDE.md §37)</h3>
+<pre class="mermaid">flowchart TD
+  A[Register patient] --&gt; B[Admit under consultant]
+  B --&gt; C[Allocate bed]
+  C --&gt; D[Nurse vitals + note]
+  D --&gt; E[Doctor orders and signs medicines]
+  E --&gt; F[MAR: Given / Hold / Missed / Refused]
+  F --&gt; G[Charges added: services, ward medicines, bed days]
+  G --&gt; H[Bed transfer&lt;br/&gt;Ward A → ICU → Ward B]
+  H --&gt; I[Doctor marks fit]
+  I --&gt; J[Clearances: nursing, pharmacy, ...&lt;br/&gt;waiver needs reason]
+  J --&gt; K[Summary signed by consultant]
+  K --&gt; L[Final bill from pending charges]
+  L --&gt; M{Fully paid?}
+  M -- no --&gt; L
+  M -- yes --&gt; N[Discharge completes]
+  N --&gt; O[Bed released → cleaning&lt;br/&gt;encounter closed]
+</pre>
+<h3>9.3 Money and stock</h3>
+<pre class="mermaid">flowchart LR
+  subgraph Billing
+    D[Draft invoice&lt;br/&gt;editable] --&gt; I[Issued&lt;br/&gt;immutable] --&gt; P[Payments&lt;br/&gt;cash / UPI / card / bank / other]
+    I --&gt; CN[Credit note]
+    P --&gt; RF[Refund]
+    I --&gt; CX[Cancel]
+  end
+  subgraph Stock
+    PU[Purchase] --&gt; L[(Stock ledger)]
+    SA[Sale / dispense] --&gt; L
+    RT[Patient return] --&gt; L
+    PR[Purchase return] --&gt; L
+    AD[Adjustment / damage] --&gt; L
+    L --&gt; BAL[Batch balance&lt;br/&gt;reconciled by DB]
+  end
+</pre>
+<h2>10. Roles and permission bundles</h2>
+<h2>11. Non-functional design</h2>
+<h2>12. Known limitations</h2>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,securityLevel:'strict'});</script></body></html>

@@ -1,0 +1,12 @@
+# MedOS backups. Install as the service user: crontab medos-backup.cron   (edit the paths first)
+# Secrets (DATABASE_URL owner login, BACKUP_ENCRYPTION_KEY, BACKUP_UPLOAD_COMMAND, BACKUP_ALERT_COMMAND) live in a file only that user can read.
+SHELL=/bin/bash
+MEDOS=/opt/medos/apps/api
+ENVFILE=/etc/medos/backup.env
+
+# Backup every night at 02:00 (exit 3 = backup made but off-host copy failed; the alert command is raised)
+0 2 * * *  set -a; . $ENVFILE; set +a; cd $MEDOS && node dist/cli/db-backup.js backup  >> /var/log/medos/backup.log 2>&1
+# Restore drill every Sunday at 03:30 on a scratch database, then drops it
+30 3 * * 0 set -a; . $ENVFILE; set +a; cd $MEDOS && node dist/cli/db-backup.js drill   >> /var/log/medos/backup.log 2>&1
+# Health check every 30 minutes: alerts when no recent backup/drill, a failed off-host copy or a failed drill
+*/30 * * * * set -a; . $ENVFILE; set +a; cd $MEDOS && node dist/cli/db-backup.js status >> /var/log/medos/backup.log 2>&1

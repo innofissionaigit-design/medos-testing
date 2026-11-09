@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    { "label": "Check: lint", "type": "shell", "command": "pnpm lint", "problemMatcher": ["$eslint-stylish"], "group": "test" },
+    { "label": "Check: typecheck", "type": "shell", "command": "pnpm typecheck", "problemMatcher": ["$tsc"], "group": "test" },
+    { "label": "Check: API tests (real database)", "type": "shell", "command": "pnpm --filter @medos/api test", "group": "test" },
+    { "label": "Check: web unit tests", "type": "shell", "command": "pnpm --filter @medos/web test", "group": "test" },
+    { "label": "Check: build everything", "type": "shell", "command": "pnpm build", "group": "build" },
+    { "label": "Check: licences", "type": "shell", "command": "pnpm licenses:audit", "group": "test" },
+    { "label": "Check: browser tests (Playwright)", "type": "shell", "command": "pnpm --filter @medos/web e2e", "group": "test", "options": { "env": { "PLAYWRIGHT_BROWSERS_PATH": "D:\\.cache\\ms-playwright" } } },
+    { "label": "Run: database (local)", "type": "shell", "command": "powershell -NoProfile -File scripts/db-up.ps1" },
+    { "label": "Run: API :4000", "type": "shell", "command": "powershell -NoProfile -File scripts/dev-api.ps1", "isBackground": true, "problemMatcher": [] },
+    { "label": "Run: web :3000", "type": "shell", "command": "pnpm --filter @medos/web dev", "isBackground": true, "problemMatcher": [] },
+    {
+      "label": "Check: everything (lint + types + tests + build)", "dependsOrder": "sequence",
+      "dependsOn": ["Check: lint", "Check: typecheck", "Check: API tests (real database)", "Check: web unit tests", "Check: build everything", "Check: licences"],
+      "group": { "kind": "test", "isDefault": true }
+    }
+  ]
+}

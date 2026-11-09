@@ -1,0 +1,351 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ───────────────────────── Stage 2: tenant / facility ─────────────────────────
+
+enum ActiveStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Tenant {
+  id        String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String
+  code      String       @unique
+  status    ActiveStatus @default(ACTIVE)
+  timezone  String       @default("Asia/Kolkata")
+  currency  String       @default("INR")
+  createdAt DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime     @updatedAt @db.Timestamptz(3)
+
+  facilities       Facility[]
+  users            User[]
+  roles            Role[]
+  auditEvents      AuditEvent[]
+  numberSequences  NumberSequence[]
+  numberConfigs    NumberSequenceConfig[]
+  departments      Department[]
+  practitioners    Practitioner[]
+  medicines        Medicine[]
+  suppliers        Supplier[]
+}
+
+model Facility {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String       @db.Uuid
+  name       String
+  code       String
+  address    String?
+  city       String?
+  district   String?
+  state      String?
+  postalCode String?
+  phone      String?
+  email      String?
+  gstin      String?
+  timezone   String       @default("Asia/Kolkata")
+  status     ActiveStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
+
+  tenant          Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  userFacilities  UserFacility[]
+  apiClients      ApiClient[]
+  shareRules      DoctorShareRule[]
+  shareEntries    DoctorShareEntry[]
+  notifications   Notification[]
+  emailOutbox     EmailOutbox[]
+  stockLocations  StockLocation[]
+  doctorPayouts   DoctorPayout[]
+  labDefinitions  LabTestDefinition[]
+  stockTransfers  StockTransfer[]
+  prescriptionTemplates PrescriptionTemplate[]
+  prescriptionScans PrescriptionScan[]
+  ocrConfig       OcrConfig?
+  registrations   PatientRegistration[]
+  numberSequences NumberSequence[]
+  numberConfigs   NumberSequenceConfig[]
+  departments     Department[]
+  practitioners   Practitioner[]
+  patients        Patient[]
+  encounters      Encounter[]
+  schedules       PractitionerSchedule[]
+  appointments    Appointment[]
+  queueEntries    QueueEntry[]
+  services        Service[]
+  invoices        Invoice[]
+  cashierShifts   CashierShift[]
+  batches         MedicineBatch[]
+  purchases       Purchase[]
+  dispenses       Dispense[]
+  wards           Ward[]
+  admissions      Admission[]
+  settings        Setting[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, code])
+}
+
+// ───────────────────────── Stage 3/4: users, auth, RBAC ─────────────────────────
+
+model User {
+  id                String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String       @db.Uuid
+  username          String
+  email             String?
+  fullName          String
+  passwordHash      String
+  status            ActiveStatus @default(ACTIVE)
+  failedLoginCount  Int          @default(0)
+  lockedUntil       DateTime?    @db.Timestamptz(3)
+  /// When the last wrong password was entered; wrong tries older than the failure window (LOGIN_FAILURE_WINDOW_SECONDS) no longer count towards a lock.
+  lastFailedLoginAt DateTime?    @db.Timestamptz(3)
+  /// The hidden user behind an API client (an outside system or a bot, docs/integration-api.md). It can never sign in with a password.
+  isService         Boolean      @default(false)
+  createdAt         DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime     @updatedAt @db.Timestamptz(3)
+
+  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facilities UserFacility[]
+  roles      UserRole[]
+  tokens     RefreshToken[]
+  practitioners Practitioner[]
+  departments   UserDepartment[]
+  apiClient     ApiClient?
+  prescriptionTemplates PrescriptionTemplate[]
+  employees     Employee[]
+  notifications Notification[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, username])
+  @@unique([tenantId, email])
+}
+
+model UserFacility {
+  tenantId   String @db.Uuid
+  userId     String @db.Uuid
+  facilityId String @db.Uuid
+
+  user     User     @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([userId, facilityId])
+  @@index([tenantId, facilityId])
+}
+
+model Role {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String   @db.Uuid
+  name      String
+  isSystem  Boolean  @default(false)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+
+  tenant      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  permissions RolePermission[]
+  users       UserRole[]
+  apiClients  ApiClient[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+}
+
+model RolePermission {
+  tenantId   String @db.Uuid
+  roleId     String @db.Uuid
+  permission String
+
+  role Role @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Cascade)
+
+  @@id([roleId, permission])
+}
+
+model UserRole {
+  tenantId String @db.Uuid
+  userId   String @db.Uuid
+  roleId   String @db.Uuid
+
+  user User @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+  role Role @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([userId, roleId])
+  @@index([tenantId, roleId])
+}
+
+model RefreshToken {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String    @db.Uuid
+  userId       String    @db.Uuid
+  facilityId   String    @db.Uuid
+  familyId     String    @db.Uuid
+  tokenHash    String    @unique
+  expiresAt    DateTime  @db.Timestamptz(3)
+  revokedAt    DateTime? @db.Timestamptz(3)
+  replacedById String?   @db.Uuid
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, userId])
+  @@index([familyId])
+}
+
+// ───────────────────────── Audit (append-only; enforced by trigger) ─────────────────────────
+
+model AuditEvent {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String?  @db.Uuid
+  actorUserId String?  @db.Uuid
+  action      String
+  entityType  String
+  entityId    String?
+  requestId   String?
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([tenantId, entityType, entityId])
+  @@index([tenantId, action, createdAt(sort: Desc)])
+}
+
+// ───────────────────────── Stage 6: number sequences ─────────────────────────
+
+enum ResetPolicy {
+  NEVER
+  YEARLY
+  /// Restarts on 1 April (the Indian financial year); the pattern uses {FY}.
+  FINANCIAL_YEAR
+}
+
+model NumberSequenceConfig {
+  tenantId    String      @db.Uuid
+  facilityId  String      @db.Uuid
+  type        String
+  // Tokens: {FACILITY} {YEAR} {SEQ}; e.g. "OPD-{YEAR}-{SEQ}"
+  pattern     String
+  padding     Int         @default(6)
+  resetPolicy ResetPolicy @default(NEVER)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([tenantId, facilityId, type])
+}
+
+model NumberSequence {
+  tenantId   String @db.Uuid
+  facilityId String @db.Uuid
+  type       String
+  periodKey  String @default("")
+  lastValue  BigInt @default(0)
+
+  tenant   Tenant   @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([tenantId, facilityId, type, periodKey])
+}
+
+// ───────────────────────── API clients (integrations) ─────────────────────────
+
+enum ApiClientStatus {
+  ACTIVE
+  REVOKED
+}
+
+/// An outside system or bot that calls the API with a key instead of a person's login (docs/integration-api.md). It acts as a hidden service user whose
+/// role holds only the abilities it was given, at one facility. Only the SHA-256 of the key is stored; the key is shown once, when it is created.
+model ApiClient {
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String          @db.Uuid
+  facilityId   String          @db.Uuid
+  userId       String          @db.Uuid
+  roleId       String          @db.Uuid
+  name         String
+  /// The first characters of the key, so people can tell keys apart. Not a secret.
+  keyPrefix    String
+  keyHash      String
+  /// The abilities chosen when it was created (FIND_PATIENTS, REGISTER_PATIENTS, BOOK_APPOINTMENTS); the role holds the matching permissions.
+  abilities    String[]
+  /// Addresses (or CIDR ranges) the key may be used from; empty means from anywhere.
+  allowedIps   String[]        @default([])
+  status       ApiClientStatus @default(ACTIVE)
+  expiresAt    DateTime?       @db.Timestamptz(3)
+  lastUsedAt   DateTime?       @db.Timestamptz(3)
+  createdById  String          @db.Uuid
+  createdAt    DateTime        @default(now()) @db.Timestamptz(3)
+  revokedAt    DateTime?       @db.Timestamptz(3)
+  revokedById  String?         @db.Uuid
+  revokeReason String?
+
+  user     User     @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+  role     Role     @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  webhook  WebhookEndpoint?
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, name])
+  @@unique([keyHash])
+  @@unique([tenantId, userId])
+  @@index([tenantId, status])
+}
+
+// ───────────────────────── Integration webhooks (docs/integration-api.md) ─────────────────────────
+
+enum WebhookDeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+/// Where one integration key wants to hear about changes to the appointments it made. The signing secret is shown once and kept only encrypted.
+model WebhookEndpoint {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  facilityId  String       @db.Uuid
+  clientId    String       @db.Uuid
+  url         String
+  secretEnc   String
+  secretLast4 String
+  events      String[]
+  status      ActiveStatus @default(ACTIVE)
+  createdById String       @db.Uuid
+  createdAt   DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime     @updatedAt @db.Timestamptz(3)
+
+  client     ApiClient         @relation(fields: [tenantId, clientId], references: [tenantId, id], onDelete: Restrict)
+  deliveries WebhookDelivery[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, clientId])
+}
+
+/// One event to send, with its retries. The payload carries identifiers, times and the status only: no patient details.
+model WebhookDelivery {
+  id            String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String                @db.Uuid
+  endpointId    String                @db.Uuid
+  event         String
+  appointmentId String                @db.Uuid
+  payload       Json
+  status        WebhookDeliveryStatus @default(PENDING)
+  attempts      Int                   @default(0)
+  nextAttemptAt DateTime              @default(now()) @db.Timestamptz(3)
+  lastStatus    Int?
+  lastError     String?
+  deliveredAt   DateTime?             @db.Timestamptz(3)
+  createdAt     DateTime              @default(now()) @db.Timestamptz(3)
+
+  endpoint WebhookEndpoint @relation(fields: [tenantId, endpointId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, endpointId, createdAt(sort: Desc)])
+}

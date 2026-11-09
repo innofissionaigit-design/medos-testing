@@ -1,0 +1,14 @@
+# systemd: one template service for all three jobs. Instances: backup, drill, status.   Install in /etc/systemd/system/
+[Unit]
+Description=MedOS database %i
+After=network-online.target postgresql.service
+
+[Service]
+Type=oneshot
+User=medos
+WorkingDirectory=/opt/medos/apps/api
+EnvironmentFile=/etc/medos/backup.env
+ExecStart=/usr/bin/node dist/cli/db-backup.js %i
+# Exit 3 (backup made, off-host copy failed) is still a failure for monitoring purposes
+TimeoutStartSec=2h
+Nice=10

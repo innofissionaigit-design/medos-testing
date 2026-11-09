@@ -1,0 +1,27 @@
+{
+  "name": "@medos/database",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --config ../../eslint.config.mjs",
+    "test": "echo no-tests",
+    "migrate": "prisma migrate deploy"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.0.0"
+  },
+  "devDependencies": {
+    "prisma": "^6.0.0",
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "eslint": "^9.14.0",
+    "typescript-eslint": "^8.14.0"
+  },
+  "prisma": {
+    "schema": "prisma/schema"
+  }
+}

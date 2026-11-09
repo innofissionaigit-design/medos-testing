@@ -1,0 +1,46 @@
+// ───────────────────────── Stage 12: vitals / observations ─────────────────────────
+
+enum ObservationType {
+  SYSTOLIC_BP
+  DIASTOLIC_BP
+  PULSE
+  RESPIRATORY_RATE
+  TEMPERATURE
+  SPO2
+  WEIGHT
+  HEIGHT
+  BMI
+  BLOOD_GLUCOSE
+}
+
+enum ObservationStatus {
+  FINAL
+  ENTERED_IN_ERROR
+}
+
+/// Append-only. A wrong reading is marked ENTERED_IN_ERROR (never edited or deleted) and a new one is recorded.
+model Observation {
+  id                 String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId           String            @db.Uuid
+  facilityId         String            @db.Uuid
+  patientId          String            @db.Uuid
+  encounterId        String            @db.Uuid
+  type               ObservationType
+  value              Decimal           @db.Decimal(8, 2)
+  unit               String
+  status             ObservationStatus @default(FINAL)
+  derived            Boolean           @default(false)
+  recordedAt         DateTime          @default(now()) @db.Timestamptz(3)
+  recordedById       String            @db.Uuid
+  errorReason        String?
+  errorMarkedById    String?           @db.Uuid
+  errorMarkedAt      DateTime?         @db.Timestamptz(3)
+  createdAt          DateTime          @default(now()) @db.Timestamptz(3)
+
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter Encounter @relation(fields: [tenantId, facilityId, encounterId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, encounterId, recordedAt(sort: Desc)])
+  @@index([tenantId, patientId, type, recordedAt(sort: Desc)])
+}

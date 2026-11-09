@@ -1,0 +1,10 @@
+# Enable with: systemctl enable --now medos-backup-backup.timer   (runs medos-backup@backup.service)
+[Unit]
+Description=Nightly MedOS backup
+[Timer]
+Unit=medos-backup@backup.service
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+RandomizedDelaySec=300
+[Install]
+WantedBy=timers.target

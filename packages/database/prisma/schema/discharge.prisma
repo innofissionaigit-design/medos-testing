@@ -1,0 +1,56 @@
+// ───────────────────────── settings (configuration instead of customer-specific code) ─────────────────────────
+
+/// Per-facility configuration: feature flags, discharge policy, print settings. Validated per key by the application.
+model Setting {
+  tenantId   String   @db.Uuid
+  facilityId String   @db.Uuid
+  key        String
+  value      Json
+  updatedById String  @db.Uuid
+  updatedAt  DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@id([tenantId, facilityId, key])
+}
+
+// ───────────────────────── Stage 33: discharge workflow ─────────────────────────
+
+enum ClearanceStep {
+  MEDICALLY_FIT
+  NURSING
+  CHARGES_REVIEWED
+  PHARMACY
+  BILLING
+}
+
+enum ClearanceStatus {
+  CLEARED
+  WAIVED
+}
+
+enum DischargeType {
+  ROUTINE
+  LAMA
+  REFERRED
+  ABSCONDED
+  DEATH
+}
+
+/// One immutable row per cleared (or waived, with reason) step; a step that has no row is still pending.
+model DischargeClearance {
+  id          String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String          @db.Uuid
+  facilityId  String          @db.Uuid
+  admissionId String          @db.Uuid
+  step        ClearanceStep
+  status      ClearanceStatus
+  note        String?
+  byId        String          @db.Uuid
+  at          DateTime        @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId, step])
+}

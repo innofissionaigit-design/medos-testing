@@ -1,0 +1,36 @@
+// In-app notifications for staff (docs/notifications.md). A notification is a short, fixed-wording pointer to a record ("a critical lab result is waiting"), written in
+// the same transaction as the event that causes it, so it is never lost. It holds no patient name and no clinical text: the screen looks the details up with the
+// reader's own permissions. The live channel (server-sent events) only tells open browsers to fetch; the table is the source of truth.
+
+enum NotificationType {
+  CRITICAL_LAB_RESULT
+  CRITICAL_RAD_FINDING
+  QUEUE_PATIENT_ADDED
+  PRESCRIPTION_AT_PHARMACY
+  PHARMACY_BILL_WAITING
+  BOOKING_FROM_OUTSIDE
+  BOOKING_AUTO_CANCELLED
+  TELECONSULT_PATIENT_WAITING
+}
+
+model Notification {
+  id              String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String           @db.Uuid
+  facilityId      String           @db.Uuid
+  recipientUserId String           @db.Uuid
+  type            NotificationType
+  /// What it points at, for the link on the screen (for example "Encounter", "Invoice", "Appointment") and that record's id.
+  entityType      String
+  entityId        String?          @db.Uuid
+  /// Stops the same event notifying the same person twice (for example "CRITICAL_LAB_RESULT:<result id>:<version>").
+  dedupeKey       String?
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  readAt          DateTime?        @db.Timestamptz(3)
+
+  recipient User     @relation(fields: [tenantId, recipientUserId], references: [tenantId, id], onDelete: Restrict)
+  facility  Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, recipientUserId, dedupeKey])
+  @@index([tenantId, recipientUserId, readAt, createdAt(sort: Desc)])
+}

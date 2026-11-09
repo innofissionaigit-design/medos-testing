@@ -1,0 +1,149 @@
+// ───────────────────────── Stage 30: nursing notes and tasks ─────────────────────────
+
+enum NoteStatus {
+  ACTIVE
+  ENTERED_IN_ERROR
+}
+
+/// Append-only. A correction is an addendum (a new note pointing at the original) or an entered-in-error flag; text is never edited.
+model NursingNote {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String     @db.Uuid
+  facilityId    String     @db.Uuid
+  patientId     String     @db.Uuid
+  admissionId   String     @db.Uuid
+  encounterId   String     @db.Uuid
+  authorId      String     @db.Uuid
+  note          String
+  addendumOfId  String?    @db.Uuid
+  status        NoteStatus @default(ACTIVE)
+  errorReason   String?
+  errorById     String?    @db.Uuid
+  errorAt       DateTime?  @db.Timestamptz(3)
+  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
+
+  patient   Patient      @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  admission Admission    @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  addendumOf NursingNote? @relation("Addendum", fields: [addendumOfId], references: [id], onDelete: Restrict)
+  addenda   NursingNote[] @relation("Addendum")
+
+  @@unique([tenantId, id])
+  @@index([tenantId, admissionId, createdAt])
+}
+
+enum TaskType {
+  VITALS
+  MEDICATION
+  OTHER
+}
+
+enum TaskStatus {
+  PENDING
+  DONE
+  CANCELLED
+}
+
+model NursingTask {
+  id             String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String     @db.Uuid
+  facilityId     String     @db.Uuid
+  patientId      String     @db.Uuid
+  admissionId    String     @db.Uuid
+  assignedToId   String?    @db.Uuid
+  type           TaskType   @default(OTHER)
+  title          String
+  dueAt          DateTime   @db.Timestamptz(3)
+  status         TaskStatus @default(PENDING)
+  completedById  String?    @db.Uuid
+  completedAt    DateTime?  @db.Timestamptz(3)
+  closeNote      String?
+  createdById    String     @db.Uuid
+  createdAt      DateTime   @default(now()) @db.Timestamptz(3)
+
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, status, dueAt])
+  @@index([tenantId, admissionId, status])
+}
+
+// ───────────────────────── Stage 31: medication administration record ─────────────────────────
+
+enum MarStatus {
+  DUE
+  GIVEN
+  MISSED
+  HELD
+  REFUSED
+}
+
+/// What the nurse actually did, kept separate from what the doctor ordered (MedicationOrderItem).
+model MedicationAdministration {
+  id                    String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId              String    @db.Uuid
+  facilityId            String    @db.Uuid
+  patientId             String    @db.Uuid
+  admissionId           String    @db.Uuid
+  encounterId           String    @db.Uuid
+  medicationOrderItemId String    @db.Uuid
+  scheduledAt           DateTime  @db.Timestamptz(3)
+  status                MarStatus @default(DUE)
+  /// True for PRN / extra doses given outside the generated schedule.
+  unscheduled           Boolean   @default(false)
+  administeredAt        DateTime? @db.Timestamptz(3)
+  administeredById      String?   @db.Uuid
+  remarks               String?
+  createdAt             DateTime  @default(now()) @db.Timestamptz(3)
+
+  patient   Patient             @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  admission Admission           @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  item      MedicationOrderItem @relation(fields: [tenantId, medicationOrderItemId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([medicationOrderItemId, scheduledAt])
+  @@index([tenantId, facilityId, status, scheduledAt])
+  @@index([tenantId, admissionId, scheduledAt])
+}
+
+// ───────────────────────── Stage 32: intake / output ─────────────────────────
+
+enum IoDirection {
+  INTAKE
+  OUTPUT
+}
+
+enum IoCategory {
+  ORAL
+  IV
+  OTHER_INTAKE
+  URINE
+  DRAIN
+  VOMIT
+  OTHER_OUTPUT
+}
+
+model IntakeOutput {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  facilityId   String            @db.Uuid
+  patientId    String            @db.Uuid
+  admissionId  String            @db.Uuid
+  direction    IoDirection
+  category     IoCategory
+  amount       Decimal           @db.Decimal(8, 1)
+  unit         String            @default("ml")
+  recordedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  recordedById String            @db.Uuid
+  status       ObservationStatus @default(FINAL)
+  errorReason  String?
+  errorById    String?           @db.Uuid
+  errorAt      DateTime?         @db.Timestamptz(3)
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, admissionId, recordedAt])
+}

@@ -1,0 +1,21 @@
+**/node_modules
+**/dist
+**/dist-test
+**/.next
+.local
+.git
+.github
+.vscode
+.env
+.env.*
+!.env.example
+# Secrets, deployment settings and operator tooling never go into an image
+secrets
+deploy
+ops
+.npmrc
+**/*.log
+**/*.tsbuildinfo
+medos-tree.txt
+docs
+.claude

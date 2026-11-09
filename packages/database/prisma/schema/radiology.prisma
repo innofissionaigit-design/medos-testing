@@ -1,0 +1,102 @@
+// Radiology (docs/radiology.md): a billed radiology test is performed (a study with its accession number), then reported and signed by a radiologist. A signed report
+// is never edited: a correction is an amendment with its reason. Images themselves (PACS) are out of scope; see docs/backlog.md.
+
+enum RadModality {
+  XRAY
+  ULTRASOUND
+  CT
+  MRI
+  MAMMOGRAPHY
+  OTHER
+}
+
+enum RadStudyStatus {
+  PERFORMED
+  REPORTED
+}
+
+enum RadReportKind {
+  SIGNED
+  AMENDED
+}
+
+model RadStudy {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String         @db.Uuid
+  facilityId      String         @db.Uuid
+  patientId       String         @db.Uuid
+  encounterId     String         @db.Uuid
+  testOrderId     String         @db.Uuid
+  accessionNumber String
+  modality        RadModality
+  bodyPart        String
+  clinicalNotes   String?
+  status          RadStudyStatus @default(PERFORMED)
+  currentVersion  Int            @default(0)
+  hasCritical     Boolean        @default(false)
+  criticalAckById String?        @db.Uuid
+  criticalAckAt   DateTime?      @db.Timestamptz(3)
+  performedById   String         @db.Uuid
+  performedAt     DateTime       @default(now()) @db.Timestamptz(3)
+  createdAt       DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime       @updatedAt @db.Timestamptz(3)
+
+  patient   Patient            @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter Encounter          @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  testOrder TestOrder          @relation(fields: [tenantId, testOrderId], references: [tenantId, id], onDelete: Restrict)
+  reports   RadReportVersion[]
+  images    RadImage[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, testOrderId])
+  @@unique([tenantId, facilityId, accessionNumber])
+  @@index([tenantId, facilityId, status, updatedAt(sort: Desc)])
+}
+
+/// A signed (or amended) radiology report. Never edited or deleted.
+model RadReportVersion {
+  id          String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String        @db.Uuid
+  studyId     String        @db.Uuid
+  version     Int
+  kind        RadReportKind
+  findings    String
+  impression  String
+  hasCritical Boolean       @default(false)
+  /// For an amendment: why the earlier version was wrong.
+  reason      String?
+  signedById  String        @db.Uuid
+  signedAt    DateTime      @default(now()) @db.Timestamptz(3)
+
+  study RadStudy @relation(fields: [tenantId, studyId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([studyId, version])
+}
+
+/// An image of a study: a PNG or JPEG (a key image or a screenshot from the modality) or one DICOM file. Bytes live in file storage (docs/radiology.md); this row
+/// is the record. Never deleted: a wrong image is marked REMOVED with a reason and stops showing, but stays on the record.
+model RadImage {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  facilityId   String            @db.Uuid
+  patientId    String            @db.Uuid
+  studyId      String            @db.Uuid
+  fileName     String
+  contentType  String
+  sizeBytes    Int
+  sha256       String
+  storageKey   String
+  description  String?
+  status       PatientFileStatus @default(ACTIVE)
+  uploadedById String            @db.Uuid
+  uploadedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  removedById  String?           @db.Uuid
+  removedAt    DateTime?         @db.Timestamptz(3)
+  removeReason String?
+
+  study RadStudy @relation(fields: [tenantId, studyId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, studyId, status, uploadedAt])
+}

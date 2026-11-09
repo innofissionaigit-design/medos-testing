@@ -1,0 +1,21 @@
+node_modules
+dist
+.next
+.turbo
+.local
+.env
+.env.*
+!.env.example
+# deployment secrets and the real per-environment settings (the committed templates are deploy/*.env.example)
+secrets/
+deploy/*.env
+coverage
+*.log
+
+dist-test
+
+# web / e2e artefacts
+apps/web/.next
+apps/web/test-results
+apps/web/playwright-report
+apps/web/next-env.d.ts

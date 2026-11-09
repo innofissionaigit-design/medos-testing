@@ -1,0 +1,194 @@
+// ───────────────────────── Stage 26: wards, rooms, beds ─────────────────────────
+
+enum BedStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+  CLEANING
+  MAINTENANCE
+}
+
+model Ward {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String       @db.Uuid
+  facilityId String       @db.Uuid
+  name       String
+  code       String
+  status     ActiveStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  rooms    Room[]
+  beds     Bed[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, id])
+  @@unique([tenantId, facilityId, code])
+}
+
+model Room {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String       @db.Uuid
+  facilityId String       @db.Uuid
+  wardId     String       @db.Uuid
+  name       String
+  code       String
+  status     ActiveStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
+
+  ward Ward  @relation(fields: [tenantId, facilityId, wardId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  beds Bed[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, id])
+  @@unique([tenantId, facilityId, code])
+}
+
+model Bed {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String       @db.Uuid
+  facilityId String       @db.Uuid
+  wardId     String       @db.Uuid
+  roomId     String       @db.Uuid
+  code       String
+  status     BedStatus    @default(AVAILABLE)
+  /// Master switch: an INACTIVE bed is retired and can never be allocated.
+  active     ActiveStatus @default(ACTIVE)
+  /// Tariff per day, snapshotted onto each assignment.
+  dailyRate  Decimal      @default(0) @db.Decimal(12, 2)
+  version    Int          @default(1)
+  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
+
+  ward        Ward            @relation(fields: [tenantId, facilityId, wardId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  room        Room            @relation(fields: [tenantId, facilityId, roomId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  assignments BedAssignment[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, id])
+  @@unique([tenantId, facilityId, code])
+  @@index([tenantId, facilityId, wardId, status])
+}
+
+// ───────────────────────── Stage 27/28: admissions and bed assignments ─────────────────────────
+
+enum AdmissionStatus {
+  ADMITTED
+  DISCHARGED
+  CANCELLED
+}
+
+model Admission {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String          @db.Uuid
+  facilityId      String          @db.Uuid
+  patientId       String          @db.Uuid
+  encounterId     String          @unique @db.Uuid
+  admissionNumber String
+  consultantId    String          @db.Uuid
+  departmentId    String?         @db.Uuid
+  admittedAt      DateTime        @default(now()) @db.Timestamptz(3)
+  status          AdmissionStatus @default(ADMITTED)
+  reason          String?
+  dischargedAt    DateTime?       @db.Timestamptz(3)
+  cancelReason    String?
+  version         Int             @default(1)
+  createdById     String          @db.Uuid
+  createdAt       DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime        @updatedAt @db.Timestamptz(3)
+
+  facility    Facility        @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient     Patient         @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter   Encounter       @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+  consultant  Practitioner    @relation(fields: [consultantId], references: [id], onDelete: Restrict)
+  department  Department?     @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  assignments BedAssignment[]
+  charges     Charge[]
+  nursingNotes NursingNote[]
+  nursingTasks NursingTask[]
+  administrations MedicationAdministration[]
+  intakeOutputs IntakeOutput[]
+  clearances  DischargeClearance[]
+  dischargeType  DischargeType?
+  dischargeNote  String?
+  finalInvoiceId String? @db.Uuid
+  wardIssues     StockLocationIssue[]
+  finalInvoice   Invoice? @relation("AdmissionFinalInvoice", fields: [finalInvoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, id])
+  @@unique([tenantId, facilityId, admissionNumber])
+  @@index([tenantId, facilityId, status, admittedAt(sort: Desc)])
+  @@index([tenantId, patientId, admittedAt(sort: Desc)])
+}
+
+/// Every bed a patient has occupied, in order. The current bed is the row with releasedAt IS NULL.
+model BedAssignment {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String    @db.Uuid
+  facilityId   String    @db.Uuid
+  admissionId  String    @db.Uuid
+  bedId        String    @db.Uuid
+  assignedAt   DateTime  @default(now()) @db.Timestamptz(3)
+  releasedAt   DateTime? @db.Timestamptz(3)
+  reason       String?
+  dailyRate    Decimal   @db.Decimal(12, 2)
+  assignedById String    @db.Uuid
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  bed       Bed       @relation(fields: [tenantId, facilityId, bedId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, admissionId, assignedAt])
+  @@index([tenantId, bedId, assignedAt(sort: Desc)])
+}
+
+// ───────────────────────── Stage 29: IPD charges ─────────────────────────
+
+enum ChargeType {
+  BED
+  DOCTOR_VISIT
+  PROCEDURE
+  MEDICINE
+  SERVICE
+}
+
+enum ChargeStatus {
+  PENDING
+  BILLED
+  VOIDED
+}
+
+model Charge {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String       @db.Uuid
+  facilityId  String       @db.Uuid
+  patientId   String       @db.Uuid
+  admissionId String       @db.Uuid
+  type        ChargeType
+  serviceId   String?      @db.Uuid
+  description String
+  quantity    Decimal      @db.Decimal(12, 3)
+  unitPrice   Decimal      @db.Decimal(12, 2)
+  taxPercent  Decimal      @default(0) @db.Decimal(5, 2)
+  status      ChargeStatus @default(PENDING)
+  /// Idempotency key for system-generated charges, e.g. BED:<admission>:<yyyy-mm-dd>.
+  sourceKey   String?
+  chargedAt   DateTime     @default(now()) @db.Timestamptz(3)
+  chargedById String       @db.Uuid
+  invoiceId   String?      @db.Uuid
+  voidReason  String?
+  voidedById  String?      @db.Uuid
+  voidedAt    DateTime?    @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  service   Service?  @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  invoice   Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, sourceKey])
+  @@index([tenantId, admissionId, status])
+}

@@ -1,0 +1,1236 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "MedOS booking API",
+    "version": "1.0.0",
+    "description": "Book appointments from another system or a voice bot. Authenticate with an API key created in Administration > Integrations: `Authorization: Bearer mdk_...`. All paths are under /api/v1. Times are ISO 8601 with offset; the facility's timezone is returned by GET /booking/doctors. See docs/integration-api.md."
+  },
+  "servers": [
+    {
+      "url": "http://localhost:4000/api/v1",
+      "description": "Local development"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "API key, for example mdk_... Created by an administrator; shown once."
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "example": "DUPLICATE_BOOKING_SUSPECTED"
+              },
+              "message": {
+                "type": "string"
+              },
+              "details": {
+                "description": "Present for some errors"
+              },
+              "requestId": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "Slot": {
+        "type": "object",
+        "properties": {
+          "startAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "Doctor": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "specialty": {
+            "type": "string",
+            "nullable": true
+          },
+          "department": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              }
+            }
+          },
+          "date": {
+            "type": "string"
+          },
+          "nextFreeTimes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Slot"
+            }
+          }
+        }
+      },
+      "DoctorsResponse": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string",
+            "example": "Asia/Kolkata"
+          },
+          "doctors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Doctor"
+            }
+          }
+        }
+      },
+      "AvailabilitySlot": {
+        "type": "object",
+        "properties": {
+          "startAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "available": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MinimalPatient": {
+        "type": "object",
+        "description": "The least needed to confirm who is calling. No address, date of birth or mobile number.",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mrn": {
+            "type": "string",
+            "nullable": true
+          },
+          "firstName": {
+            "type": "string"
+          },
+          "lastInitial": {
+            "type": "string",
+            "nullable": true,
+            "example": "D."
+          },
+          "gender": {
+            "type": "string",
+            "enum": [
+              "MALE",
+              "FEMALE",
+              "OTHER",
+              "UNKNOWN"
+            ]
+          },
+          "ageYears": {
+            "type": "integer"
+          }
+        }
+      },
+      "RegisterPatient": {
+        "type": "object",
+        "required": [
+          "firstName",
+          "gender",
+          "mobile"
+        ],
+        "additionalProperties": false,
+        "description": "Give either dateOfBirth or estimatedAgeYears.",
+        "properties": {
+          "firstName": {
+            "type": "string"
+          },
+          "lastName": {
+            "type": "string"
+          },
+          "gender": {
+            "type": "string",
+            "enum": [
+              "MALE",
+              "FEMALE",
+              "OTHER",
+              "UNKNOWN"
+            ]
+          },
+          "mobile": {
+            "type": "string",
+            "description": "10-digit Indian mobile; +91 or 0 in front is accepted",
+            "example": "9830012345"
+          },
+          "dateOfBirth": {
+            "type": "string",
+            "format": "date"
+          },
+          "estimatedAgeYears": {
+            "type": "integer"
+          }
+        }
+      },
+      "CreateAppointment": {
+        "type": "object",
+        "required": [
+          "patientId",
+          "practitionerId",
+          "startAt"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "patientId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "practitionerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "startAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "A start time from nextFreeTimes / availability; must be in the future."
+          },
+          "durationMinutes": {
+            "type": "integer",
+            "default": 15
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "CONSULTATION",
+              "PROCEDURE"
+            ],
+            "default": "CONSULTATION"
+          },
+          "notes": {
+            "type": "string",
+            "maxLength": 500
+          }
+        }
+      },
+      "Reschedule": {
+        "type": "object",
+        "required": [
+          "version"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "The appointment's current version (from GET)"
+          },
+          "startAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Never in the past"
+          },
+          "practitionerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "durationMinutes": {
+            "type": "integer"
+          }
+        }
+      },
+      "Cancel": {
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 240
+          }
+        }
+      },
+      "Appointment": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version": {
+            "type": "integer"
+          },
+          "startAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "BOOKED",
+              "CHECKED_IN",
+              "WAITING",
+              "IN_CONSULTATION",
+              "COMPLETED",
+              "NO_SHOW",
+              "CANCELLED"
+            ]
+          },
+          "patientId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "practitionerId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "practitionerName": {
+            "type": "string"
+          },
+          "departmentName": {
+            "type": "string",
+            "nullable": true
+          },
+          "bookingFee": {
+            "type": "string",
+            "nullable": true,
+            "example": "300.00"
+          },
+          "feeStatus": {
+            "type": "string",
+            "enum": [
+              "NOT_REQUIRED",
+              "PENDING",
+              "PAID",
+              "SKIPPED"
+            ]
+          },
+          "feeDue": {
+            "type": "string"
+          },
+          "paymentLink": {
+            "type": "object",
+            "nullable": true,
+            "description": "When the hospital uses payment links: the deadline after which an unpaid booking is cancelled automatically.",
+            "properties": {
+              "status": {
+                "type": "string"
+              },
+              "dueBy": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "placeholder": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "BookingFeeConfig": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "amount": {
+            "type": "string"
+          },
+          "paymentLinkEnabled": {
+            "type": "boolean"
+          },
+          "paymentWindowMinutes": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/booking/doctors": {
+      "get": {
+        "summary": "Doctors with their next free times",
+        "tags": [
+          "Booking"
+        ],
+        "description": "ABILITY: always available. One call for a voice bot: the facility's active doctors, with up to `slots` free start times on a day.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/DoctorsResponse"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key was not given this ability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "date",
+            "in": "query",
+            "required": false,
+            "description": "YYYY-MM-DD in the facility's timezone (default today)",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "departmentId",
+            "in": "query",
+            "required": false,
+            "description": "Only this department",
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "slots",
+            "in": "query",
+            "required": false,
+            "description": "Free times per doctor (1-20, default 5)",
+            "schema": {
+              "type": "integer",
+              "default": 5
+            }
+          }
+        ]
+      }
+    },
+    "/practitioners/{id}/availability": {
+      "get": {
+        "summary": "All times of one doctor on a day",
+        "tags": [
+          "Booking"
+        ],
+        "description": "ABILITY: always available. Every slot of the day with `available` true or false.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/AvailabilitySlot"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not made by this key)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "date",
+            "in": "query",
+            "required": true,
+            "description": "YYYY-MM-DD",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/booking/patients": {
+      "get": {
+        "summary": "Find a patient by mobile number",
+        "tags": [
+          "Patients"
+        ],
+        "description": "ABILITY: FIND_PATIENTS. Active patients with exactly this number, as minimal details.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/MinimalPatient"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key was not given this ability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "mobile",
+            "in": "query",
+            "required": true,
+            "description": "10-digit Indian mobile number",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "post": {
+        "summary": "Register a new patient",
+        "tags": [
+          "Patients"
+        ],
+        "description": "ABILITY: REGISTER_PATIENTS. The normal duplicate check applies and cannot be overridden: a possible duplicate returns 409 DUPLICATE_PATIENT_SUSPECTED with `details.matches` as minimal details; use the matching patient instead.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Registered (201), or the first result of a retry (200)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/MinimalPatient"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key was not given this ability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict (duplicate patient or booking, slot taken, invalid state)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "8-64 characters (letters, digits, - or _). A retry with the same key and the same request returns the first result (200, header Idempotent-Replayed: true) instead of repeating it. The same key with a different request is refused (422).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterPatient"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/appointments": {
+      "post": {
+        "summary": "Book an appointment",
+        "tags": [
+          "Appointments"
+        ],
+        "description": "ABILITY: BOOK_APPOINTMENTS. Send an Idempotency-Key so a retry never books twice. A patient (or look-alike) who already has a live booking with the same doctor, or with another doctor of the same department on the same day, is refused with 409 DUPLICATE_BOOKING_SUSPECTED; an API key cannot override this. If the hospital charges a booking fee, the response shows `feeStatus` PENDING and the fee is paid at the front desk (or by payment link when enabled).",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Booked (201), or the first result of a retry (200)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Appointment"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key was not given this ability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict (duplicate patient or booking, slot taken, invalid state)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Idempotency-Key reused for a different request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": false,
+            "description": "8-64 characters (letters, digits, - or _). A retry with the same key and the same request returns the first result (200, header Idempotent-Replayed: true) instead of repeating it. The same key with a different request is refused (422).",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 64
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAppointment"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/appointments/{id}": {
+      "get": {
+        "summary": "Get an appointment this key made",
+        "tags": [
+          "Appointments"
+        ],
+        "description": "Another key's or a staff member's appointment is 404.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Appointment"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key was not given this ability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not made by this key)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "summary": "Move an appointment (postpone or prepone)",
+        "tags": [
+          "Appointments"
+        ],
+        "description": "ABILITY: BOOK_APPOINTMENTS. Only a BOOKED appointment, never to a time that has passed; the same duplicate rules apply. Send the current `version`.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Appointment"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key was not given this ability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not made by this key)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict (duplicate patient or booking, slot taken, invalid state)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Reschedule"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/appointments/{id}/cancel": {
+      "post": {
+        "summary": "Cancel an appointment this key made",
+        "tags": [
+          "Appointments"
+        ],
+        "description": "ABILITY: BOOK_APPOINTMENTS. A paid booking fee is handled by the hospital's cancellation policy (free cancellation window, optional charge) and stays the patient's money until given back at the front desk.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Appointment"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key was not given this ability",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found (or not made by this key)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflict (duplicate patient or booking, slot taken, invalid state)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Cancel"
+              }
+            }
+          }
+        }
+      }
+    },
+    "/booking-fee/config": {
+      "get": {
+        "summary": "The booking fee and payment-link settings",
+        "tags": [
+          "Booking"
+        ],
+        "description": "ABILITY: always available.",
+        "security": [
+          {
+            "ApiKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/BookingFeeConfig"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, wrong, expired or revoked key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests for this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

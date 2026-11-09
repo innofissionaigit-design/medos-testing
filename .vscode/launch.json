@@ -1,0 +1,19 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug API (needs build: pnpm --filter @medos/api build)",
+      "type": "node", "request": "launch", "program": "${workspaceFolder}/apps/api/dist/main.js", "cwd": "${workspaceFolder}",
+      "env": { "DATABASE_URL": "postgresql://medos@127.0.0.1:54329/medos_dev", "JWT_ACCESS_SECRET": "dev-only-secret-dev-only-secret-0001", "PORT": "4000", "PRISMA_ENGINES_CACHE_DIR": "D:\\.cache\\prisma" },
+      "sourceMaps": true, "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Debug one API test file",
+      "type": "node", "request": "launch", "cwd": "${workspaceFolder}/apps/api",
+      "runtimeArgs": ["--test", "--test-concurrency=1"], "args": ["dist-test/modules/billing/billing.spec.js"],
+      "env": { "PRISMA_ENGINES_CACHE_DIR": "D:\\.cache\\prisma" }, "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    { "name": "Debug web (Chrome)", "type": "chrome", "request": "launch", "url": "http://localhost:3000", "webRoot": "${workspaceFolder}/apps/web" }
+  ]
+}

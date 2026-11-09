@@ -1,0 +1,314 @@
+// ───────────────────────── Stage 9: encounters ─────────────────────────
+
+enum EncounterType {
+  OPD
+  IPD
+}
+
+enum EncounterStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+model Encounter {
+  id              String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String          @db.Uuid
+  facilityId      String          @db.Uuid
+  patientId       String          @db.Uuid
+  encounterNumber String
+  type            EncounterType
+  status          EncounterStatus @default(ACTIVE)
+  departmentId    String?         @db.Uuid
+  practitionerId  String?         @db.Uuid
+  startedAt       DateTime        @default(now()) @db.Timestamptz(3)
+  endedAt         DateTime?       @db.Timestamptz(3)
+  cancelReason    String?
+  createdById     String          @db.Uuid
+  createdAt       DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime        @updatedAt @db.Timestamptz(3)
+
+  facility     Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient      Patient       @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  department   Department?   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  practitioner Practitioner? @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  appointment  Appointment?  @relation("AppointmentEncounter")
+  followUps    Appointment[] @relation("FollowUpOf")
+  queueEntry   QueueEntry?
+  observations Observation[]
+  diagnoses    Diagnosis[]
+  documents    ClinicalDocument[]
+  medicationOrders MedicationOrder[]
+  invoices     Invoice[]
+  dispenses    Dispense[]
+  admission    Admission?
+
+  prescriptionScans PrescriptionScan[]
+  prescriptionShares PrescriptionShare[]
+  consultationBill VisitConsultationBill?
+  shareEntries DoctorShareEntry[]
+  prescriptionDeliveries PrescriptionDelivery[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, id])
+  @@unique([tenantId, facilityId, encounterNumber])
+  @@index([tenantId, patientId, startedAt(sort: Desc)])
+  testOrders TestOrder[]
+  testBillingLines TestBillingLine[]
+  labSamples LabSample[]
+  labResults LabResult[]
+  radStudies RadStudy[]
+  claims     Claim[]
+  aiDrafts   AiDraft[]
+
+  @@index([tenantId, facilityId, type, status])
+}
+
+// ───────────────────────── Stage 10: schedules and appointments ─────────────────────────
+
+enum AppointmentType {
+  CONSULTATION
+  FOLLOW_UP
+  PROCEDURE
+}
+
+enum AppointmentSource {
+  SCHEDULED
+  WALK_IN
+}
+
+enum AppointmentStatus {
+  BOOKED
+  CHECKED_IN
+  WAITING
+  IN_CONSULTATION
+  COMPLETED
+  NO_SHOW
+  CANCELLED
+}
+
+model PractitionerSchedule {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String       @db.Uuid
+  facilityId     String       @db.Uuid
+  practitionerId String       @db.Uuid
+  /// 0 = Sunday ... 6 = Saturday, in the facility's timezone.
+  dayOfWeek      Int
+  /// Minutes after local midnight.
+  startMinute    Int
+  endMinute      Int
+  slotMinutes    Int          @default(15)
+  status         ActiveStatus @default(ACTIVE)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+
+  facility     Facility     @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  practitioner Practitioner @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, practitionerId, dayOfWeek])
+}
+
+model Appointment {
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String            @db.Uuid
+  facilityId       String            @db.Uuid
+  patientId        String            @db.Uuid
+  practitionerId   String            @db.Uuid
+  departmentId     String?           @db.Uuid
+  startAt          DateTime          @db.Timestamptz(3)
+  endAt            DateTime          @db.Timestamptz(3)
+  type             AppointmentType   @default(CONSULTATION)
+  source           AppointmentSource @default(SCHEDULED)
+  status           AppointmentStatus @default(BOOKED)
+  notes            String?
+  /// True when an authorised user deliberately booked over another appointment (or for a walk-in).
+  overbooked       Boolean           @default(false)
+  overbookReason   String?
+  cancelReason     String?
+  encounterId      String?           @unique @db.Uuid
+  /// The consultation that ordered this follow-up (FOLLOW_UP only; same patient, tenant and facility; never changes).
+  followUpOfEncounterId String?      @db.Uuid
+  /// The booking fee asked for when this appointment was booked (a snapshot of the setting at that time); null when no fee applies.
+  /// Check-in needs it paid or skipped (docs/booking-fee.md).
+  bookingFee       Decimal?          @db.Decimal(12, 2)
+  feeSkippedAt     DateTime?         @db.Timestamptz(3)
+  feeSkippedById   String?           @db.Uuid
+  feeSkipReason    String?
+  feeSkipNote      String?
+  createdById      String            @db.Uuid
+  version          Int               @default(1)
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime          @updatedAt @db.Timestamptz(3)
+
+  facility     Facility     @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient      Patient      @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  practitioner Practitioner @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  encounter    Encounter?   @relation("AppointmentEncounter", fields: [encounterId], references: [id], onDelete: Restrict)
+  followUpOf   Encounter?   @relation("FollowUpOf", fields: [followUpOfEncounterId], references: [id], onDelete: Restrict)
+  queueEntry   QueueEntry?
+  reminders    AppointmentReminder[]
+  teleconsults Teleconsult[]
+  advanceDeposits AdvanceDeposit[]
+  paymentLink  BookingPaymentLink?
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, startAt])
+  @@index([tenantId, practitionerId, startAt])
+  @@index([tenantId, patientId, startAt])
+  @@index([tenantId, followUpOfEncounterId])
+}
+
+enum ReminderChannel {
+  SMS
+}
+
+enum ReminderStatus {
+  PENDING
+  SENT
+  FAILED
+  CANCELLED
+  SKIPPED
+}
+
+/// A reminder for a follow-up appointment. Planned when the follow-up is booked, replaced when it is rescheduled and
+/// cancelled when it is cancelled, marked no-show or checked in. Only PENDING rows may change (database trigger).
+model AppointmentReminder {
+  id                 String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId           String          @db.Uuid
+  facilityId         String          @db.Uuid
+  appointmentId      String          @db.Uuid
+  channel            ReminderChannel @default(SMS)
+  /// Minutes before the appointment start, from the facility setting in force when the reminder was planned.
+  offsetMinutes      Int
+  /// The appointment start this reminder was planned for; if the appointment has moved, the reminder is obsolete.
+  appointmentStartAt DateTime        @db.Timestamptz(3)
+  sendAt             DateTime        @db.Timestamptz(3)
+  status             ReminderStatus  @default(PENDING)
+  attempts           Int             @default(0)
+  lastError          String?
+  providerMessageId  String?
+  sentAt             DateTime?       @db.Timestamptz(3)
+  createdAt          DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt          DateTime        @updatedAt @db.Timestamptz(3)
+
+  appointment Appointment @relation(fields: [tenantId, appointmentId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, appointmentId])
+  @@index([status, sendAt])
+}
+
+// ───────────────────────── Stage 11: OPD queue ─────────────────────────
+
+enum QueuePriority {
+  NORMAL
+  PRIORITY
+  EMERGENCY
+}
+
+enum QueueStatus {
+  WAITING
+  CALLED
+  IN_CONSULTATION
+  COMPLETED
+  SKIPPED
+  CANCELLED
+}
+
+model QueueEntry {
+  id                    String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId              String        @db.Uuid
+  facilityId            String        @db.Uuid
+  encounterId           String        @unique @db.Uuid
+  patientId             String        @db.Uuid
+  practitionerId        String        @db.Uuid
+  departmentId          String?       @db.Uuid
+  appointmentId         String?       @unique @db.Uuid
+  /// Facility-local calendar date the token belongs to.
+  tokenDate             DateTime      @db.Date
+  tokenNumber           Int
+  priority              QueuePriority @default(NORMAL)
+  status                QueueStatus   @default(WAITING)
+  checkedInAt           DateTime      @default(now()) @db.Timestamptz(3)
+  calledAt              DateTime?     @db.Timestamptz(3)
+  consultationStartedAt DateTime?     @db.Timestamptz(3)
+  completedAt           DateTime?     @db.Timestamptz(3)
+  createdById           String        @db.Uuid
+  version               Int           @default(1)
+  updatedAt             DateTime      @updatedAt @db.Timestamptz(3)
+
+  facility     Facility     @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient      Patient      @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  practitioner Practitioner @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  encounter    Encounter    @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+  appointment  Appointment? @relation(fields: [appointmentId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, practitionerId, tokenDate, tokenNumber])
+  @@index([tenantId, facilityId, tokenDate, status])
+  @@index([tenantId, practitionerId, tokenDate, status])
+}
+
+// ───────────────────────── Booking payment link (placeholder delivery) ─────────────────────────
+
+enum PaymentLinkStatus {
+  PENDING
+  PAID
+  EXPIRED
+  CANCELLED
+}
+
+enum LinkSendStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+/// The payment link for an appointment's booking fee, with its deadline (docs/booking-payment-link.md). While PENDING and past `dueBy`, the worker
+/// cancels the appointment if the fee is still unpaid. Delivery on WhatsApp is a placeholder: the default provider only logs.
+model BookingPaymentLink {
+  id                String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String            @db.Uuid
+  facilityId        String            @db.Uuid
+  appointmentId     String            @db.Uuid
+  /// Opaque, unguessable reference carried in the link.
+  token             String
+  amount            Decimal           @db.Decimal(12, 2)
+  dueBy             DateTime          @db.Timestamptz(3)
+  status            PaymentLinkStatus @default(PENDING)
+  sendStatus        LinkSendStatus    @default(PENDING)
+  sendAttempts      Int               @default(0)
+  nextSendAt        DateTime          @db.Timestamptz(3)
+  sentAt            DateTime?         @db.Timestamptz(3)
+  providerMessageId String?
+  lastError         String?
+  closedAt          DateTime?         @db.Timestamptz(3)
+  createdAt         DateTime          @default(now()) @db.Timestamptz(3)
+
+  appointment Appointment @relation(fields: [tenantId, appointmentId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, appointmentId])
+  @@unique([token])
+  @@index([status, dueBy])
+  @@index([status, sendStatus, nextSendAt])
+}
+
+/// The paid OPD consultation bill that covers an OPD visit, when the hospital requires the consultation to be paid before a visit starts (docs/opd-payment.md).
+/// A bill covers one visit only (unique), and a visit has one covering bill. Written once with the visit and never changed.
+model VisitConsultationBill {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  encounterId String   @db.Uuid
+  invoiceId   String   @unique @db.Uuid
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  invoice   Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, encounterId])
+  @@index([tenantId, facilityId, createdAt(sort: Desc)])
+}

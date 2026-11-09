@@ -1,0 +1,429 @@
+import { after, before, describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { makeDoctor, registerPatient, startApp, startVisit, type TestApp, type TestDoctor, type TestTenant } from "../../test/harness";
+import { MESSAGE_PROVIDER, type MessageProvider, type OutgoingMessage } from "../prescriptions/message.provider";
+
+type User = { id: string; token: string };
+let seq = 0;
+/** A valid Indian mobile number that no other test uses. */
+const mobileNo = () => `9${String(Date.now()).slice(-6)}${String(++seq).padStart(3, "0")}`;
+
+describe("patient app: sign-in with a code, what a patient sees, and appointment requests", () => {
+  let t: TestApp;
+  let a: TestTenant;
+  let b: TestTenant;
+  let rec: User; let cashier: User; let nurse: User; let bRec: User;
+  let doc: TestDoctor;
+  const sent: OutgoingMessage[] = [];
+  const codeFor = (mobile: string) => /^(\d{6}) is your/.exec([...sent].reverse().find((m) => m.to === mobile)?.text ?? "")?.[1] ?? "";
+
+  const setting = (value: boolean, tenant = a) => t.api("put", "/settings/PATIENT_PORTAL_ENABLED", tenant.admin.token).send({ value });
+  const ask = (mobile: string, hospitalCode = a.code) => t.api("post", "/patient-portal/auth/code").send({ hospitalCode, mobile });
+  const verify = (mobile: string, code: string, hospitalCode = a.code) => t.api("post", "/patient-portal/auth/verify").send({ hospitalCode, mobile, code });
+  /** The signed proofs each token has earned by confirming a date of birth; the helpers below send them the way the web gateway does. */
+  const proofs = new Map<string, string[]>();
+  const authed = (method: "get" | "post", path: string, token: string) => {
+    const r = t.api(method, path).set("Authorization", `Bearer ${token}`);
+    const p = proofs.get(token);
+    return p?.length ? r.set("x-patient-proofs", p.join(",")) : r;
+  };
+  const unlock = async (token: string, patientId: string, dateOfBirth = "1990-04-02") => {
+    const r = await authed("post", "/patient-portal/unlock", token).send({ patientId, dateOfBirth });
+    if (r.status === 200) proofs.set(token, [...(proofs.get(token) ?? []).filter((x) => !x.startsWith(patientId)), r.body.data.proof as string]);
+    return r;
+  };
+  /** Signs in. By default it also confirms every patient on the number (they all have the default test date of birth); `confirm: false` leaves them locked. */
+  const signIn = async (mobile: string, tenant = a, confirm = true) => {
+    await ask(mobile, tenant.code);
+    const r = await verify(mobile, codeFor(mobile), tenant.code);
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    const token = r.body.data.token as string;
+    if (confirm) for (const pt of await t.prisma.patient.findMany({ where: { tenantId: tenant.tenantId, mobile }, select: { id: true } })) await unlock(token, pt.id);
+    return token;
+  };
+  const get = (path: string, token?: string) => (token ? authed("get", path, token) : t.api("get", path));
+  const post = (path: string, token: string, body: Record<string, unknown> = {}) => authed("post", path, token).send(body);
+  /** A patient with this mobile, with a signed consultation and prescription. */
+  const visit = async (mobile: string, sign = true, first = "Meera") => {
+    const patient = await registerPatient(t, rec.token, { firstName: first });
+    await t.prisma.patient.update({ where: { id: patient.id }, data: { mobile } });
+    const v = await startVisit(t, rec.token, doc, patient.id);
+    await t.api("post", `/queue/${v.queueId}/start`, doc.token);
+    await t.api("put", `/encounters/${v.encounterId}/prescription`, doc.token).send({ items: [{ genericName: "Paracetamol", strength: "500 mg", dosage: "1 tablet", route: "ORAL", frequency: "TDS", durationDays: 3 }] });
+    const n = await t.api("put", `/encounters/${v.encounterId}/consultation`, doc.token).send({ content: { chiefComplaint: "Fever for two days", advice: "Drink plenty of fluids" } });
+    await t.api("post", `/encounters/${v.encounterId}/diagnoses`, doc.token).send({ text: "Viral fever", type: "PROVISIONAL" });
+    if (sign) assert.equal((await t.api("post", `/encounters/${v.encounterId}/consultation/sign`, doc.token).send({ version: n.body.data.version })).status, 200);
+    return { patient, encounterId: v.encounterId };
+  };
+
+  before(async () => {
+    t = await startApp();
+    a = await t.makeTenant("portal-a"); b = await t.makeTenant("portal-b");
+    rec = await t.makeUser(a, ["RECEPTIONIST"]); cashier = await t.makeUser(a, ["CASHIER"]); nurse = await t.makeUser(a, ["NURSE"]); bRec = await t.makeUser(b, ["RECEPTIONIST"]);
+    doc = await makeDoctor(t, a);
+    const provider = t.app.get<MessageProvider>(MESSAGE_PROVIDER);
+    (provider as { send: MessageProvider["send"] }).send = async (m) => { sent.push(m); return { providerMessageId: `test:${m.reference}` }; };
+    assert.equal((await setting(true)).status, 200);
+    assert.equal((await setting(true, b)).status, 200);
+  });
+  after(async () => { await t.close(); });
+
+  describe("the code", () => {
+    it("is sent only to a registered mobile when the hospital has the app on, and the answer is always the same", async () => {
+      const mobile = mobileNo();
+      await visit(mobile);
+      const before = sent.length;
+      const known = await ask(mobile);
+      const unknown = await ask(mobileNo());
+      const badHospital = await ask(mobile, "no-such-hospital");
+      const badNumber = await ask("1234567890");
+      for (const r of [known, unknown, badHospital, badNumber]) assert.deepEqual([r.status, r.body.data], [200, { sent: true }]);
+      assert.equal(sent.length, before + 1, "only the registered number received a code");
+      const m = sent[sent.length - 1]!;
+      assert.deepEqual([m.to, m.channel], [mobile, "SMS"]);
+      assert.match(m.text, /^\d{6} is your .+ patient app code\. It works for 5 minutes\. Do not share it with anyone\.$/);
+      const row = await t.prisma.patientOtp.findFirstOrThrow({ where: { tenantId: a.tenantId, mobile } });
+      assert.notEqual(row.codeHash, codeFor(mobile), "only a hash is kept");
+      assert.equal((await ask(mobile, b.code)).status, 200);
+      assert.equal(sent.length, before + 1, "another hospital has no patient with this number");
+      for (const bad of [{}, { hospitalCode: a.code }, { hospitalCode: a.code, mobile, extra: 1 }]) assert.equal((await t.api("post", "/patient-portal/auth/code").send(bad)).status, 400);
+    });
+
+    it("sends nothing while the hospital has the app switched off", async () => {
+      const mobile = mobileNo();
+      await visit(mobile);
+      await setting(false);
+      const before = sent.length;
+      assert.deepEqual((await ask(mobile)).body.data, { sent: true });
+      assert.equal(sent.length, before);
+      await setting(true);
+    });
+
+    it("is limited to three a quarter hour for one number", async () => {
+      const mobile = mobileNo();
+      await visit(mobile);
+      const before = sent.length;
+      for (let i = 0; i < 5; i++) assert.equal((await ask(mobile)).status, 200);
+      assert.equal(sent.length - before, 3);
+    });
+
+    it("works once, only for the right number, and only a few wrong tries are allowed", async () => {
+      const mobile = mobileNo();
+      await visit(mobile);
+      await ask(mobile);
+      const code = codeFor(mobile);
+      const wrong = code === "000000" ? "111111" : "000000";
+      const other = mobileNo();
+      await visit(other);
+      assert.equal((await verify(other, code)).status, 401, "a code is for one number");
+      assert.equal((await verify(mobile, wrong)).status, 401);
+      assert.equal((await verify(mobile, wrong, b.code)).status, 401, "another hospital");
+      for (const bad of ["12345", "abcdef", "1234567", ""]) assert.equal((await verify(mobile, bad)).status, 400, bad);
+      const ok = await verify(mobile, code);
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.match(ok.body.data.token, /^mdp_[0-9a-f-]{36}\.[A-Za-z0-9_-]{40,}$/);
+      assert.equal((await verify(mobile, code)).status, 401, "a used code is dead");
+      const row = await t.prisma.patientSession.findFirstOrThrow({ where: { tenantId: a.tenantId, mobile } });
+      assert.notEqual(row.tokenHash, ok.body.data.token, "only a hash of the token is kept");
+      // Five wrong tries lock the code, even for the right answer.
+      const m2 = mobileNo();
+      await visit(m2);
+      await ask(m2);
+      const c2 = codeFor(m2);
+      for (let i = 0; i < 5; i++) assert.equal((await verify(m2, c2 === "000000" ? "111111" : "000000")).status, 401);
+      assert.equal((await verify(m2, c2)).status, 401, "locked after five wrong tries");
+      assert.equal(await t.prisma.patientSession.count({ where: { tenantId: a.tenantId, mobile: m2 } }), 0);
+    });
+
+    it("expires, and two people entering the right code at once open one session", async () => {
+      const mobile = mobileNo();
+      await visit(mobile);
+      const old = new Date(Date.now() - 20 * 60_000);
+      await t.prisma.patientOtp.create({ data: { tenantId: a.tenantId, mobile, codeHash: "x".repeat(64), createdAt: old, expiresAt: new Date(old.getTime() + 5 * 60_000) } });
+      assert.equal((await verify(mobile, "123456")).status, 401, "expired");
+      await ask(mobile);
+      const code = codeFor(mobile);
+      const [x, y] = await Promise.all([verify(mobile, code), verify(mobile, code)]);
+      assert.deepEqual([x.status, y.status].sort(), [200, 401], JSON.stringify([x.body, y.body]));
+      assert.equal(await t.prisma.patientSession.count({ where: { tenantId: a.tenantId, mobile } }), 1);
+    });
+  });
+
+  describe("the session and what it can see", () => {
+    it("needs a patient's own token: no token, a staff token or a made-up one is refused; a patient token does not open staff routes", async () => {
+      const mobile = mobileNo();
+      await visit(mobile);
+      const token = await signIn(mobile);
+      assert.equal((await get("/patient-portal/me")).status, 401);
+      assert.equal((await get("/patient-portal/me", rec.token)).status, 401, "a staff token is not a patient session");
+      assert.equal((await get("/patient-portal/me", "mdp_bogus.xxxx")).status, 401);
+      assert.equal((await get("/patient-portal/me", `mdp_${randomUUID()}.${"a".repeat(43)}`)).status, 401);
+      assert.equal((await get("/patients?q=Meera", token)).status, 401, "the patient token opens no staff route");
+      assert.equal((await get("/patient-portal/me", token)).status, 200);
+      const forged = token.replace(/^mdp_[0-9a-f-]{36}/, `mdp_${b.tenantId}`);
+      assert.equal((await get("/patient-portal/me", forged)).status, 401, "a token cannot be moved to another hospital");
+    });
+
+    it("lists only the patients registered with the signed-in mobile; a family sharing a phone sees each other", async () => {
+      const mobile = mobileNo();
+      const one = await visit(mobile, true, "Asha");
+      const two = await visit(mobile, true, "Bina");
+      const stranger = await visit(mobileNo(), true, "Chitra");
+      const token = await signIn(mobile);
+      const me = (await get("/patient-portal/me", token)).body.data as { hospital: string; patients: { id: string; name: string; mrn: string }[] };
+      assert.deepEqual(me.patients.map((p) => p.id).sort(), [one.patient.id, two.patient.id].sort());
+      assert.ok(me.hospital);
+      assert.ok(me.patients.every((p) => p.mrn));
+      for (const path of ["appointments", "visits", "reports", "bills", "appointment-requests"]) {
+        assert.equal((await get(`/patient-portal/${path}?patientId=${stranger.patient.id}`, token)).status, 404, `${path}: another number's patient`);
+        assert.equal((await get(`/patient-portal/${path}?patientId=${randomUUID()}`, token)).status, 404, `${path}: unknown patient`);
+        assert.equal((await get(`/patient-portal/${path}?patientId=nope`, token)).status, 400, `${path}: not an id`);
+        assert.equal((await get(`/patient-portal/${path}`, token)).status, 400, `${path}: a patient is required`);
+        assert.equal((await get(`/patient-portal/${path}?patientId=${one.patient.id}`, token)).status, 200, path);
+      }
+      const bToken = await signIn(mobile, b).catch(() => null);
+      assert.equal(bToken, null, "the number is not a patient of the other hospital");
+    });
+
+    it("a family sharing one number sees only first names until each person confirms their own date of birth", async () => {
+      const mobile = mobileNo();
+      const asha = await visit(mobile, true, "Asha");
+      const bina = await visit(mobile, true, "Bina");
+      const token = await signIn(mobile, a, false);
+      const me = (await get("/patient-portal/me", token)).body.data as { patients: { id: string; name: string; mrn: string | null; gender: string | null; age: number | null; locked: boolean; canUnlock: boolean }[] };
+      assert.equal(me.patients.length, 2);
+      for (const pt of me.patients) assert.deepEqual([pt.locked, pt.canUnlock, pt.mrn, pt.gender, pt.age], [true, true, null, null, null], "nothing but a first name before confirming");
+      assert.deepEqual(me.patients.map((x) => x.name).sort(), ["Asha", "Bina"]);
+      const lastNames = await t.prisma.patient.findMany({ where: { id: { in: [asha.patient.id, bina.patient.id] } }, select: { lastName: true } });
+      assert.ok(!JSON.stringify(me).includes(lastNames[0]!.lastName!), "no surname while locked");
+      for (const path of ["appointments", "visits", "reports", "bills", "appointment-requests"]) {
+        const r = await get(`/patient-portal/${path}?patientId=${asha.patient.id}`, token);
+        assert.deepEqual([r.status, r.body.error?.code], [403, "PROFILE_LOCKED"], path);
+      }
+      assert.equal((await post("/patient-portal/appointment-requests", token, { patientId: asha.patient.id, preferredDate: new Date(Date.now() + 86_400_000).toISOString().slice(0, 10), reason: "Follow-up visit" })).status, 403, "cannot ask for an appointment for a locked patient");
+      // A wrong date of birth does not open anything and is recorded.
+      const wrong = await unlock(token, asha.patient.id, "1991-04-02");
+      assert.deepEqual([wrong.status, wrong.body.error.code], [403, "PROFILE_VERIFICATION_FAILED"]);
+      assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "PATIENT_APP_UNLOCK_FAILED", entityId: asha.patient.id } }));
+      assert.equal((await get(`/patient-portal/visits?patientId=${asha.patient.id}`, token)).status, 403);
+      // The right one opens that person only.
+      assert.equal((await unlock(token, asha.patient.id)).status, 200);
+      assert.equal((await get(`/patient-portal/visits?patientId=${asha.patient.id}`, token)).status, 200);
+      assert.equal((await get(`/patient-portal/visits?patientId=${bina.patient.id}`, token)).status, 403, "confirming Asha does not open Bina");
+      const after = (await get("/patient-portal/me", token)).body.data as { patients: { id: string; name: string; mrn: string | null; locked: boolean }[] };
+      assert.deepEqual(after.patients.map((x) => [x.id === asha.patient.id, x.locked, !!x.mrn]).sort(), [[false, true, false], [true, false, true]]);
+      assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "PATIENT_APP_PROFILE_UNLOCKED", entityId: asha.patient.id } }));
+    });
+
+    it("a proof works only for its own session, patient and hospital, and cannot be forged or reused after sign-out", async () => {
+      const mobile = mobileNo();
+      const one = await visit(mobile, true, "Esha");
+      await visit(mobile, true, "Farah");
+      const token = await signIn(mobile);
+      const proof = proofs.get(token)!.find((x) => x.startsWith(one.patient.id))!;
+      assert.ok(proof);
+      const other = await signIn(mobile, a, false);
+      const replay = await t.api("get", `/patient-portal/visits?patientId=${one.patient.id}`).set("Authorization", `Bearer ${other}`).set("x-patient-proofs", proof);
+      assert.equal(replay.status, 403, "a proof from another session is ignored");
+      const [id, exp, sig] = proof.split(".") as [string, string, string];
+      for (const forged of [`${id}.${Number(exp) + 60_000}.${sig}`, `${id}.${exp}.${"A".repeat(43)}`, `${randomUUID()}.${exp}.${sig}`, `${id}.${Date.now() - 1000}.${sig}`, "garbage", ""]) {
+        assert.equal((await t.api("get", `/patient-portal/visits?patientId=${one.patient.id}`).set("Authorization", `Bearer ${other}`).set("x-patient-proofs", forged)).status, 403, forged);
+      }
+      const out = await post("/patient-portal/logout", token);
+      assert.equal(out.status, 200);
+      assert.equal((await get(`/patient-portal/visits?patientId=${one.patient.id}`, token)).status, 401, "a signed-out session opens nothing, proof or not");
+    });
+
+    it("locks confirming after five wrong tries for a patient, even from a new sign-in; a patient without a date of birth cannot be confirmed", async () => {
+      const mobile = mobileNo();
+      const target = await visit(mobile, true, "Gita");
+      await visit(mobile, true, "Hari");
+      const first = await signIn(mobile, a, false);
+      for (let i = 0; i < 5; i++) assert.equal((await unlock(first, target.patient.id, "1980-01-01")).status, 403);
+      const sixth = await unlock(first, target.patient.id);
+      assert.deepEqual([sixth.status, sixth.body.error.code], [429, "RATE_LIMITED"], "even the right answer is refused once locked out");
+      // A fresh sign-in does not reset the count.
+      const second = await signIn(mobile, a, false);
+      assert.equal((await unlock(second, target.patient.id)).status, 429);
+      assert.equal((await unlock(first, randomUUID())).status, 404);
+      assert.equal((await unlock(first, target.patient.id, "not-a-date")).status, 400);
+      assert.equal((await t.api("post", "/patient-portal/unlock").send({ patientId: target.patient.id, dateOfBirth: "1990-04-02" })).status, 401);
+
+      const m2 = mobileNo();
+      const noDob = { patient: await registerPatient(t, rec.token, { firstName: "Indu", dateOfBirth: undefined, estimatedAgeYears: 34 }) };
+      await t.prisma.patient.update({ where: { id: noDob.patient.id }, data: { mobile: m2 } });
+      await visit(m2, true, "Jai");
+      const tk = await signIn(m2, a, false);
+      const list = (await get("/patient-portal/me", tk)).body.data as { patients: { id: string; canUnlock: boolean }[] };
+      assert.equal(list.patients.find((x) => x.id === noDob.patient.id)?.canUnlock, false);
+      const r = await unlock(tk, noDob.patient.id);
+      assert.deepEqual([r.status, r.body.error.code], [409, "PROFILE_NOT_VERIFIABLE"]);
+    });
+
+    it("a number with a single patient needs no extra step", async () => {
+      const mobile = mobileNo();
+      const only = await visit(mobile, true, "Kavya");
+      const token = await signIn(mobile, a, false);
+      const me = (await get("/patient-portal/me", token)).body.data as { patients: { locked: boolean; mrn: string | null }[] };
+      assert.deepEqual(me.patients.map((x) => [x.locked, !!x.mrn]), [[false, true]]);
+      assert.equal((await get(`/patient-portal/visits?patientId=${only.patient.id}`, token)).status, 200);
+    });
+
+    it("shows signed visits with the diagnosis, advice and prescription; never a draft", async () => {
+      const mobile = mobileNo();
+      const signed = await visit(mobile, true, "Signed");
+      const draft = await visit(mobile, false, "Drafted");
+      const token = await signIn(mobile);
+      const v = (await get(`/patient-portal/visits?patientId=${signed.patient.id}`, token)).body.data as { diagnoses: string[]; advice: string | null; doctor: string; prescription: { number: string; medicines: { name: string; dose: string; days: number }[] } | null }[];
+      assert.equal(v.length, 1);
+      assert.deepEqual([v[0]!.diagnoses, v[0]!.advice], [["Viral fever"], "Drink plenty of fluids"]);
+      assert.deepEqual(v[0]!.prescription?.medicines.map((m) => [m.name, m.dose, m.days]), [["Paracetamol 500 mg", "1 tablet", 3]]);
+      assert.ok(v[0]!.prescription?.number && v[0]!.doctor);
+      assert.deepEqual((await get(`/patient-portal/visits?patientId=${draft.patient.id}`, token)).body.data, [], "a note that is not signed is not shown");
+    });
+
+    it("shows appointments, upcoming and past", async () => {
+      const mobile = mobileNo();
+      const p = await visit(mobile);
+      const at = (days: number) => new Date(Date.now() + days * 86_400_000);
+      await t.prisma.appointment.create({ data: { tenantId: a.tenantId, facilityId: a.facilityId, patientId: p.patient.id, practitionerId: doc.practitionerId, startAt: at(3), endAt: new Date(at(3).getTime() + 900_000), status: "BOOKED", createdById: rec.id } });
+      const token = await signIn(mobile);
+      const r = (await get(`/patient-portal/appointments?patientId=${p.patient.id}`, token)).body.data as { upcoming: { status: string; doctor: string }[]; past: unknown[] };
+      assert.deepEqual([r.upcoming.length, r.upcoming[0]?.status], [1, "BOOKED"]);
+      assert.ok(r.upcoming[0]!.doctor);
+      assert.ok(r.past.length >= 1, "the walk-in of the visit is in the past list");
+    });
+
+    it("shows verified lab reports and signed radiology reports, and holds back a critical one until the doctor has seen it", async () => {
+      const mobile = mobileNo();
+      const p = await visit(mobile);
+      const invoice = (await t.api("post", "/invoices", cashier.token).send({ patientId: p.patient.id, lines: [{ description: "Tests", unitPrice: "800", taxPercent: 0, quantity: 1 }] })).body.data.id as string;
+      const order = async (category: "LABORATORY" | "RADIOLOGY", name: string) => t.prisma.testOrder.create({ data: { tenantId: a.tenantId, facilityId: a.facilityId, patientId: p.patient.id, encounterId: p.encounterId, category, name, status: "BILLED", invoiceId: invoice, billedAt: new Date(), billedById: cashier.id, orderedById: doc.userId } });
+      const lab = async (critical: boolean) => {
+        const o = await order("LABORATORY", critical ? "Platelet count" : "Haemoglobin");
+        const r = await t.prisma.labResult.create({ data: { tenantId: a.tenantId, facilityId: a.facilityId, patientId: p.patient.id, encounterId: p.encounterId, testOrderId: o.id, name: o.name, status: "VERIFIED", currentVersion: 1, hasCritical: critical } });
+        await t.prisma.labResultVersion.create({ data: { tenantId: a.tenantId, resultId: r.id, version: 1, kind: "VERIFIED", values: [{ name: o.name, unit: "g/dL", value: critical ? "12" : "13.2", flag: critical ? "CRITICAL_LOW" : "NORMAL", rangeText: "12.0 - 15.5" }], hasCritical: critical, verifiedById: doc.userId } });
+        return r;
+      };
+      const normal = await lab(false);
+      const held = await lab(true);
+      const token = await signIn(mobile);
+      let r = (await get(`/patient-portal/reports?patientId=${p.patient.id}`, token)).body.data as { withheld: number; lab: { id: string; values: { name: string; value: string; flag: string }[] }[]; radiology: { id: string; impression: string }[] };
+      assert.deepEqual([r.lab.map((x) => x.id), r.withheld], [[normal.id], 1]);
+      assert.deepEqual(r.lab[0]!.values.map((v) => [v.name, v.value, v.flag]), [["Haemoglobin", "13.2", "NORMAL"]]);
+      await t.prisma.labResult.update({ where: { id: held.id }, data: { criticalAckAt: new Date(), criticalAckById: doc.userId } });
+      r = (await get(`/patient-portal/reports?patientId=${p.patient.id}`, token)).body.data;
+      assert.deepEqual([r.lab.map((x) => x.id).sort(), r.withheld], [[normal.id, held.id].sort(), 0], "released once the doctor acknowledged it");
+      const ro = await order("RADIOLOGY", "Chest X-ray");
+      const study = await t.prisma.radStudy.create({ data: { tenantId: a.tenantId, facilityId: a.facilityId, patientId: p.patient.id, encounterId: p.encounterId, testOrderId: ro.id, accessionNumber: `RAD-T-${seq}`, modality: "XRAY", bodyPart: "Chest PA", status: "REPORTED", currentVersion: 1, hasCritical: true, performedById: doc.userId } });
+      await t.prisma.radReportVersion.create({ data: { tenantId: a.tenantId, studyId: study.id, version: 1, kind: "SIGNED", findings: "Large pneumothorax", impression: "Pneumothorax", hasCritical: true, signedById: doc.userId } });
+      r = (await get(`/patient-portal/reports?patientId=${p.patient.id}`, token)).body.data;
+      assert.deepEqual([r.radiology.length, r.withheld], [0, 1], "a critical radiology report is held too");
+      await t.prisma.radStudy.update({ where: { id: study.id }, data: { criticalAckAt: new Date(), criticalAckById: doc.userId } });
+      r = (await get(`/patient-portal/reports?patientId=${p.patient.id}`, token)).body.data;
+      assert.deepEqual([r.radiology.map((x) => x.impression), r.withheld], [["Pneumothorax"], 0]);
+    });
+
+    it("shows issued bills with what is due and the receipts, never a draft", async () => {
+      const mobile = mobileNo();
+      const p = await visit(mobile);
+      const mk = async () => (await t.api("post", "/invoices", cashier.token).send({ patientId: p.patient.id, lines: [{ description: "Procedure", unitPrice: "1000", taxPercent: 0, quantity: 1 }] })).body.data.id as string;
+      const issued = await mk();
+      await mk();
+      assert.equal((await t.api("post", `/invoices/${issued}/issue`, cashier.token)).status, 200);
+      assert.equal((await t.api("post", `/invoices/${issued}/payments`, cashier.token).set("Idempotency-Key", `k-${randomUUID().slice(0, 18)}`).send({ payments: [{ method: "UPI", amount: "400", reference: "UPIREF4001" }] })).status, 201);
+      const token = await signIn(mobile);
+      const bills = (await get(`/patient-portal/bills?patientId=${p.patient.id}`, token)).body.data as { id: string; total: string; paid: string; due: string; status: string; receipts: { amount: string }[] }[];
+      assert.equal(bills.length, 1, "the draft is not shown");
+      assert.deepEqual([bills[0]!.total, bills[0]!.paid, bills[0]!.due, bills[0]!.status, bills[0]!.receipts.map((r) => r.amount)], ["1000.00", "400.00", "600.00", "PARTIALLY_PAID", ["400.00"]]);
+    });
+
+    it("signing out ends the session; switching the app off ends every session", async () => {
+      const mobile = mobileNo();
+      await visit(mobile);
+      const token = await signIn(mobile);
+      assert.equal((await post("/patient-portal/logout", token)).status, 200);
+      assert.equal((await get("/patient-portal/me", token)).status, 401);
+      const again = await signIn(mobile);
+      await setting(false);
+      assert.equal((await get("/patient-portal/me", again)).status, 401, "the hospital switched the app off");
+      await setting(true);
+      assert.equal((await get("/patient-portal/me", again)).status, 200);
+      for (const action of ["PATIENT_APP_SIGNED_IN", "PATIENT_APP_SIGNED_OUT"]) assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action } }), action);
+      await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "PatientSession" SET "revokedAt" = NULL WHERE "tenantId" = '${a.tenantId}'::uuid AND mobile = '${mobile}' AND "revokedAt" IS NOT NULL`), /cannot be revived/);
+    });
+  });
+
+  describe("appointment requests", () => {
+    const day = (n: number) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+
+    it("a patient asks for an appointment; the front desk answers; the patient sees the answer", async () => {
+      const mobile = mobileNo();
+      const p = await visit(mobile);
+      const token = await signIn(mobile);
+      const body = (over: Record<string, unknown> = {}) => ({ patientId: p.patient.id, practitionerId: doc.practitionerId, preferredDate: day(3), timeOfDay: "MORNING", reason: "Follow-up for fever", ...over });
+      for (const bad of [{ preferredDate: day(-1) }, { preferredDate: day(90) }, { reason: "x" }, { timeOfDay: "NIGHT" }, { extra: 1 }, { practitionerId: "nope" }]) assert.equal((await post("/patient-portal/appointment-requests", token, body(bad))).status, 400, JSON.stringify(bad));
+      assert.equal((await post("/patient-portal/appointment-requests", token, body({ practitionerId: randomUUID() }))).status, 404);
+      assert.equal((await post("/patient-portal/appointment-requests", token, body({ patientId: randomUUID() }))).status, 404);
+      const r = await post("/patient-portal/appointment-requests", token, body());
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+      const mine = (await get(`/patient-portal/appointment-requests?patientId=${p.patient.id}`, token)).body.data as { id: string; status: string; doctor: string }[];
+      assert.deepEqual([mine[0]?.id, mine[0]?.status, !!mine[0]?.doctor], [r.body.data.id, "PENDING", true]);
+      const list = await t.api("get", "/appointment-requests?status=PENDING&pageSize=100", rec.token);
+      assert.equal(list.status, 200);
+      const row = (list.body.data.items as { id: string; patientId: string; reason: string }[]).find((x) => x.id === r.body.data.id)!;
+      assert.deepEqual([row.patientId, row.reason], [p.patient.id, "Follow-up for fever"]);
+      // The front desk is told a patient asked (once); the nurse and the other hospital are not (notifications.md).
+      assert.equal(await t.prisma.notification.count({ where: { tenantId: a.tenantId, recipientUserId: rec.id, type: "BOOKING_FROM_OUTSIDE", entityId: r.body.data.id } }), 1);
+      assert.equal(await t.prisma.notification.count({ where: { recipientUserId: { in: [nurse.id, bRec.id] }, entityId: r.body.data.id } }), 0);
+      assert.equal((await t.api("get", "/appointment-requests", nurse.token)).status, 403);
+      assert.equal((await t.api("get", "/appointment-requests", token)).status, 401, "a patient token is not a staff token");
+      assert.equal(((await t.api("get", "/appointment-requests?pageSize=100", bRec.token)).body.data.items as { id: string }[]).some((x) => x.id === r.body.data.id), false);
+      const answer = (decision: string, extra: Record<string, unknown> = {}, tok = rec.token) => t.api("post", `/appointment-requests/${r.body.data.id}/answer`, tok).send({ decision, ...extra });
+      assert.equal((await answer("DECLINED")).status, 400, "a decline needs a note");
+      assert.equal((await answer("BOOKED", {}, nurse.token)).status, 403);
+      assert.equal((await answer("BOOKED", {}, bRec.token)).status, 404);
+      assert.equal((await answer("MAYBE")).status, 400);
+      assert.equal((await answer("BOOKED", { note: "Booked for Tuesday 10:30" })).status, 200);
+      assert.equal((await answer("DECLINED", { note: "Changed my mind" })).status, 409, "already answered");
+      assert.equal((await post(`/patient-portal/appointment-requests/${r.body.data.id}/cancel`, token)).status, 409, "the patient cannot cancel an answered request");
+      const after = (await get(`/patient-portal/appointment-requests?patientId=${p.patient.id}`, token)).body.data as { status: string; answer: string }[];
+      assert.deepEqual([after[0]?.status, after[0]?.answer], ["BOOKED", "Booked for Tuesday 10:30"]);
+      assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "APPOINTMENT_REQUEST_ANSWERED", entityId: r.body.data.id } }));
+      await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "AppointmentRequest" SET status = 'PENDING', "handledAt" = NULL, "handledById" = NULL WHERE id = '${r.body.data.id}'::uuid`), /cannot change/);
+      await assert.rejects(t.prisma.$executeRawUnsafe(`DELETE FROM "AppointmentRequest" WHERE id = '${r.body.data.id}'::uuid`), /cannot be deleted/);
+    });
+
+    it("is limited to three waiting requests; a patient can cancel their own, not another family's; a decline shows its reason", async () => {
+      const mobile = mobileNo();
+      const p = await visit(mobile);
+      const other = await visit(mobileNo(), true, "Other");
+      const token = await signIn(mobile);
+      const otherToken = await signIn(await t.prisma.patient.findFirstOrThrow({ where: { id: other.patient.id } }).then((x) => x.mobile!));
+      const ids: string[] = [];
+      for (let i = 0; i < 3; i++) { const r = await post("/patient-portal/appointment-requests", token, { patientId: p.patient.id, preferredDate: day(2 + i), reason: `Visit number ${i}` }); assert.equal(r.status, 201); ids.push(r.body.data.id); }
+      assert.equal((await post("/patient-portal/appointment-requests", token, { patientId: p.patient.id, preferredDate: day(7), reason: "One too many" })).status, 409);
+      assert.equal((await post(`/patient-portal/appointment-requests/${ids[0]}/cancel`, otherToken)).status, 404, "another family's request");
+      assert.equal((await post(`/patient-portal/appointment-requests/${randomUUID()}/cancel`, token)).status, 404);
+      assert.equal((await post(`/patient-portal/appointment-requests/${ids[0]}/cancel`, token)).status, 200);
+      assert.equal((await post(`/patient-portal/appointment-requests/${ids[0]}/cancel`, token)).status, 409, "already cancelled");
+      assert.equal((await t.api("post", `/appointment-requests/${ids[1]}/answer`, rec.token).send({ decision: "DECLINED", note: "No slots that day, please call us" })).status, 200);
+      const mine = (await get(`/patient-portal/appointment-requests?patientId=${p.patient.id}`, token)).body.data as { id: string; status: string; answer: string | null }[];
+      assert.deepEqual(mine.find((x) => x.id === ids[1]), { ...mine.find((x) => x.id === ids[1])!, status: "DECLINED", answer: "No slots that day, please call us" });
+      assert.equal((await post("/patient-portal/appointment-requests", token, { patientId: p.patient.id, preferredDate: day(8), reason: "Room again after the cancel" })).status, 201);
+    });
+  });
+
+  it("DATABASE: codes and sessions cannot be deleted or rewritten", async () => {
+    const mobile = mobileNo();
+    await visit(mobile);
+    await signIn(mobile);
+    const otp = await t.prisma.patientOtp.findFirstOrThrow({ where: { tenantId: a.tenantId, mobile } });
+    await assert.rejects(t.prisma.$executeRawUnsafe(`DELETE FROM "PatientOtp" WHERE id = '${otp.id}'::uuid`), /cannot be deleted/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "PatientOtp" SET "consumedAt" = NULL WHERE id = '${otp.id}'::uuid`), /cannot be used again/);
+    const s = await t.prisma.patientSession.findFirstOrThrow({ where: { tenantId: a.tenantId, mobile } });
+    await assert.rejects(t.prisma.$executeRawUnsafe(`DELETE FROM "PatientSession" WHERE id = '${s.id}'::uuid`), /cannot be deleted/);
+    await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "PatientSession" SET mobile = '9000000000' WHERE id = '${s.id}'::uuid`), /cannot be changed/);
+  });
+});

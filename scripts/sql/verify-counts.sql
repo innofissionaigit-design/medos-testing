@@ -1,0 +1,17 @@
+-- Row counts used to prove a restored database matches its source (see scripts/restore-test.ps1).
+SELECT 'Patient' AS t, count(*) FROM "Patient"
+UNION ALL SELECT 'Appointment', count(*) FROM "Appointment"
+UNION ALL SELECT 'Encounter', count(*) FROM "Encounter"
+UNION ALL SELECT 'Admission', count(*) FROM "Admission"
+UNION ALL SELECT 'Bed', count(*) FROM "Bed"
+UNION ALL SELECT 'Invoice', count(*) FROM "Invoice"
+UNION ALL SELECT 'Receipt', count(*) FROM "Receipt"
+UNION ALL SELECT 'Medicine', count(*) FROM "Medicine"
+UNION ALL SELECT 'MedicineBatch', count(*) FROM "MedicineBatch"
+UNION ALL SELECT 'StockLedger', count(*) FROM "StockLedger"
+UNION ALL SELECT 'AuditEvent', count(*) FROM "AuditEvent"
+UNION ALL SELECT 'User', count(*) FROM "User"
+UNION ALL SELECT 'Money: invoice totals', COALESCE(sum(total), 0)::bigint FROM "Invoice"
+UNION ALL SELECT 'Money: receipt totals', COALESCE(sum(total), 0)::bigint FROM "Receipt"
+UNION ALL SELECT 'Stock: balance units', COALESCE(sum(quantity), 0) FROM "StockBalance"
+ORDER BY 1;
