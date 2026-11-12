@@ -26,6 +26,38 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | GET | `/patients/:id/advances` | INVOICE_READ |  |
 | POST | `/patients/:id/advances` | PAYMENT_CREATE |  |
 
+## Aftercare
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/aftercare/feedback` | any of AFTERCARE_MANAGE / COMPLAINT_READ |  |
+| POST | `/aftercare/feedback` | any of FEEDBACK_RECORD / AFTERCARE_MANAGE / COMPLAINT_MANAGE |  |
+| POST | `/aftercare/queue/next` | any of AFTERCARE_MANAGE |  |
+| GET | `/aftercare/scripts` | any of AFTERCARE_MANAGE / AFTERCARE_CONFIGURE |  |
+| PUT | `/aftercare/scripts/:kind` | any of AFTERCARE_CONFIGURE |  |
+| POST | `/aftercare/scripts/:kind/reset` | any of AFTERCARE_CONFIGURE |  |
+| GET | `/aftercare/summary` | any of AFTERCARE_MANAGE |  |
+| GET | `/aftercare/targets` | any of AFTERCARE_MANAGE |  |
+| GET | `/aftercare/tasks` | any of AFTERCARE_MANAGE |  |
+| GET | `/aftercare/tasks/:id` | any of AFTERCARE_MANAGE |  |
+| PATCH | `/aftercare/tasks/:id` | any of AFTERCARE_MANAGE |  |
+| POST | `/aftercare/tasks/:id/book` | any of AFTERCARE_MANAGE |  |
+| POST | `/aftercare/tasks/:id/close` | any of AFTERCARE_MANAGE |  |
+| POST | `/aftercare/tasks/:id/contacts` | any of AFTERCARE_MANAGE |  |
+| POST | `/aftercare/tasks/:id/feedback-link` | any of AFTERCARE_MANAGE |  |
+| POST | `/aftercare/tasks/:id/release` | any of AFTERCARE_MANAGE |  |
+| GET | `/aftercare/tasks/:id/script` | any of AFTERCARE_MANAGE |  |
+| GET | `/complaints` | any of COMPLAINT_READ / COMPLAINT_MANAGE |  |
+| POST | `/complaints` | any of FEEDBACK_RECORD / COMPLAINT_MANAGE / AFTERCARE_MANAGE |  |
+| GET | `/complaints/:id` | any of COMPLAINT_READ / COMPLAINT_MANAGE |  |
+| POST | `/complaints/:id/assign` | any of COMPLAINT_MANAGE |  |
+| POST | `/complaints/:id/close` | any of COMPLAINT_MANAGE |  |
+| POST | `/complaints/:id/escalate` | any of COMPLAINT_MANAGE |  |
+| POST | `/complaints/:id/notes` | any of COMPLAINT_MANAGE |  |
+| POST | `/complaints/:id/reopen` | any of COMPLAINT_MANAGE |  |
+| POST | `/complaints/:id/resolve` | any of COMPLAINT_MANAGE |  |
+| POST | `/complaints/:id/start` | any of COMPLAINT_MANAGE |  |
+
 ## Ai
 
 | Method | Path | Access | Module flag |
@@ -115,6 +147,14 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | POST | `/auth/refresh` | public |  |
 | POST | `/auth/switch-facility` | any signed-in user (checked in service) |  |
 
+## BedTurnover
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/bed-turnovers` | BED_HOUSEKEEPING | IPD_ENABLED |
+| POST | `/bed-turnovers/:id/ready` | BED_HOUSEKEEPING | IPD_ENABLED |
+| POST | `/bed-turnovers/:id/start` | BED_HOUSEKEEPING | IPD_ENABLED |
+
 ## Billing
 
 | Method | Path | Access | Module flag |
@@ -163,18 +203,39 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | GET | `/claims` | CLAIM_READ |  |
 | POST | `/claims` | CLAIM_MANAGE |  |
 | GET | `/claims/:id` | CLAIM_READ |  |
+| POST | `/claims/:id/appeals` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/appeals/:appealId/decision` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/close` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/copay-preview` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/decision` | CLAIM_MANAGE |  |
+| GET | `/claims/:id/eligibility-request` | any of CLAIM_READ / CLAIM_MANAGE |  |
+| POST | `/claims/:id/enhancements` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/enhancements/:enhancementId/decision` | CLAIM_MANAGE |  |
+| GET | `/claims/:id/export` | any of CLAIM_READ / CLAIM_MANAGE |  |
+| POST | `/claims/:id/invoices` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/non-payables` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/non-payables/:itemId/remove` | CLAIM_MANAGE |  |
+| GET | `/claims/:id/package` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/preauth` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/preauth-decision` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/query` | CLAIM_MANAGE |  |
+| GET | `/claims/:id/rate-check` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/rate-check/apply` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/resubmit` | CLAIM_MANAGE |  |
 | POST | `/claims/:id/settlements` | CLAIM_SETTLE |  |
 | POST | `/claims/:id/submit` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/tariff-package` | CLAIM_MANAGE |  |
+| GET | `/claims/:id/transmissions` | any of CLAIM_READ / CLAIM_MANAGE |  |
+| POST | `/claims/:id/transmit` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/verification` | CLAIM_MANAGE |  |
 | GET | `/claims/insurers` | CLAIM_READ |  |
 | POST | `/claims/insurers` | CLAIM_MASTERS |  |
 | PUT | `/claims/insurers/:id` | CLAIM_MASTERS |  |
+| GET | `/claims/insurers/:id/packages` | CLAIM_READ |  |
+| POST | `/claims/insurers/:id/packages` | CLAIM_MASTERS |  |
+| PUT | `/claims/insurers/:id/packages/:packageId` | CLAIM_MASTERS |  |
+| GET | `/claims/insurers/:id/rates` | CLAIM_READ |  |
+| PUT | `/claims/insurers/:id/rates/:serviceId` | CLAIM_MASTERS |  |
 | GET | `/claims/summary` | CLAIM_READ |  |
 | GET | `/patients/:id/policies` | CLAIM_READ |  |
 | POST | `/patients/:id/policies` | CLAIM_MANAGE |  |
@@ -205,11 +266,19 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | PUT | `/admissions/:id/discharge-summary` | CONSULTATION_CREATE | IPD_ENABLED |
 | POST | `/admissions/:id/discharge-summary/amend` | CONSULTATION_AMEND | IPD_ENABLED |
 | POST | `/admissions/:id/discharge-summary/sign` | CONSULTATION_SIGN | IPD_ENABLED |
+| POST | `/admissions/:id/discharge-summary/verify` | CONSULTATION_VERIFY | IPD_ENABLED |
 | GET | `/admissions/:id/discharge-summary/versions/:version` | CONSULTATION_READ | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/clear` | ADMISSION_READ | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/complete` | ADMISSION_DISCHARGE | IPD_ENABLED |
+| POST | `/admissions/:id/discharge/departure` | DISCHARGE_DEPARTURE_CONFIRM | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/final-invoice` | IPD_FINAL_BILL | IPD_ENABLED |
+| POST | `/admissions/:id/discharge/financial-exception` | DISCHARGE_FINANCIAL_EXCEPTION | IPD_ENABLED |
+| POST | `/admissions/:id/discharge/pharmacy/repost-charges` | PHARMACY_DISPENSE | IPD_ENABLED |
+| POST | `/admissions/:id/discharge/record-file` | MRD_RECORD_COMPLETE | IPD_ENABLED |
+| POST | `/admissions/:id/discharge/records-complete` | MRD_RECORD_COMPLETE | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/waive` | ADMISSION_DISCHARGE | IPD_ENABLED |
+| GET | `/admissions/:id/test-orders` | ADMISSION_READ | IPD_ENABLED |
+| POST | `/admissions/:id/test-orders` | CONSULTATION_CREATE | IPD_ENABLED |
 
 ## Earnings
 
@@ -292,6 +361,16 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 |---|---|---|---|
 | GET | `/health/` | public |  |
 | GET | `/health/ready` | public |  |
+
+## Housekeeping
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/housekeeping/requests` | any of HOUSEKEEPING_REQUEST / HOUSEKEEPING_MANAGE |  |
+| POST | `/housekeeping/requests` | HOUSEKEEPING_REQUEST |  |
+| POST | `/housekeeping/requests/:id/cancel` | any of HOUSEKEEPING_REQUEST / HOUSEKEEPING_MANAGE |  |
+| POST | `/housekeeping/requests/:id/done` | HOUSEKEEPING_MANAGE |  |
+| POST | `/housekeeping/requests/:id/start` | HOUSEKEEPING_MANAGE |  |
 
 ## Imports
 
@@ -515,6 +594,12 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | POST | `/patient-portal/auth/code` | public |  |
 | POST | `/patient-portal/auth/verify` | public |  |
 
+## PostDischarge
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/post-discharge` | any of MRD_RECORD_COMPLETE / CLAIM_READ / REPORT_FINANCE | IPD_ENABLED |
+
 ## PrescriptionDelivery
 
 | Method | Path | Access | Module flag |
@@ -549,14 +634,17 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | GET | `/print/admission-forms/:admissionId` | ADMISSION_READ |  |
 | GET | `/print/advance-receipts/:id` | INVOICE_READ |  |
 | GET | `/print/claims/:claimId` | CLAIM_READ |  |
+| GET | `/print/debit-notes/:id` | any of PHARMACY_PURCHASE / PURCHASE_READ / SUPPLIER_PAY |  |
 | GET | `/print/discharge-summaries/:admissionId` | CONSULTATION_READ |  |
 | GET | `/print/doctor-payouts/:id` | any of EARNINGS_CONFIGURE / REPORT_FINANCE / REPORT_READ |  |
+| GET | `/print/goods-receipts/:id` | any of PHARMACY_PURCHASE / PURCHASE_READ / PURCHASE_ORDER |  |
 | GET | `/print/invoices/:id` | INVOICE_READ |  |
 | GET | `/print/lab-labels/:sampleId` | LAB_READ |  |
 | GET | `/print/lab-reports/:testOrderId` | LAB_READ |  |
 | GET | `/print/patient-labels/:patientId` | PATIENT_READ |  |
 | GET | `/print/payslips/:slipId` | any signed-in user (checked in service) |  |
 | GET | `/print/prescriptions/:encounterId` | PRESCRIPTION_READ |  |
+| GET | `/print/purchase-orders/:id` | any of PURCHASE_ORDER / PURCHASE_READ / PURCHASE_APPROVE |  |
 | GET | `/print/radiology-reports/:testOrderId` | RAD_READ |  |
 | GET | `/print/receipts/:id` | INVOICE_READ |  |
 
@@ -569,6 +657,74 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | POST | `/patients/:id/data-requests` | PATIENT_UPDATE |  |
 | GET | `/privacy/requests` | PRIVACY_MANAGE |  |
 | PATCH | `/privacy/requests/:id` | PRIVACY_MANAGE |  |
+
+## Procedures
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/admissions/:id/procedures` | PROCEDURE_READ | IPD_ENABLED |
+| POST | `/admissions/:id/procedures` | PROCEDURE_PLAN | IPD_ENABLED |
+| POST | `/procedures/:id/cancel` | PROCEDURE_PLAN | IPD_ENABLED |
+| POST | `/procedures/:id/finalise` | PROCEDURE_MANAGE | IPD_ENABLED |
+| POST | `/procedures/:id/items` | PROCEDURE_MANAGE | IPD_ENABLED |
+| POST | `/procedures/:id/items/:itemId/remove` | PROCEDURE_MANAGE | IPD_ENABLED |
+| POST | `/procedures/:id/perform` | PROCEDURE_MANAGE | IPD_ENABLED |
+
+## Procurement
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/procurement/indents` | any of STORES_INDENT / PURCHASE_ORDER / PURCHASE_APPROVE / PURCHASE_READ | PHARMACY_ENABLED |
+| POST | `/procurement/indents` | STORES_INDENT | PHARMACY_ENABLED |
+| GET | `/procurement/indents/:id` | any of STORES_INDENT / PURCHASE_ORDER / PURCHASE_APPROVE / PURCHASE_READ | PHARMACY_ENABLED |
+| PUT | `/procurement/indents/:id` | STORES_INDENT | PHARMACY_ENABLED |
+| POST | `/procurement/indents/:id/approve` | PURCHASE_APPROVE | PHARMACY_ENABLED |
+| POST | `/procurement/indents/:id/cancel` | any of STORES_INDENT / PURCHASE_ORDER / PURCHASE_APPROVE | PHARMACY_ENABLED |
+| POST | `/procurement/indents/:id/reject` | PURCHASE_APPROVE | PHARMACY_ENABLED |
+| POST | `/procurement/indents/:id/submit` | STORES_INDENT | PHARMACY_ENABLED |
+| GET | `/procurement/orders` | any of PURCHASE_ORDER / PURCHASE_APPROVE / PURCHASE_READ / PHARMACY_PURCHASE | PHARMACY_ENABLED |
+| POST | `/procurement/orders` | PURCHASE_ORDER | PHARMACY_ENABLED |
+| GET | `/procurement/orders/:id` | any of PURCHASE_ORDER / PURCHASE_APPROVE / PURCHASE_READ / PHARMACY_PURCHASE | PHARMACY_ENABLED |
+| POST | `/procurement/orders/:id/approve` | PURCHASE_APPROVE | PHARMACY_ENABLED |
+| POST | `/procurement/orders/:id/cancel` | PURCHASE_ORDER | PHARMACY_ENABLED |
+| POST | `/procurement/orders/:id/close` | PURCHASE_ORDER | PHARMACY_ENABLED |
+| POST | `/procurement/orders/:id/issue` | any of PURCHASE_ORDER / PURCHASE_APPROVE | PHARMACY_ENABLED |
+| GET | `/procurement/requirement` | any of STORES_INDENT / PURCHASE_ORDER / PURCHASE_APPROVE / PURCHASE_READ | PHARMACY_ENABLED |
+
+## ProcurementExtras
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/procurement/cost-ledger` | any of REPORT_FINANCE / PURCHASE_READ / SUPPLIER_PAY | PHARMACY_ENABLED |
+| GET | `/procurement/cost-ledger/backfill` | any of SUPPLIER_PAY / ADMIN_SETTINGS | PHARMACY_ENABLED |
+| POST | `/procurement/cost-ledger/backfill` | any of SUPPLIER_PAY / ADMIN_SETTINGS | PHARMACY_ENABLED |
+| GET | `/procurement/cost-ledger/entries` | any of REPORT_FINANCE / PURCHASE_READ / SUPPLIER_PAY | PHARMACY_ENABLED |
+| GET | `/procurement/cost-ledger/reconciliation` | any of REPORT_FINANCE / PURCHASE_READ / SUPPLIER_PAY | PHARMACY_ENABLED |
+| GET | `/procurement/debit-notes` | any of SUPPLIER_PAY / PURCHASE_READ / PHARMACY_PURCHASE | PHARMACY_ENABLED |
+| POST | `/procurement/debit-notes/:id/credit` | any of SUPPLIER_PAY / PHARMACY_PURCHASE | PHARMACY_ENABLED |
+| GET | `/procurement/payables` | any of SUPPLIER_PAY / PURCHASE_READ | PHARMACY_ENABLED |
+| POST | `/procurement/payables/:purchaseId/payments` | SUPPLIER_PAY | PHARMACY_ENABLED |
+| POST | `/procurement/payables/statement-payments` | SUPPLIER_PAY | PHARMACY_ENABLED |
+| GET | `/procurement/stock-counts` | any of STOCK_COUNT / STOCK_COUNT_APPROVE / PURCHASE_READ | PHARMACY_ENABLED |
+| POST | `/procurement/stock-counts` | STOCK_COUNT | PHARMACY_ENABLED |
+| GET | `/procurement/stock-counts/:id` | any of STOCK_COUNT / STOCK_COUNT_APPROVE / PURCHASE_READ | PHARMACY_ENABLED |
+| POST | `/procurement/stock-counts/:id/approve` | STOCK_COUNT_APPROVE | PHARMACY_ENABLED |
+| POST | `/procurement/stock-counts/:id/cancel` | any of STOCK_COUNT / STOCK_COUNT_APPROVE | PHARMACY_ENABLED |
+| PUT | `/procurement/stock-counts/:id/counts` | STOCK_COUNT | PHARMACY_ENABLED |
+| POST | `/procurement/stock-counts/:id/submit` | STOCK_COUNT | PHARMACY_ENABLED |
+| GET | `/procurement/stock-requests` | any of STORES_INDENT / PHARMACY_ADJUST_STOCK / PURCHASE_READ | PHARMACY_ENABLED |
+| POST | `/procurement/stock-requests` | STORES_INDENT | PHARMACY_ENABLED |
+| GET | `/procurement/stock-requests/:id` | any of STORES_INDENT / PHARMACY_ADJUST_STOCK / PURCHASE_READ | PHARMACY_ENABLED |
+| POST | `/procurement/stock-requests/:id/cancel` | any of STORES_INDENT / PHARMACY_ADJUST_STOCK | PHARMACY_ENABLED |
+| POST | `/procurement/stock-requests/:id/issue` | PHARMACY_ADJUST_STOCK | PHARMACY_ENABLED |
+| POST | `/procurement/stock-requests/:id/reject` | PHARMACY_ADJUST_STOCK | PHARMACY_ENABLED |
+
+## PublicFeedback
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/public/feedback/:token` | public |  |
+| POST | `/public/feedback/:token` | public |  |
 
 ## PublicPrescription
 
@@ -614,6 +770,13 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | POST | `/rad/studies/:id/report` | RAD_REPORT |  |
 | GET | `/rad/worklist` | RAD_READ |  |
 
+## RecordRetention
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/records/retention` | MRD_RETENTION |  |
+| POST | `/records/retention/:encounterId/review` | MRD_RETENTION |  |
+
 ## Reports
 
 | Method | Path | Access | Module flag |
@@ -624,13 +787,15 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | GET | `/reports/cashier-shifts` | any of REPORT_READ / REPORT_FINANCE |  |
 | GET | `/reports/collections` | any of REPORT_READ / REPORT_FINANCE |  |
 | POST | `/reports/export-log` | any of REPORT_READ / REPORT_OPD / REPORT_FINANCE / REPORT_IPD / REPORT_PHARMACY / REPORT_MY_PRACTICE |  |
-| GET | `/reports/ipd/admissions-discharges` | any of REPORT_READ / REPORT_IPD | IPD_ENABLED |
+| GET | `/reports/ipd/admissions-discharges` | any of REPORT_READ / REPORT_IPD |  |
 | GET | `/reports/ipd/bed-occupancy` | any of REPORT_READ / REPORT_IPD | IPD_ENABLED |
-| GET | `/reports/ipd/current-admissions` | any of REPORT_READ / REPORT_IPD | IPD_ENABLED |
+| GET | `/reports/ipd/current-admissions` | any of REPORT_READ / REPORT_IPD |  |
+| GET | `/reports/ipd/discharge-turnaround` | any of REPORT_READ / REPORT_IPD | IPD_ENABLED |
 | GET | `/reports/opd/by-department` | any of REPORT_READ / REPORT_OPD |  |
 | GET | `/reports/opd/by-doctor` | any of REPORT_READ / REPORT_OPD |  |
 | GET | `/reports/opd/daily` | any of REPORT_READ / REPORT_OPD |  |
 | GET | `/reports/outstanding-invoices` | any of REPORT_READ / REPORT_FINANCE |  |
+| GET | `/reports/pharmacy/consumption-cost` | any of REPORT_READ / REPORT_PHARMACY / REPORT_FINANCE | IPD_ENABLED |
 | GET | `/reports/pharmacy/low-stock` | any of REPORT_READ / REPORT_PHARMACY | PHARMACY_ENABLED |
 | GET | `/reports/pharmacy/near-expiry` | any of REPORT_READ / REPORT_PHARMACY | PHARMACY_ENABLED |
 | GET | `/reports/pharmacy/sales` | any of REPORT_READ / REPORT_PHARMACY | PHARMACY_ENABLED |
@@ -754,3 +919,6 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | GET | `/nursing/ward-stores` | NURSING_READ | NURSING_ENABLED |
 | GET | `/nursing/ward-stores/:id/stock` | NURSING_READ | NURSING_ENABLED |
 | GET | `/nursing/ward-stores/incoming` | NURSING_READ | NURSING_ENABLED |
+| GET | `/procurement/consumption` | any of STOCK_CONSUME / PURCHASE_READ / PHARMACY_READ | NURSING_ENABLED |
+| POST | `/procurement/consumption` | STOCK_CONSUME | NURSING_ENABLED |
+| GET | `/procurement/consumption/procedures` | STOCK_CONSUME | NURSING_ENABLED |

@@ -5,7 +5,7 @@ import { AuditService, actorOf } from "../../common/audit.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 
-export type SequenceType = "MRN" | "OPD_VISIT" | "ADMISSION" | "INVOICE" | "RECEIPT" | "PRESCRIPTION" | "CREDIT_NOTE" | "REFUND" | "PURCHASE" | "PURCHASE_RETURN" | "PHARMACY_RECEIPT" | "STOCK_TRANSFER" | "DOCTOR_PAYOUT" | "LAB_ACCESSION" | "RAD_ACCESSION" | "CLAIM" | "EMPLOYEE";
+export type SequenceType = "MRN" | "OPD_VISIT" | "ADMISSION" | "INVOICE" | "RECEIPT" | "PRESCRIPTION" | "CREDIT_NOTE" | "REFUND" | "PURCHASE" | "PURCHASE_RETURN" | "PHARMACY_RECEIPT" | "STOCK_TRANSFER" | "DOCTOR_PAYOUT" | "LAB_ACCESSION" | "RAD_ACCESSION" | "CLAIM" | "EMPLOYEE" | "INDENT" | "PURCHASE_ORDER" | "STOCK_REQUEST" | "DEBIT_NOTE" | "STOCK_COUNT" | "COMPLAINT";
 export type ResetPolicy = "NEVER" | "YEARLY" | "FINANCIAL_YEAR";
 
 export interface SequenceDefault { type: SequenceType; pattern: string; padding: number; resetPolicy: ResetPolicy }
@@ -28,6 +28,12 @@ export const DEFAULT_SEQUENCES: readonly SequenceDefault[] = [
   { type: "RAD_ACCESSION", pattern: "RAD-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
   { type: "CLAIM", pattern: "CLM-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
   { type: "EMPLOYEE", pattern: "EMP-{SEQ}", padding: 4, resetPolicy: "NEVER" },
+  { type: "INDENT", pattern: "IND-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "PURCHASE_ORDER", pattern: "PO-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "STOCK_REQUEST", pattern: "SRQ-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "DEBIT_NOTE", pattern: "SDN-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "STOCK_COUNT", pattern: "SCT-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
+  { type: "COMPLAINT", pattern: "CMP-{YEAR}-{SEQ}", padding: 6, resetPolicy: "YEARLY" },
 ];
 
 const TYPES = DEFAULT_SEQUENCES.map((d) => d.type) as [SequenceType, ...SequenceType[]];

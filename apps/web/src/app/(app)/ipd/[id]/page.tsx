@@ -1,10 +1,11 @@
 "use client";
 import Link from "next/link";
-import { T } from "@/lib/i18n";
+import { T, useT } from "@/lib/i18n";
 import { useParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Gate } from "@/components/gate";
+import { ClaimModal } from "@/components/claims";
 import { CancelAdmission, DoseReasonModal, TasksCard, VitalsCard, WaiveButton } from "@/components/ipd-extras";
 import { todayIn, useAvailableBeds } from "@/components/pickers";
 import { Badge, Button, Card, ConfirmButton, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Tabs, Td, Textarea } from "@/components/ui";
@@ -23,9 +24,14 @@ interface Charge { id: string; type: string; description: string; quantity: stri
 interface Note { id: string; note: string; createdAt: string; authorName?: string | null; status?: string; errorReason?: string | null; addenda?: Note[] }
 interface IoRow { id: string; direction: string; category: string; amount: string; recordedAt: string; status: string; errorReason: string | null }
 interface Mar { id: string; scheduledAt: string; status: string; unscheduled: boolean; overdue: boolean; drug: string; strength: string | null; dosage: string; route: string; frequency: string }
-interface Step { step: string; required: boolean; status: string; blockers: string[]; automatic: boolean; note?: string | null }
-interface Discharge { steps: Step[]; canComplete: boolean; blockers: string[]; finalInvoice: { id: string } | null; summaryStatus: string | null }
-interface SummaryDoc { admission: { status: string }; document: { status: string; version: number; content: SummaryContent; signedByName: string | null } | null; suggested: { finalDiagnoses: { text: string; code?: string }[]; dischargeMedications: unknown[]; procedures: unknown[] } }
+interface Step { step: string; required: boolean; status: string; blockers: string[]; automatic: boolean; note?: string | null; waivable?: boolean; reconciliation?: { problems: string[]; insured?: boolean; validPolicies?: number; claim?: InsuranceClaim | null } | null; stage?: string; responsible?: string; description?: string; hisStatus?: string; byName?: string | null; at?: string | null; checks?: { name: string; ok: boolean; detail: string }[] }
+interface SummaryStage { stage: string; responsible: string; description: string; required: boolean; status: string; hisStatus: string; preparedByName: string | null; signedByName: string | null; signedAt: string | null; verificationRequired?: boolean; verifiedByName?: string | null; verifiedAt?: string | null; verificationNote?: string | null }
+interface InsuranceClaim { id: string; claimNumber: string; type: string; status: string; insurer: string; policyNumber: string; documents: number; preauthRequested: string | null; preauthApproved: string | null }
+interface ExitStage { stage: string; responsible: string; description: string; status: "NOT_DUE" | "PENDING" | "CONFIRMED" | "NOT_APPLICABLE"; hisStatus: string; departedAt: string | null; modeLabel: string | null; escortedBy: string | null; note: string | null; byName: string | null; at: string | null; minutesAfterDischarge: number | null }
+interface TurnoverStage { stage: string; responsible: string; description: string; status: "NOT_DUE" | "AWAITING_DEPARTURE" | "VACATED" | "CLEANING" | "READY" | "NOT_APPLICABLE"; hisStatus: string; bed: string | null; vacatedAt: string | null; cleaningStartedAt: string | null; cleaningStartedBy: string | null; readyAt: string | null; readyBy: string | null; minutesToReady: number | null }
+interface PostDischargeStage { stage: string; responsible: string; description: string; status: "NOT_DUE" | "NOT_APPLICABLE" | "RECORDS_PENDING" | "TRACKING" | "CLOSED"; hisStatus: string; checks: { name: string; ok: boolean; detail: string }[]; recordReady: boolean; recordCompletedAt: string | null; recordCompletedBy: string | null; daysSinceDischarge: number | null; suggestedDiagnoses?: { text: string; code?: string }[]; file?: { current: { label: string } | null; nextActions: string[] } }
+interface Discharge { steps: Step[]; summary?: SummaryStage; exit?: ExitStage; turnover?: TurnoverStage; postDischarge?: PostDischargeStage; dischargeType?: string | null; canComplete: boolean; blockers: string[]; finalInvoice: { id: string } | null; summaryStatus: string | null }
+interface SummaryDoc { admission: { status: string }; document: { status: string; version: number; currentVersion: number; content: SummaryContent; signedByName: string | null; verified?: boolean; verifiedByName?: string | null } | null; suggested: { finalDiagnoses: { text: string; code?: string }[]; dischargeMedications: unknown[]; procedures: unknown[] } }
 interface SummaryContent { hospitalCourse?: string; conditionAtDischarge?: string; advice?: string; investigationSummary?: string; finalDiagnoses?: { text: string; code?: string }[]; procedures?: unknown[]; dischargeMedications?: unknown[] }
 
 function Transfer({ adm, onClose, onDone }: { adm: Admission; onClose: () => void; onDone: () => void }) {
@@ -275,12 +281,348 @@ function Nursing({ adm }: { adm: Admission }) {
   );
 }
 
+interface AdmissionTest { id: string; name: string; category: string; state: string; reason: string | null }
+const TEST_STATE: Record<string, { label: string; tone: "green" | "amber" | "gray" | "blue" }> = {
+  TO_BE_BILLED: { label: "To be billed by the cashier", tone: "amber" },
+  WAITING_FOR_RESULT: { label: "Billed · waiting for the result", tone: "blue" },
+  WAITING_FOR_REPORT: { label: "Billed · waiting for the report", tone: "blue" },
+  DONE: { label: "Done", tone: "green" },
+  NOT_NEEDED: { label: "Not needed", tone: "gray" },
+};
+
+/** The laboratory and radiology tests of this stay, and a form for the treating doctor or the RMO to order one. The discharge stage "Laboratory / radiology" follows them. */
+function TestsCard({ adm, open }: { adm: Admission; open: boolean }) {
+  const { can } = useMe();
+  const qc = useQueryClient();
+  const tests = useQuery({ queryKey: ["admission-tests", adm.id], queryFn: () => api.get<AdmissionTest[]>(`/admissions/${adm.id}/test-orders`), refetchInterval: open ? 10_000 : false });
+  const [category, setCategory] = useState("LABORATORY");
+  const [name, setName] = useState("");
+  const order = useMutation({
+    mutationFn: () => api.post(`/admissions/${adm.id}/test-orders`, { category, name: name.trim() }),
+    onSuccess: () => { setName(""); void qc.invalidateQueries({ queryKey: ["admission-tests", adm.id] }); void qc.invalidateQueries({ queryKey: ["discharge", adm.id] }); },
+  });
+  const rows = tests.data ?? [];
+  return (
+    <Card title="Laboratory and radiology tests">
+      {tests.isLoading ? <Spinner /> : rows.length === 0 ? <p className="text-sm text-slate-500">No laboratory or radiology tests for this stay.</p> : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm" data-testid="admission-tests">
+            <thead><tr className="border-b border-slate-200 text-xs uppercase text-slate-500"><th className="py-2 pr-3 font-medium">Test</th><th className="py-2 pr-3 font-medium">Kind</th><th className="py-2 font-medium">Where it stands</th></tr></thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-b border-slate-100 last:border-0">
+                  <td className="py-2 pr-3 font-medium">{r.name}</td>
+                  <td className="py-2 pr-3 text-slate-600">{r.category === "RADIOLOGY" ? "Radiology" : "Laboratory"}</td>
+                  <td className="py-2"><Badge tone={TEST_STATE[r.state]?.tone ?? "gray"}>{TEST_STATE[r.state]?.label ?? r.state}</Badge>{r.reason && <span className="ml-2 text-xs text-slate-500">{r.reason}</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {open && can("CONSULTATION_CREATE") && (
+        <form className="mt-4 flex flex-wrap items-end gap-2 border-t border-slate-100 pt-3" onSubmit={(e) => { e.preventDefault(); if (name.trim().length >= 2) order.mutate(); }}>
+          <Select aria-label="Kind of test" className="w-40" value={category} onChange={(e) => setCategory(e.target.value)}><option value="LABORATORY">Laboratory</option><option value="RADIOLOGY">Radiology</option></Select>
+          <Input aria-label="Test name" className="min-w-[12rem] flex-1" placeholder="Test name, for example CBC (complete blood count)" maxLength={120} value={name} onChange={(e) => setName(e.target.value)} />
+          <Button type="submit" variant="secondary" loading={order.isPending} disabled={name.trim().length < 2}>Order test</Button>
+        </form>
+      )}
+      <ErrorNote error={order.error} />
+      {open && <p className="mt-2 text-xs text-slate-500">The cashier bills the test, the laboratory or radiology performs it, and the “Laboratory / radiology” stage clears when every test is billed and reported.</p>}
+    </Card>
+  );
+}
+
+interface ProcItem { id: string; kind: string; name: string; quantity: number; serialNo: string | null; amount: string | null; removed: boolean; removeReason: string | null }
+interface Proc { id: string; name: string; status: string; scheduledAt: string | null; surgeonName: string | null; amount: string | null; performedByName: string | null; finalisedByName: string | null; finalisedAt: string | null; cancelReason: string | null; items: ProcItem[] }
+interface PriceItem { id: string; name: string; price: string }
+const PROC_TONE: Record<string, "green" | "amber" | "gray" | "blue"> = { PLANNED: "amber", PERFORMED: "blue", FINALISED: "green", CANCELLED: "gray" };
+
+/** A small button that asks for a written reason (3 or more characters) before it acts. */
+function ReasonButton({ label, title, onSubmit, error }: { label: string; title: string; onSubmit: (reason: string) => Promise<unknown>; error?: unknown }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <>
+      <Button variant="ghost" onClick={() => setOpen(true)}>{label}</Button>
+      {open && (
+        <Modal title={title} onClose={() => setOpen(false)}>
+          <div className="space-y-3">
+            <Field label="Reason" hint="At least 3 characters. This is recorded."><Input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+            <ErrorNote error={error} />
+            <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setOpen(false)}>Back</Button>
+              <Button variant="danger" disabled={reason.trim().length < 3} loading={busy} onClick={() => { setBusy(true); onSubmit(reason.trim()).then(() => { setOpen(false); setReason(""); }).catch(() => undefined).finally(() => setBusy(false)); }}>{label}</Button></div>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/** One procedure: where it stands, its implants and consumables, and what the OT / procedure coordinator can do next. */
+function ProcedureBlock({ proc, open, prices, refresh }: { proc: Proc; open: boolean; prices: PriceItem[]; refresh: () => void }) {
+  const { can } = useMe();
+  const manage = open && can("PROCEDURE_MANAGE");
+  const live = proc.status === "PLANNED" || proc.status === "PERFORMED";
+  const [kind, setKind] = useState("IMPLANT");
+  const [serviceId, setServiceId] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [serialNo, setSerialNo] = useState("");
+  const done = { onSuccess: refresh };
+  const perform = useMutation({ mutationFn: () => api.post(`/procedures/${proc.id}/perform`, {}), ...done });
+  const finalise = useMutation({ mutationFn: () => api.post(`/procedures/${proc.id}/finalise`), ...done });
+  const cancel = useMutation({ mutationFn: (reason: string) => api.post(`/procedures/${proc.id}/cancel`, { reason }), ...done });
+  const remove = useMutation({ mutationFn: (v: { itemId: string; reason: string }) => api.post(`/procedures/${proc.id}/items/${v.itemId}/remove`, { reason: v.reason }), ...done });
+  const addItem = useMutation({
+    mutationFn: () => api.post(`/procedures/${proc.id}/items`, { kind, serviceId, quantity: Number(quantity), ...(kind === "IMPLANT" ? { serialNo: serialNo.trim() } : serialNo.trim() ? { serialNo: serialNo.trim() } : {}) }),
+    onSuccess: () => { setServiceId(""); setSerialNo(""); setQuantity("1"); refresh(); },
+  });
+  const items = proc.items.filter((i) => !i.removed);
+  return (
+    <div className="rounded-md border border-slate-200 p-3" data-testid="procedure-block">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium">{proc.name}</span><Badge tone={PROC_TONE[proc.status] ?? "gray"}>{proc.status.toLowerCase()}</Badge>
+        {proc.amount && <span className="text-xs text-slate-500">₹{proc.amount}</span>}
+        <span className="ml-auto flex flex-wrap items-center gap-1">
+          {manage && proc.status === "PLANNED" && <Button variant="secondary" loading={perform.isPending} onClick={() => perform.mutate()}>Mark performed</Button>}
+          {manage && proc.status === "PERFORMED" && <ConfirmButton variant="primary" label="Finalise" confirmLabel="Yes, finalise (cannot be changed)" loading={finalise.isPending} onConfirm={() => finalise.mutate()} />}
+          {open && can("PROCEDURE_PLAN") && proc.status === "PLANNED" && <ReasonButton label="Cancel procedure" title={`Cancel “${proc.name}”`} onSubmit={(r) => cancel.mutateAsync(r)} error={cancel.error} />}
+        </span>
+      </div>
+      <div className="mt-1 text-xs text-slate-500">
+        {proc.surgeonName && <>Surgeon {proc.surgeonName} · </>}{proc.scheduledAt && <>Planned for {new Date(proc.scheduledAt).toLocaleString()} · </>}
+        {proc.performedByName && <>Performed by {proc.performedByName} · </>}{proc.finalisedByName && <>Finalised by {proc.finalisedByName}{proc.finalisedAt ? ` · ${new Date(proc.finalisedAt).toLocaleString()}` : ""}</>}
+        {proc.cancelReason && <>Cancelled: {proc.cancelReason}</>}
+      </div>
+      {items.length > 0 && (
+        <ul className="mt-2 space-y-1 text-sm" data-testid="procedure-items">
+          {items.map((i) => (
+            <li key={i.id} className="flex flex-wrap items-center gap-2"><Badge tone={i.kind === "IMPLANT" ? "blue" : "gray"}>{i.kind.toLowerCase()}</Badge><span>{i.name} × {i.quantity}</span>{i.serialNo && <span className="text-xs text-slate-500">serial {i.serialNo}</span>}{i.amount && <span className="text-xs text-slate-500">₹{i.amount}</span>}
+              {manage && live && <ReasonButton label="Remove" title={`Remove ${i.name}`} onSubmit={(r) => remove.mutateAsync({ itemId: i.id, reason: r })} error={remove.error} />}</li>
+          ))}
+        </ul>
+      )}
+      {manage && live && (
+        <form className="mt-2 flex flex-wrap items-end gap-2 border-t border-slate-100 pt-2" onSubmit={(e) => { e.preventDefault(); if (serviceId) addItem.mutate(); }}>
+          <Select aria-label="Implant or consumable" className="w-36" value={kind} onChange={(e) => setKind(e.target.value)}><option value="IMPLANT">Implant</option><option value="CONSUMABLE">Consumable</option></Select>
+          <Select aria-label="Price-list item" className="min-w-[10rem] flex-1" value={serviceId} onChange={(e) => setServiceId(e.target.value)}><option value="">Choose from the price list…</option>{prices.map((p) => <option key={p.id} value={p.id}>{p.name} (₹{p.price})</option>)}</Select>
+          <Input aria-label="Quantity" className="w-20" type="number" min={1} max={999} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+          <Input aria-label="Serial or lot number" className="w-44" placeholder={kind === "IMPLANT" ? "Serial / lot no. (required)" : "Lot no. (optional)"} value={serialNo} onChange={(e) => setSerialNo(e.target.value)} />
+          <Button type="submit" variant="secondary" loading={addItem.isPending} disabled={!serviceId || Number(quantity) < 1 || (kind === "IMPLANT" && serialNo.trim().length < 2)}>Add</Button>
+        </form>
+      )}
+      <ErrorNote error={perform.error ?? finalise.error ?? addItem.error} />
+    </div>
+  );
+}
+
+/** Procedures for this admission: the doctor or the RMO plans one, the OT / procedure coordinator performs it, records the implants and consumables and finalises it. */
+function ProceduresCard({ adm, open }: { adm: Admission; open: boolean }) {
+  const { can } = useMe();
+  const qc = useQueryClient();
+  const procs = useQuery({ queryKey: ["procedures", adm.id], queryFn: () => api.get<Proc[]>(`/admissions/${adm.id}/procedures`), enabled: can("PROCEDURE_READ"), refetchInterval: open ? 10_000 : false });
+  const prices = useQuery({ queryKey: ["price-list-all"], queryFn: () => api.page<PriceItem & { category: string }>("/services", { pageSize: 200 }), enabled: open && (can("PROCEDURE_PLAN") || can("PROCEDURE_MANAGE")) });
+  const [planId, setPlanId] = useState("");
+  const [planDate, setPlanDate] = useState("");
+  const refresh = () => { void qc.invalidateQueries({ queryKey: ["procedures", adm.id] }); void qc.invalidateQueries({ queryKey: ["discharge", adm.id] }); void qc.invalidateQueries({ queryKey: ["charges", adm.id] }); };
+  const plan = useMutation({
+    mutationFn: () => api.post(`/admissions/${adm.id}/procedures`, { serviceId: planId, ...(planDate ? { scheduledAt: new Date(planDate).toISOString() } : {}) }),
+    onSuccess: () => { setPlanId(""); setPlanDate(""); refresh(); },
+  });
+  if (!can("PROCEDURE_READ")) return null;
+  const all = prices.data?.data ?? [];
+  const procedureList = all.filter((x) => x.category === "PROCEDURE");
+  const rows = procs.data ?? [];
+  return (
+    <Card title="Procedures, implants and consumables">
+      {procs.isLoading ? <Spinner /> : rows.length === 0 ? <p className="text-sm text-slate-500">No procedures planned for this stay.</p> : (
+        <div className="space-y-3">{rows.map((r) => <ProcedureBlock key={r.id} proc={r} open={open} prices={all} refresh={refresh} />)}</div>
+      )}
+      {open && can("PROCEDURE_PLAN") && (
+        <form className="mt-4 flex flex-wrap items-end gap-2 border-t border-slate-100 pt-3" onSubmit={(e) => { e.preventDefault(); if (planId) plan.mutate(); }}>
+          <Select aria-label="Procedure" className="min-w-[12rem] flex-1" value={planId} onChange={(e) => setPlanId(e.target.value)}><option value="">Choose a procedure from the price list…</option>{procedureList.map((x) => <option key={x.id} value={x.id}>{x.name} (₹{x.price})</option>)}</Select>
+          <Input aria-label="Planned date and time" className="w-52" type="datetime-local" value={planDate} onChange={(e) => setPlanDate(e.target.value)} />
+          <Button type="submit" variant="secondary" loading={plan.isPending} disabled={!planId}>Plan procedure</Button>
+        </form>
+      )}
+      <ErrorNote error={plan.error} />
+      {open && <p className="mt-2 text-xs text-slate-500">The doctor plans the procedure; the OT / procedure coordinator marks it performed, records the implants and consumables used, and finalises it. The “OT / procedure” stage clears when every procedure is finalised.</p>}
+    </Card>
+  );
+}
+
+/**
+ * Insurance for this admission (docs/claims.md): the TPA desk starts the claim from here, keeps its documents and the insurer's authorisation up to date in the claim window,
+ * and the "Insurance" stage of the checklist reads the result. A self-pay patient sees nothing but a note.
+ */
+function InsuranceCard({ adm, open }: { adm: Admission; open: boolean }) {
+  const { can } = useMe();
+  const qc = useQueryClient();
+  const st = useQuery({ queryKey: ["discharge", adm.id], queryFn: () => api.get<Discharge>(`/admissions/${adm.id}/discharge`), refetchInterval: open ? 10_000 : false });
+  const step =st.data?.steps.find((s) => s.step === "INSURANCE");
+  const claim = step?.reconciliation?.claim ?? null;
+  const [modal, setModal] = useState<string | null>(null);
+  const [policyId, setPolicyId] = useState("");
+  const [type, setType] = useState("CASHLESS");
+  const canStart = open && can("CLAIM_MANAGE") && !claim && (step?.reconciliation?.validPolicies ?? 0) > 0;
+  const policies = useQuery({ queryKey: ["policies", adm.patientId], queryFn: () => api.get<{ id: string; policyNumber: string; validToday: boolean; insurer: { name: string } }[]>(`/patients/${adm.patientId}/policies`), enabled: canStart });
+  const refresh = () => { void qc.invalidateQueries({ queryKey: ["discharge", adm.id] }); void qc.invalidateQueries({ queryKey: ["claims"] }); };
+  const start = useMutation({ mutationFn: () => api.post<{ id: string }>("/claims", { patientId: adm.patientId, policyId, type, encounterId: adm.encounterId }), onSuccess: (r) => { setPolicyId(""); refresh(); setModal(r.id); } });
+  if (!step || !step.reconciliation || (!step.reconciliation.insured && !claim)) return null;
+  const valid = (policies.data ?? []).filter((p) => p.validToday);
+  return (
+    <Card title="Insurance" >
+      <div data-testid="insurance-card" className="space-y-2 text-sm">
+        {claim ? (
+          <>
+            <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{claim.claimNumber}</span><StatusBadge value={claim.status} /><span className="text-slate-600">{claim.type === "CASHLESS" ? "Cashless" : "Reimbursement"} · {claim.insurer} · policy {claim.policyNumber}</span></div>
+            <KV label="Documents attached">{claim.documents}</KV>
+            {claim.type === "CASHLESS" && <KV label="Pre-authorisation">{claim.status === "REJECTED" ? `rejected by the insurer${claim.preauthRequested ? ` (₹${claim.preauthRequested} asked)` : ""}` : claim.preauthApproved ? `approved ₹${claim.preauthApproved}${claim.preauthRequested ? ` of ₹${claim.preauthRequested} asked` : ""}` : claim.preauthRequested ? `₹${claim.preauthRequested} asked, no decision yet` : "not requested"}</KV>}
+            {can("CLAIM_READ") && <Button variant="secondary" onClick={() => setModal(claim.id)}>{can("CLAIM_MANAGE") ? "Open claim (documents and authorisation)" : "View claim"}</Button>}
+          </>
+        ) : (
+          <>
+            <p className="text-slate-600"><T>This patient has a valid insurance policy, but no claim is open for this admission yet.</T></p>
+            {canStart && (
+              <div className="flex flex-wrap items-end gap-2">
+                <Select aria-label="Policy" className="min-w-[12rem] flex-1" value={policyId} onChange={(e) => setPolicyId(e.target.value)}><option value="">Choose the policy…</option>{valid.map((p) => <option key={p.id} value={p.id}>{p.insurer.name} · {p.policyNumber}</option>)}</Select>
+                <Select aria-label="Kind of claim" className="w-40" value={type} onChange={(e) => setType(e.target.value)}><option value="CASHLESS">Cashless</option><option value="REIMBURSEMENT">Reimbursement</option></Select>
+                <Button variant="secondary" loading={start.isPending} disabled={!policyId} onClick={() => start.mutate()}>Start insurance claim</Button>
+              </div>
+            )}
+            {!canStart && open && <p className="text-xs text-slate-500">The TPA desk starts the claim. If the patient is paying themselves, a doctor can waive the “Insurance” stage with a reason.</p>}
+          </>
+        )}
+        <ErrorNote error={start.error} />
+        {open && claim && <p className="text-xs text-slate-500">The TPA desk attaches the documents and records the insurer’s authorisation in the claim. MedOS keeps the record; it does not send anything to the insurer.</p>}
+      </div>
+      {modal && <ClaimModal claimId={modal} onClose={() => { setModal(null); refresh(); }} />}
+    </Card>
+  );
+}
+
+/**
+ * Financial release as an authorised exception (docs/discharge-stages.md): billing / finance lets the patient leave although final billing is not
+ * reconciled. The reason is recorded with the amounts outstanding at that moment, and audited.
+ */
+function FinancialExceptionButton({ admissionId, onDone }: { admissionId: string; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState("");
+  const m = useMutation({ mutationFn: () => api.post(`/admissions/${admissionId}/discharge/financial-exception`, { reason: reason.trim() }), onSuccess: () => { setOpen(false); setReason(""); onDone(); } });
+  return (
+    <>
+      <Button variant="secondary" onClick={() => setOpen(true)}>Authorise exception…</Button>
+      {open && (
+        <Modal title="Release the patient with money outstanding" onClose={() => setOpen(false)}>
+          <div className="space-y-3">
+            <p className="text-sm text-slate-600"><T>Final billing is not reconciled. The patient may leave only if you, as authorised billing / finance, accept it. The amounts outstanding now are recorded with your reason. The bill is not changed and still has to be settled.</T></p>
+            <Field label="Reason" hint="At least 10 characters. This is recorded permanently and audited."><Input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+            <ErrorNote error={m.error} />
+            <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setOpen(false)}>Back</Button><Button variant="danger" disabled={reason.trim().length < 10} loading={m.isPending} onClick={() => m.mutate()}>Authorise exception</Button></div>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/** Physical exit: the ward nurse or patient transport confirms when the discharged patient actually left (empty time = now). */
+function DepartureForm({ admissionId, death, onDone }: { admissionId: string; death: boolean; onDone: () => void }) {
+  const [mode, setMode] = useState(death ? "BODY_RELEASED" : "WHEELCHAIR");
+  const [when, setWhen] = useState("");
+  const [escort, setEscort] = useState("");
+  const t = useT();
+  const m = useMutation({
+    mutationFn: () => api.post(`/admissions/${admissionId}/discharge/departure`, { mode, ...(when ? { departedAt: new Date(when).toISOString() } : {}), ...(escort.trim() ? { escortedBy: escort.trim() } : {}) }),
+    onSuccess: onDone,
+  });
+  return (
+    <div className="mt-2 space-y-2 rounded-md border border-slate-200 p-2" data-testid="departure-form">
+      <div className="flex flex-wrap items-end gap-2">
+        <Select aria-label="How the patient left" className="w-44" value={mode} onChange={(e) => setMode(e.target.value)}>
+          {death ? <option value="BODY_RELEASED">{t("Body released")}</option> : <>
+            <option value="WALKED">{t("Walked out")}</option><option value="WHEELCHAIR">{t("Wheelchair")}</option><option value="STRETCHER">{t("Stretcher")}</option><option value="AMBULANCE">{t("Ambulance")}</option>
+          </>}
+        </Select>
+        <Input aria-label="Left at" type="datetime-local" className="w-52" value={when} onChange={(e) => setWhen(e.target.value)} />
+        <Input aria-label="Escorted by" placeholder={t("Escorted by (optional)")} className="w-48" value={escort} onChange={(e) => setEscort(e.target.value)} />
+      </div>
+      <ErrorNote error={m.error} />
+      <Button variant="secondary" loading={m.isPending} onClick={() => m.mutate()}>Confirm departure</Button>
+      <p className="text-xs text-slate-500"><T>Leave the time empty for “now”. It cannot be before the discharge or in the future, and it cannot be changed afterwards. Confirming the departure frees the bed for cleaning.</T></p>
+    </div>
+  );
+}
+
+/**
+ * Post-discharge: the Medical Records Department codes the final diagnoses in ICD-10 (pre-filled from the signed summary) and signs the record off
+ * as complete. Only once the record is ready; the codes are kept with the sign-off and never changed.
+ */
+function RecordsCompleteButton({ admissionId, ready, suggested, onDone }: { admissionId: string; ready: boolean; suggested: { text: string; code?: string }[]; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [rows, setRows] = useState<{ diagnosis: string; icd10: string }[]>([]);
+  const [primary, setPrimary] = useState(0);
+  const start = () => { setRows(suggested.length ? suggested.map((s) => ({ diagnosis: s.text, icd10: s.code ?? "" })) : [{ diagnosis: "", icd10: "" }]); setPrimary(0); setOpen(true); };
+  const valid = rows.length > 0 && rows.every((r) => r.diagnosis.trim().length >= 2 && /^[A-Z][0-9][0-9A-Z](\.[0-9A-Z]{1,4})?$/.test(r.icd10.trim().toUpperCase()));
+  const m = useMutation({
+    mutationFn: () => api.post(`/admissions/${admissionId}/discharge/records-complete`, { codes: rows.map((r, i) => ({ diagnosis: r.diagnosis.trim(), icd10: r.icd10.trim().toUpperCase(), primary: i === primary })) }),
+    onSuccess: () => { setOpen(false); onDone(); },
+  });
+  return (
+    <div className="mt-2">
+      <Button variant="secondary" disabled={!ready} onClick={start}>Mark records complete…</Button>
+      {!ready && <div className="text-xs text-slate-500"><T>Available when the summary is signed, no drafts are left and the departure is recorded.</T></div>}
+      {open && (
+        <Modal title="Code the diagnoses and complete the record" onClose={() => setOpen(false)}>
+          <div className="space-y-3" data-testid="coding-form">
+            <p className="text-sm text-slate-600"><T>Check each final diagnosis and its ICD-10 code (for example K35.8). Mark the primary diagnosis. The codes are kept with the record and cannot be changed afterwards.</T></p>
+            {rows.map((r, i) => (
+              <div key={i} className="flex flex-wrap items-center gap-2">
+                <input type="radio" aria-label={`Primary diagnosis ${i + 1}`} checked={primary === i} onChange={() => setPrimary(i)} />
+                <Input aria-label={`Diagnosis ${i + 1}`} className="min-w-[14rem] flex-1" value={r.diagnosis} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, diagnosis: e.target.value } : x))} />
+                <Input aria-label={`ICD-10 code ${i + 1}`} className="w-28" placeholder="ICD-10" value={r.icd10} onChange={(e) => setRows(rows.map((x, j) => j === i ? { ...x, icd10: e.target.value.toUpperCase() } : x))} />
+                {rows.length > 1 && <button className="text-xs text-slate-500 hover:text-red-700" onClick={() => { setRows(rows.filter((_, j) => j !== i)); setPrimary(0); }}>remove</button>}
+              </div>
+            ))}
+            <Button variant="ghost" onClick={() => setRows([...rows, { diagnosis: "", icd10: "" }])}>Add a diagnosis</Button>
+            <ErrorNote error={m.error} />
+            <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setOpen(false)}>Back</Button><Button disabled={!valid} loading={m.isPending} onClick={() => m.mutate()}>Complete the record</Button></div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/** Post-discharge: where the paper record goes next (received in MRD, filed, issued, returned). Only the next allowed move is offered. */
+function RecordFileControl({ admissionId, next, onDone }: { admissionId: string; next: string[]; onDone: () => void }) {
+  const action = next[0]!;
+  const [where, setWhere] = useState("");
+  const t = useT();
+  const label: Record<string, string> = { RECEIVED: "Receive the record file", FILED: "File it", ISSUED: "Issue it", RETURNED: "Mark it returned" };
+  const m = useMutation({
+    mutationFn: () => api.post(`/admissions/${admissionId}/discharge/record-file`, { action, ...(action === "FILED" ? { location: where.trim() } : {}), ...(action === "ISSUED" ? { issuedTo: where.trim() } : {}) }),
+    onSuccess: () => { setWhere(""); onDone(); },
+  });
+  const needs = action === "FILED" || action === "ISSUED";
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="record-file">
+      {needs && <Input aria-label={action === "FILED" ? "Filed at" : "Issued to"} className="w-48" placeholder={t(action === "FILED" ? "Rack / shelf" : "Issued to (person, department)")} value={where} onChange={(e) => setWhere(e.target.value)} />}
+      <Button variant="secondary" disabled={needs && where.trim().length < 2} loading={m.isPending} onClick={() => m.mutate()}>{label[action] ?? action}</Button>
+      <ErrorNote error={m.error} />
+    </div>
+  );
+}
+
 function DischargePanel({ adm, refresh }: { adm: Admission; refresh: () => void }) {
   const { can, money } = useMe();
   const qc = useQueryClient();
   const open = adm.status === "ADMITTED";
   // Pharmacy and billing clear themselves from work done on other screens, so keep the checklist fresh while it is open.
   const st = useQuery({ queryKey: ["discharge", adm.id], queryFn: () => api.get<Discharge>(`/admissions/${adm.id}/discharge`), refetchInterval: open ? 10_000 : false });
+  // An authorised financial exception releases the patient while final billing still shows money outstanding: say so plainly.
+  const releasedByException = !!st.data?.steps.some((x) => x.step === "FINANCIAL_RELEASE" && x.status === "WAIVED") && st.data?.steps.find((x) => x.step === "BILLING")?.status === "PENDING";
   const sum = useQuery({ queryKey: ["summary", adm.id], queryFn: () => api.get<SummaryDoc>(`/admissions/${adm.id}/discharge-summary`), enabled: can("CONSULTATION_READ") });
   const [content, setContent] = useState<SummaryContent>({});
   const [loaded, setLoaded] = useState(false);
@@ -289,16 +631,30 @@ function DischargePanel({ adm, refresh }: { adm: Admission; refresh: () => void 
     if (sum.data && !loaded) { setContent(sum.data.document?.content ?? { finalDiagnoses: sum.data.suggested.finalDiagnoses }); setLoaded(true); }
   }, [sum.data, loaded]);
   const reload = () => { void qc.invalidateQueries({ queryKey: ["discharge", adm.id] }); void qc.invalidateQueries({ queryKey: ["summary", adm.id] }); void qc.invalidateQueries({ queryKey: ["admission", adm.id] }); };
-  const clear = useMutation({ mutationFn: (step: string) => api.post(`/admissions/${adm.id}/discharge/clear`, { step }), onSuccess: reload });
+  /** Refresh everything, and only reload the form once the saved summary has actually arrived (otherwise the form is reset from the old copy and shows blank, and signing would then sign blank text). */
+  const resyncSummary = async () => { await qc.invalidateQueries({ queryKey: ["summary", adm.id] }); setLoaded(false); reload(); };
+  const [handoverNote, setHandoverNote] = useState("");
+  const clear = useMutation({
+    // The nurse's handover note travels with the nursing clearance (the server needs 3 or more characters, so shorter text is left out).
+    mutationFn: (step: string) => api.post(`/admissions/${adm.id}/discharge/clear`, { step, ...(step === "NURSING" && handoverNote.trim().length >= 3 ? { note: handoverNote.trim() } : {}) }),
+    onSuccess: () => { setHandoverNote(""); reload(); },
+  });
+  // The pharmacist puts back a medicine charge that went missing, so the stage reconciles without a waiver.
+  const repost = useMutation({ mutationFn: () => api.post(`/admissions/${adm.id}/discharge/pharmacy/repost-charges`), onSuccess: reload });
   const finalBill = useMutation({ mutationFn: () => api.post<{ invoice: { id: string } }>(`/admissions/${adm.id}/discharge/final-invoice`), onSuccess: reload });
   const complete = useMutation({ mutationFn: () => api.post(`/admissions/${adm.id}/discharge/complete`, { type: dtype }), onSuccess: () => { reload(); refresh(); } });
   const save = useMutation({
     mutationFn: () => api.put<{ version: number }>(`/admissions/${adm.id}/discharge-summary`, { content: { ...content, finalDiagnoses: content.finalDiagnoses ?? [], procedures: content.procedures ?? [], dischargeMedications: content.dischargeMedications ?? [] }, ...(sum.data?.document ? { version: sum.data.document.version } : {}) }),
-    onSuccess: () => { setLoaded(false); reload(); },
+    onSuccess: async () => { await resyncSummary(); },
+  });
+  // The RMO verifies the signed copy (the server refuses the person who signed it).
+  const verifySummary = useMutation({
+    mutationFn: () => api.post(`/admissions/${adm.id}/discharge-summary/verify`, { version: sum.data!.document!.currentVersion }),
+    onSuccess: async () => { await resyncSummary(); },
   });
   const signSummary = useMutation({
     mutationFn: async () => { const s = await save.mutateAsync(); return api.post(`/admissions/${adm.id}/discharge-summary/sign`, { version: s.version }); },
-    onSuccess: () => { setLoaded(false); reload(); },
+    onSuccess: async () => { await resyncSummary(); },
   });
   const stepPerm: Record<string, string> = { MEDICALLY_FIT: "ADMISSION_DISCHARGE", NURSING: "NURSING_DOCUMENT", CHARGES_REVIEWED: "CHARGE_CREATE", PHARMACY: "PHARMACY_DISPENSE" };
   const signed = sum.data?.document && sum.data.document.status !== "DRAFT";
@@ -307,23 +663,104 @@ function DischargePanel({ adm, refresh }: { adm: Admission; refresh: () => void 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
       <Card title="Discharge checklist">
-        {d?.steps.map((s) => (
-          <div key={s.step} className="flex items-start justify-between gap-3 border-b border-slate-100 py-2 last:border-0">
-            <div><div className="text-sm font-medium">{s.step.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase())} {!s.required && <span className="text-xs text-slate-400">(optional)</span>}</div>{s.blockers.map((b) => <div key={b} className="text-xs text-amber-700">⚠ {b}</div>)}{s.status === "CLEARED" && s.note && <div className="text-xs text-slate-500">{s.note}</div>}</div>
-            <div className="flex items-center gap-2"><StatusBadge value={s.status} />{open && s.status === "PENDING" && !s.automatic && can(stepPerm[s.step] ?? "ADMISSION_DISCHARGE") && <Button variant="secondary" loading={clear.isPending} onClick={() => clear.mutate(s.step)}>Clear</Button>}{open && s.status === "PENDING" && !s.automatic && s.step !== "MEDICALLY_FIT" && can("ADMISSION_DISCHARGE") && <WaiveButton admissionId={adm.id} step={s.step} onDone={reload} />}</div>
-          </div>
-        ))}
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm" data-testid="discharge-stages">
+            <thead><tr className="border-b border-slate-200 text-xs uppercase text-slate-500"><th className="py-2 pr-3 font-medium"><T>Stage</T></th><th className="py-2 pr-3 font-medium"><T>Responsible person/team</T></th><th className="py-2 font-medium"><T>HIS status and clearance</T></th></tr></thead>
+            <tbody>
+              {d?.steps.flatMap((s) => [
+                ...(s.step === "NURSING" && d.summary ? [(
+                  <tr key="SUMMARY" data-testid="summary-stage" className="border-b border-slate-100 align-top">
+                    <td className="py-2 pr-3 font-medium"><T>{d.summary.stage}</T> {!d.summary.required && <span className="text-xs font-normal text-slate-400">(optional)</span>}<div className="mt-0.5 text-xs font-normal text-slate-500"><T>{d.summary.description}</T></div></td>
+                    <td className="py-2 pr-3 text-slate-700"><T>{d.summary.responsible}</T></td>
+                    <td className="py-2">
+                      <div className="flex flex-wrap items-center gap-2"><StatusBadge value={d.summary.status} /><span><T>{d.summary.hisStatus}</T></span></div>
+                      {d.summary.preparedByName && <div className="text-xs text-slate-500">Prepared by {d.summary.preparedByName}</div>}
+                      {d.summary.signedByName && <div className="text-xs text-slate-500">Signed by {d.summary.signedByName}{d.summary.signedAt ? ` · ${new Date(d.summary.signedAt).toLocaleString()}` : ""}</div>}
+                      {d.summary.verifiedByName && <div className="text-xs text-slate-500">Verified by {d.summary.verifiedByName}{d.summary.verifiedAt ? ` · ${new Date(d.summary.verifiedAt).toLocaleString()}` : ""}</div>}
+                      {d.summary.verificationRequired && d.summary.status !== "VERIFIED" && <div className="text-xs text-amber-700">⚠ This hospital requires verification before discharge</div>}
+                    </td>
+                  </tr>
+                )] : []),
+                (
+                <tr key={s.step} className="border-b border-slate-100 align-top last:border-0">
+                  <td className="py-2 pr-3 font-medium"><T>{s.stage ?? s.step.replace(/_/g, " ").toLowerCase().replace(/^./, (c) => c.toUpperCase())}</T> {!s.required && <span className="text-xs font-normal text-slate-400">(optional)</span>}{s.description && <div className="mt-0.5 text-xs font-normal text-slate-500"><T>{s.description}</T></div>}</td>
+                  <td className="py-2 pr-3 text-slate-700"><T>{s.responsible ?? "—"}</T></td>
+                  <td className="py-2">
+                    <div className="flex flex-wrap items-center gap-2">{s.step === "FINANCIAL_RELEASE" && s.status === "WAIVED" ? <Badge tone="amber">exception</Badge> : <StatusBadge value={s.status} />}<span><T>{s.hisStatus ?? ""}</T></span>{open && s.status === "PENDING" && !s.automatic && can(stepPerm[s.step] ?? "ADMISSION_DISCHARGE") && <Button variant="secondary" loading={clear.isPending} onClick={() => clear.mutate(s.step)}>Clear</Button>}{open && s.status === "PENDING" && (s.waivable ?? (!s.automatic && s.step !== "MEDICALLY_FIT")) && can("ADMISSION_DISCHARGE") && <WaiveButton admissionId={adm.id} step={s.step} onDone={reload} />}{open && s.step === "FINANCIAL_RELEASE" && s.status === "PENDING" && can("DISCHARGE_FINANCIAL_EXCEPTION") && <FinancialExceptionButton admissionId={adm.id} onDone={reload} />}</div>
+                    {s.checks && s.checks.length > 0 && (
+                      <ul className="mt-1 space-y-0.5 text-xs" data-testid="nursing-checks">
+                        {s.checks.map((c) => <li key={c.name} className={c.ok ? "text-emerald-700" : "text-amber-700"}>{c.ok ? "✓" : "○"} <span className="font-medium"><T>{c.name}</T>:</span> {c.detail}</li>)}
+                      </ul>
+                    )}
+                    {open && s.step === "NURSING" && s.status === "PENDING" && can("NURSING_DOCUMENT") && (
+                      <Input aria-label="Handover note" className="mt-2" placeholder="Handover note (optional)" maxLength={300} value={handoverNote} onChange={(e) => setHandoverNote(e.target.value)} />
+                    )}
+                    {open && s.step === "PHARMACY" && s.status === "PENDING" && (s.reconciliation?.problems.length ?? 0) > 0 && can("PHARMACY_DISPENSE") && (
+                      <div className="mt-2"><Button variant="secondary" loading={repost.isPending} onClick={() => repost.mutate()}>Re-post missing charges</Button><ErrorNote error={repost.error} /></div>
+                    )}
+                    {s.status !== "PENDING" && (s.byName || s.at) && <div className="text-xs text-slate-500">{s.status === "WAIVED" ? (s.step === "FINANCIAL_RELEASE" ? "Exception authorised" : "Waived") : "Cleared"}{s.byName ? ` by ${s.byName}` : ""}{s.at ? ` · ${new Date(s.at).toLocaleString()}` : ""}</div>}
+                    {s.status !== "PENDING" && s.note && <div className="text-xs text-slate-500">{s.note}</div>}
+                    {s.blockers.map((b) => <div key={b} className="text-xs text-amber-700">⚠ {b}</div>)}
+                  </td>
+                </tr>
+                ),
+                ...(s.step === "FINANCIAL_RELEASE" && d.exit ? [(
+                  <tr key="EXIT" data-testid="exit-stage" className="border-b border-slate-100 align-top last:border-0">
+                    <td className="py-2 pr-3 font-medium"><T>{d.exit.stage}</T><div className="mt-0.5 text-xs font-normal text-slate-500"><T>{d.exit.description}</T></div></td>
+                    <td className="py-2 pr-3 text-slate-700"><T>{d.exit.responsible}</T></td>
+                    <td className="py-2">
+                      <div className="flex flex-wrap items-center gap-2"><Badge tone={d.exit.status === "CONFIRMED" ? "green" : d.exit.status === "PENDING" ? "amber" : "gray"}>{d.exit.status === "CONFIRMED" ? "confirmed" : d.exit.status === "PENDING" ? "pending" : d.exit.status === "NOT_DUE" ? "not yet due" : "not applicable"}</Badge><span><T>{d.exit.hisStatus}</T></span></div>
+                      {d.exit.departedAt && <div className="text-xs text-slate-600">Left {new Date(d.exit.departedAt).toLocaleString()} · {d.exit.modeLabel}{d.exit.escortedBy ? ` · escorted by ${d.exit.escortedBy}` : ""}{d.exit.minutesAfterDischarge !== null ? ` · ${d.exit.minutesAfterDischarge} min after discharge` : ""}</div>}
+                      {d.exit.byName && <div className="text-xs text-slate-500">Confirmed by {d.exit.byName}{d.exit.at ? ` · ${new Date(d.exit.at).toLocaleString()}` : ""}</div>}
+                      {d.exit.note && <div className="text-xs text-slate-500">{d.exit.note}</div>}
+                      {d.exit.status === "PENDING" && can("DISCHARGE_DEPARTURE_CONFIRM") && <DepartureForm admissionId={adm.id} death={d.dischargeType === "DEATH"} onDone={reload} />}
+                    </td>
+                  </tr>
+                )] : []),
+                ...(s.step === "FINANCIAL_RELEASE" && d.turnover ? [(
+                  <tr key="TURNOVER" data-testid="turnover-stage" className="border-b border-slate-100 align-top last:border-0">
+                    <td className="py-2 pr-3 font-medium"><T>{d.turnover.stage}</T><div className="mt-0.5 text-xs font-normal text-slate-500"><T>{d.turnover.description}</T></div></td>
+                    <td className="py-2 pr-3 text-slate-700"><T>{d.turnover.responsible}</T></td>
+                    <td className="py-2">
+                      <div className="flex flex-wrap items-center gap-2"><Badge tone={d.turnover.status === "READY" ? "green" : d.turnover.status === "CLEANING" ? "amber" : d.turnover.status === "VACATED" ? "red" : "gray"}>{d.turnover.status === "READY" ? "ready" : d.turnover.status === "CLEANING" ? "cleaning" : d.turnover.status === "VACATED" ? "vacated" : d.turnover.status === "NOT_DUE" ? "not yet due" : d.turnover.status === "AWAITING_DEPARTURE" ? "bed kept" : "not applicable"}</Badge><span><T>{d.turnover.hisStatus}</T></span></div>
+                      {d.turnover.bed && <div className="text-xs text-slate-600">{d.turnover.bed}{d.turnover.vacatedAt ? ` · vacated ${new Date(d.turnover.vacatedAt).toLocaleString()}` : " · freed when the departure is confirmed"}</div>}
+                      {d.turnover.cleaningStartedAt && d.turnover.cleaningStartedBy && <div className="text-xs text-slate-500">Cleaning started by {d.turnover.cleaningStartedBy} · {new Date(d.turnover.cleaningStartedAt).toLocaleString()}</div>}
+                      {d.turnover.readyAt && <div className="text-xs text-slate-500">Ready{d.turnover.readyBy ? ` by ${d.turnover.readyBy}` : ""} · {new Date(d.turnover.readyAt).toLocaleString()}{d.turnover.minutesToReady !== null ? ` · ${d.turnover.minutesToReady} min after vacated` : ""}</div>}
+                      {(d.turnover.status === "VACATED" || d.turnover.status === "CLEANING") && can("BED_HOUSEKEEPING") && <Link className="text-xs text-brand-700 hover:underline" href="/housekeeping">Open housekeeping</Link>}
+                    </td>
+                  </tr>
+                )] : []),
+                ...(s.step === "FINANCIAL_RELEASE" && d.postDischarge ? [(
+                  <tr key="POST" data-testid="post-discharge-stage" className="border-b border-slate-100 align-top last:border-0">
+                    <td className="py-2 pr-3 font-medium"><T>{d.postDischarge.stage}</T><div className="mt-0.5 text-xs font-normal text-slate-500"><T>{d.postDischarge.description}</T></div></td>
+                    <td className="py-2 pr-3 text-slate-700"><T>{d.postDischarge.responsible}</T></td>
+                    <td className="py-2">
+                      <div className="flex flex-wrap items-center gap-2"><Badge tone={d.postDischarge.status === "CLOSED" ? "green" : d.postDischarge.status === "TRACKING" ? "blue" : d.postDischarge.status === "RECORDS_PENDING" ? "amber" : "gray"}>{d.postDischarge.status === "CLOSED" ? "closed" : d.postDischarge.status === "TRACKING" ? "tracking" : d.postDischarge.status === "RECORDS_PENDING" ? "records pending" : d.postDischarge.status === "NOT_DUE" ? "not yet due" : "not applicable"}</Badge><span><T>{d.postDischarge.hisStatus}</T></span></div>
+                      {d.postDischarge.status !== "NOT_DUE" && d.postDischarge.status !== "NOT_APPLICABLE" && (
+                        <ul className="mt-1 space-y-0.5 text-xs">{d.postDischarge.checks.map((c) => <li key={c.name} className={c.ok ? "text-emerald-700" : "text-amber-700"}>{c.ok ? "✓" : "○"} <span className="font-medium"><T>{c.name}</T>:</span> {c.detail}</li>)}</ul>
+                      )}
+                      {d.postDischarge.recordCompletedAt && <div className="text-xs text-slate-500">Record signed off{d.postDischarge.recordCompletedBy ? ` by ${d.postDischarge.recordCompletedBy}` : ""} · {new Date(d.postDischarge.recordCompletedAt).toLocaleString()}</div>}
+                      {d.postDischarge.status === "RECORDS_PENDING" && can("MRD_RECORD_COMPLETE") && <RecordsCompleteButton admissionId={adm.id} ready={d.postDischarge.recordReady} suggested={d.postDischarge.suggestedDiagnoses ?? []} onDone={reload} />}
+                      {(d.postDischarge.file?.nextActions.length ?? 0) > 0 && can("MRD_RECORD_COMPLETE") && <RecordFileControl admissionId={adm.id} next={d.postDischarge.file!.nextActions} onDone={reload} />}
+                    </td>
+                  </tr>
+                )] : []),
+              ])}
+            </tbody>
+          </table>
+        </div>
         <ErrorNote error={clear.error} />
         {open && (
           <div className="mt-4 space-y-3 border-t border-slate-100 pt-3">
             {!d?.finalInvoice ? (can("IPD_FINAL_BILL") ? <Button variant="secondary" loading={finalBill.isPending} onClick={() => finalBill.mutate()}>Generate final bill</Button> : null) : <Link className="text-sm text-brand-700 hover:underline" href={`/billing/${d.finalInvoice.id}`}>Open final bill</Link>}
             <ErrorNote error={finalBill.error} />
-            {d && !d.canComplete && d.blockers.length > 0 && <Notice tone="warn">Before discharge: {d.blockers.join("; ")}.</Notice>}
-            {d?.canComplete && !can("ADMISSION_DISCHARGE") && <Notice tone="success">Everything is cleared and paid. The patient is still admitted, and the bed stays occupied, until a doctor presses “Discharge patient”. Ask the doctor to open this screen.</Notice>}
+            {d && !d.canComplete && d.blockers.length > 0 && <Notice tone="warn"><T>Before discharge</T>: {d.blockers.join("; ")}.</Notice>}
+            {d?.canComplete && releasedByException && <Notice tone="warn"><T>Released by an authorised financial exception: the bill is still outstanding and has to be settled. The discharge can go ahead.</T></Notice>}
+            {d?.canComplete && !releasedByException && !can("ADMISSION_DISCHARGE") && <Notice tone="success">Everything is cleared and paid. The patient is still admitted, and the bed stays occupied, until a doctor presses “Discharge patient”. Ask the doctor to open this screen.</Notice>}
             {can("ADMISSION_DISCHARGE") && (
               <div className="flex flex-wrap items-center gap-2">
                 <Select aria-label="Discharge type" className="w-44" value={dtype} onChange={(e) => setDtype(e.target.value)}>{["ROUTINE", "LAMA", "REFERRED", "ABSCONDED", "DEATH"].map((t) => <option key={t}>{t}</option>)}</Select>
-                <ConfirmButton variant="primary" label="Discharge patient" confirmLabel="Yes, discharge and release the bed" disabled={!d?.canComplete} loading={complete.isPending} onConfirm={() => complete.mutate()} />
+                <ConfirmButton variant="primary" label="Discharge patient" confirmLabel="Yes, discharge the patient" disabled={!d?.canComplete} loading={complete.isPending} onConfirm={() => complete.mutate()} />
               </div>
             )}
             <ErrorNote error={complete.error} />
@@ -332,8 +769,11 @@ function DischargePanel({ adm, refresh }: { adm: Admission; refresh: () => void 
         {!open && <p className="mt-3 text-sm text-slate-600">This admission is {adm.status.toLowerCase()}. {d?.finalInvoice && <Link className="text-brand-700 hover:underline" href={`/billing/${d.finalInvoice.id}`}>Final bill</Link>}</p>}
         {adm.status === "DISCHARGED" && money("0") && <p className="mt-2 space-x-3"><a className="text-sm text-brand-700 hover:underline" href={printUrl(`discharge-summaries/${adm.id}`)} target="_blank" rel="noreferrer">Print discharge summary</a><a className="text-sm text-brand-700 hover:underline" href={`${printUrl(`discharge-summaries/${adm.id}`)}?format=pdf&download=1`}>Download PDF</a></p>}
       </Card>
+      <TestsCard adm={adm} open={open} />
+      <ProceduresCard adm={adm} open={open} />
+      <InsuranceCard adm={adm} open={open} />
       {can("CONSULTATION_READ") && (
-        <Card title="Discharge summary" actions={signed ? <Badge tone="green">signed by {sum.data?.document?.signedByName}</Badge> : undefined}>
+        <Card title="Discharge summary" actions={signed ? <span className="flex flex-wrap gap-1"><Badge tone="green">signed by {sum.data?.document?.signedByName}</Badge>{sum.data?.document?.verified && <Badge tone="green">verified by {sum.data.document.verifiedByName}</Badge>}</span> : undefined}>
           <div className="space-y-3">
             <Field label="Final diagnoses (one per line)"><Textarea disabled={!open || !!signed} value={(content.finalDiagnoses ?? []).map((x) => x.text).join("\n")} onChange={(e) => setContent({ ...content, finalDiagnoses: e.target.value.split("\n").map((t) => t.trim()).filter(Boolean).map((text) => ({ text })) })} /></Field>
             <Field label="Hospital course"><Textarea rows={5} disabled={!open || !!signed} value={content.hospitalCourse ?? ""} onChange={(e) => setContent({ ...content, hospitalCourse: e.target.value })} /></Field>
@@ -345,7 +785,13 @@ function DischargePanel({ adm, refresh }: { adm: Admission; refresh: () => void 
                 {can("CONSULTATION_SIGN") && <ConfirmButton variant="primary" label="Sign summary" confirmLabel="Yes, sign" loading={signSummary.isPending} onConfirm={() => signSummary.mutate()} />}
               </div>
             )}
-            <ErrorNote error={save.error ?? signSummary.error} />
+            {open && signed && !sum.data?.document?.verified && can("CONSULTATION_VERIFY") && (
+              <div className="flex flex-wrap items-center gap-2">
+                <ConfirmButton variant="primary" label="Verify summary" confirmLabel="Yes, verify" loading={verifySummary.isPending} onConfirm={() => verifySummary.mutate()} />
+                <span className="text-xs text-slate-500">Confirms the signed copy is complete and correct. The person who signed it cannot verify it.</span>
+              </div>
+            )}
+            <ErrorNote error={save.error ?? signSummary.error ?? verifySummary.error} />
           </div>
         </Card>
       )}

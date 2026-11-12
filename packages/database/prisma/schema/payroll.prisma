@@ -91,36 +91,36 @@ model PayrollRun {
 }
 
 model Payslip {
-  id               String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId         String   @db.Uuid
-  runId            String   @db.Uuid
-  employeeId       String   @db.Uuid
-  structureId      String   @db.Uuid
-  daysInMonth      Int
-  lopDays          Decimal  @default(0) @db.Decimal(5, 1)
-  basic            Decimal  @db.Decimal(14, 2)
-  hra              Decimal  @db.Decimal(14, 2)
-  otherAllowance   Decimal  @db.Decimal(14, 2)
-  bonus            Decimal  @default(0) @db.Decimal(14, 2)
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @db.Uuid
+  runId           String   @db.Uuid
+  employeeId      String   @db.Uuid
+  structureId     String   @db.Uuid
+  daysInMonth     Int
+  lopDays         Decimal  @default(0) @db.Decimal(5, 1)
+  basic           Decimal  @db.Decimal(14, 2)
+  hra             Decimal  @db.Decimal(14, 2)
+  otherAllowance  Decimal  @db.Decimal(14, 2)
+  bonus           Decimal  @default(0) @db.Decimal(14, 2)
   /// Pay owed for earlier months (a backdated raise or a correction), added on top of this month's pay.
-  arrears          Decimal  @default(0) @db.Decimal(14, 2)
-  arrearsNote      String?
-  gross            Decimal  @db.Decimal(14, 2)
-  pfEmployee       Decimal  @db.Decimal(14, 2)
-  esiEmployee      Decimal  @db.Decimal(14, 2)
-  professionalTax  Decimal  @db.Decimal(14, 2)
-  tds              Decimal  @default(0) @db.Decimal(14, 2)
-  otherDeduction   Decimal  @default(0) @db.Decimal(14, 2)
-  totalDeductions  Decimal  @db.Decimal(14, 2)
-  net              Decimal  @db.Decimal(14, 2)
-  pfEmployer       Decimal  @db.Decimal(14, 2)
-  esiEmployer      Decimal  @db.Decimal(14, 2)
-  note             String?
-  updatedAt        DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+  arrears         Decimal  @default(0) @db.Decimal(14, 2)
+  arrearsNote     String?
+  gross           Decimal  @db.Decimal(14, 2)
+  pfEmployee      Decimal  @db.Decimal(14, 2)
+  esiEmployee     Decimal  @db.Decimal(14, 2)
+  professionalTax Decimal  @db.Decimal(14, 2)
+  tds             Decimal  @default(0) @db.Decimal(14, 2)
+  otherDeduction  Decimal  @default(0) @db.Decimal(14, 2)
+  totalDeductions Decimal  @db.Decimal(14, 2)
+  net             Decimal  @db.Decimal(14, 2)
+  pfEmployer      Decimal  @db.Decimal(14, 2)
+  esiEmployer     Decimal  @db.Decimal(14, 2)
+  note            String?
+  updatedAt       DateTime @default(now()) @updatedAt @db.Timestamptz(3)
 
-  run       PayrollRun      @relation(fields: [tenantId, runId], references: [tenantId, id], onDelete: Restrict)
-  employee  Employee        @relation(fields: [tenantId, employeeId], references: [tenantId, id], onDelete: Restrict)
-  structure SalaryStructure @relation(fields: [tenantId, structureId], references: [tenantId, id], onDelete: Restrict)
+  run            PayrollRun            @relation(fields: [tenantId, runId], references: [tenantId, id], onDelete: Restrict)
+  employee       Employee              @relation(fields: [tenantId, employeeId], references: [tenantId, id], onDelete: Restrict)
+  structure      SalaryStructure       @relation(fields: [tenantId, structureId], references: [tenantId, id], onDelete: Restrict)
   arrearsPaid    PayslipArrearsCover[] @relation("ArrearsPaidBy")
   arrearsCovered PayslipArrearsCover[] @relation("ArrearsCovered")
 

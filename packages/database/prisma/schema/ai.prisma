@@ -18,46 +18,46 @@ enum AiDraftStatus {
 }
 
 model AiConfig {
-  tenantId    String         @db.Uuid
-  facilityId  String         @db.Uuid
-  kind        AiProviderKind
+  tenantId        String         @db.Uuid
+  facilityId      String         @db.Uuid
+  kind            AiProviderKind
   /// HTTP: the service address. ANTHROPIC: an optional address of a gateway in front of the API (default is the provider's own).
-  url         String?
+  url             String?
   /// ANTHROPIC: the model to ask for.
-  model       String?
-  apiKeyEnc   String?
-  keyLast4    String?
-  timeoutMs   Int            @default(30000)
+  model           String?
+  apiKeyEnc       String?
+  keyLast4        String?
+  timeoutMs       Int            @default(30000)
   /// An administrator confirmed that sending de-identified visit data to this provider is allowed by the hospital's agreement with it.
-  dataAckAt   DateTime?      @db.Timestamptz(3)
-  dataAckById String?        @db.Uuid
-  lastTestAt  DateTime?      @db.Timestamptz(3)
-  lastTestOk  Boolean?
+  dataAckAt       DateTime?      @db.Timestamptz(3)
+  dataAckById     String?        @db.Uuid
+  lastTestAt      DateTime?      @db.Timestamptz(3)
+  lastTestOk      Boolean?
   lastTestMessage String?
-  updatedById String         @db.Uuid
-  updatedAt   DateTime       @default(now()) @updatedAt @db.Timestamptz(3)
+  updatedById     String         @db.Uuid
+  updatedAt       DateTime       @default(now()) @updatedAt @db.Timestamptz(3)
 
   @@id([tenantId, facilityId])
 }
 
 /// One AI draft for one visit, kept so there is a record of what the AI wrote and what the doctor did with it. Only the review fields ever change.
 model AiDraft {
-  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String        @db.Uuid
-  facilityId   String        @db.Uuid
-  patientId    String        @db.Uuid
-  encounterId  String        @db.Uuid
-  task         AiTask
-  status       AiDraftStatus @default(DRAFT)
-  outputText   String
-  inputChars   Int
-  provider     String
-  model        String?
-  requestedById String       @db.Uuid
-  requestedAt  DateTime      @default(now()) @db.Timestamptz(3)
-  reviewedAt   DateTime?     @db.Timestamptz(3)
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String        @db.Uuid
+  facilityId    String        @db.Uuid
+  patientId     String        @db.Uuid
+  encounterId   String        @db.Uuid
+  task          AiTask
+  status        AiDraftStatus @default(DRAFT)
+  outputText    String
+  inputChars    Int
+  provider      String
+  model         String?
+  requestedById String        @db.Uuid
+  requestedAt   DateTime      @default(now()) @db.Timestamptz(3)
+  reviewedAt    DateTime?     @db.Timestamptz(3)
   /// The doctor changed the text before using it.
-  edited       Boolean       @default(false)
+  edited        Boolean       @default(false)
 
   patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
   encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)

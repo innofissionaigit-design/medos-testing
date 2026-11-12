@@ -59,6 +59,8 @@ const NOT_DRIVEN: Record<string, string> = {
 
 /** A starting body for routes whose rules (a configured reason, a union, "at least one field") the validation errors alone cannot lead to. Everything else is learned. */
 const SEED: Record<string, Json> = {
+  "POST /aftercare/tasks/:id/contacts": { outcome: "NO_ANSWER" },
+  "PATCH /aftercare/tasks/:id": { dueDate: "2026-11-20" },
   "POST /patients/:id/registration-fee": { exemption: { reason: "Sweep" } },
   "POST /appointments/:id/booking-fee/skip": { reason: "Sweep" },
   "POST /patients/:id/merge": { intoPatientId: randomUUID(), version: 1, reason: "Sweep value" },
@@ -70,6 +72,12 @@ const SEED: Record<string, Json> = {
   "PUT /policies/:id/copay": { copayPercent: "10", deductible: "1.00", deductibleUsed: "0.00" },
   "POST /cashier/patients/:patientId/collect": { invoiceIds: ["__ID__"], payments: [{ method: "CASH", amount: "1.00" }] },
   "POST /users/:id/reset-password": { password: "Sweepvalue12345" },
+  // An implant needs a serial number, a rule the validation errors cannot lead to; a consumable passes validation and reaches the lookup.
+  "POST /procedures/:id/items": { kind: "CONSUMABLE", serviceId: randomUUID(), quantity: 1 },
+  "POST /admissions/:id/discharge/financial-exception": { reason: "Dues to be collected after discharge" },
+  "POST /admissions/:id/discharge/departure": { mode: "WALKED" },
+  "POST /admissions/:id/discharge/records-complete": { codes: [{ diagnosis: "Acute appendicitis", icd10: "K35.8", primary: true }] },
+  "POST /admissions/:id/discharge/record-file": { action: "RECEIVED" },
 };
 /** Fields to try, one by one, when a change route answers "no changes supplied" (a field the route does not know is removed again from the next answer). */
 const CHANGE_FIELDS = ["name", "displayName", "title", "description", "notes", "label", "phone", "address", "fullName", "email", "specialty", "remarks", "code", "city", "contactPhone"];

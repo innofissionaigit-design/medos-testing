@@ -120,6 +120,8 @@ describe("IPD end-to-end certification", () => {
     // 12. Discharge completes → bed released
     const done = ok(await t.api("post", `/admissions/${admissionId}/discharge/complete`, doc.token).send({ type: "ROUTINE", note: "Home on oral antibiotics" }), 200, "discharge");
     assert.equal(done.body.data.status, "DISCHARGED");
+    assert.equal((await t.prisma.bed.findFirstOrThrow({ where: { id: b.bedId } })).status, "OCCUPIED", "the bed is kept until the patient leaves");
+    ok(await t.api("post", `/admissions/${admissionId}/discharge/departure`, nurse.token).send({ mode: "WHEELCHAIR", escortedBy: "Family" }), 200, "departure confirmed");
     assert.equal(await t.prisma.bedAssignment.count({ where: { admissionId, releasedAt: null } }), 0);
     assert.equal((await t.prisma.bed.findFirstOrThrow({ where: { id: b.bedId } })).status, "CLEANING", "released bed goes to cleaning");
     ok(await t.api("post", `/beds/${b.bedId}/status`, nurse.token).send({ status: "AVAILABLE" }), 200, "bed cleaned");

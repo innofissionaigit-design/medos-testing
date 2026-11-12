@@ -7,25 +7,25 @@ enum NoteStatus {
 
 /// Append-only. A correction is an addendum (a new note pointing at the original) or an entered-in-error flag; text is never edited.
 model NursingNote {
-  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId      String     @db.Uuid
-  facilityId    String     @db.Uuid
-  patientId     String     @db.Uuid
-  admissionId   String     @db.Uuid
-  encounterId   String     @db.Uuid
-  authorId      String     @db.Uuid
-  note          String
-  addendumOfId  String?    @db.Uuid
-  status        NoteStatus @default(ACTIVE)
-  errorReason   String?
-  errorById     String?    @db.Uuid
-  errorAt       DateTime?  @db.Timestamptz(3)
-  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
+  id           String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String     @db.Uuid
+  facilityId   String     @db.Uuid
+  patientId    String     @db.Uuid
+  admissionId  String     @db.Uuid
+  encounterId  String     @db.Uuid
+  authorId     String     @db.Uuid
+  note         String
+  addendumOfId String?    @db.Uuid
+  status       NoteStatus @default(ACTIVE)
+  errorReason  String?
+  errorById    String?    @db.Uuid
+  errorAt      DateTime?  @db.Timestamptz(3)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
 
-  patient   Patient      @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  admission Admission    @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
-  addendumOf NursingNote? @relation("Addendum", fields: [addendumOfId], references: [id], onDelete: Restrict)
-  addenda   NursingNote[] @relation("Addendum")
+  patient    Patient       @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  admission  Admission     @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  addendumOf NursingNote?  @relation("Addendum", fields: [addendumOfId], references: [id], onDelete: Restrict)
+  addenda    NursingNote[] @relation("Addendum")
 
   @@unique([tenantId, id])
   @@index([tenantId, admissionId, createdAt])
@@ -44,21 +44,21 @@ enum TaskStatus {
 }
 
 model NursingTask {
-  id             String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId       String     @db.Uuid
-  facilityId     String     @db.Uuid
-  patientId      String     @db.Uuid
-  admissionId    String     @db.Uuid
-  assignedToId   String?    @db.Uuid
-  type           TaskType   @default(OTHER)
-  title          String
-  dueAt          DateTime   @db.Timestamptz(3)
-  status         TaskStatus @default(PENDING)
-  completedById  String?    @db.Uuid
-  completedAt    DateTime?  @db.Timestamptz(3)
-  closeNote      String?
-  createdById    String     @db.Uuid
-  createdAt      DateTime   @default(now()) @db.Timestamptz(3)
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String     @db.Uuid
+  facilityId    String     @db.Uuid
+  patientId     String     @db.Uuid
+  admissionId   String     @db.Uuid
+  assignedToId  String?    @db.Uuid
+  type          TaskType   @default(OTHER)
+  title         String
+  dueAt         DateTime   @db.Timestamptz(3)
+  status        TaskStatus @default(PENDING)
+  completedById String?    @db.Uuid
+  completedAt   DateTime?  @db.Timestamptz(3)
+  closeNote     String?
+  createdById   String     @db.Uuid
+  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
 
   patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
   admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)

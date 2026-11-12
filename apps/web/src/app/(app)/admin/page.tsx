@@ -153,7 +153,7 @@ function Settings() {
     <div className="space-y-4">
       <FacilityCard />
       <Card title="Modules"><div className="grid gap-2 sm:grid-cols-3">{flag("PHARMACY_ENABLED", "Pharmacy")}{flag("IPD_ENABLED", "Admissions and beds")}{flag("NURSING_ENABLED", "Nursing")}</div></Card>
-      <Card title="Discharge rules"><div className="grid gap-2 sm:grid-cols-2">{flag("DISCHARGE_REQUIRE_SUMMARY", "Require a signed discharge summary")}
+      <Card title="Discharge rules"><div className="grid gap-2 sm:grid-cols-2">{flag("DISCHARGE_REQUIRE_SUMMARY", "Require a signed discharge summary")}{flag("DISCHARGE_REQUIRE_VERIFIED_SUMMARY", "Also require a second doctor to verify it")}
         <div className="flex items-center justify-between rounded-md border border-slate-200 px-3 py-2 text-sm"><span>Bed status after discharge</span><select aria-label="Bed after discharge" value={String(get("BED_AFTER_DISCHARGE")?.value ?? "CLEANING")} onChange={(e) => put.mutate({ key: "BED_AFTER_DISCHARGE", value: e.target.value })} className="rounded border border-slate-300 px-2 py-1"><option value="CLEANING">Needs cleaning</option><option value="AVAILABLE">Available</option></select></div></div></Card>
       <Card title="Follow-up reminders (SMS)">
         <div className="grid gap-2 sm:grid-cols-2">

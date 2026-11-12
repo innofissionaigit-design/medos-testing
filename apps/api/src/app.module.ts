@@ -52,12 +52,37 @@ import { StockService } from "./modules/pharmacy/stock.service";
 import { AdmissionsService } from "./modules/ipd/admissions.service";
 import { ChargesService } from "./modules/ipd/charges.service";
 import { IpdController } from "./modules/ipd/ipd.controller";
+import { BedTurnoverController } from "./modules/ipd/bed-turnover.controller";
+import { AftercareJobsService, AftercareWorker } from "./modules/aftercare/aftercare-jobs.service";
+import { FeedbackLinkService } from "./modules/aftercare/feedback-link.service";
+import { AftercareController, PublicFeedbackController } from "./modules/aftercare/aftercare.controller";
+import { AftercareService } from "./modules/aftercare/aftercare.service";
+import { FeedbackService } from "./modules/aftercare/feedback.service";
+import { ProcurementController } from "./modules/procurement/procurement.controller";
+import { ProcurementService } from "./modules/procurement/procurement.service";
+import { ProcurementExtrasController } from "./modules/procurement/procurement-extras.controller";
+import { PayablesService } from "./modules/procurement/payables.service";
+import { StockCountsService } from "./modules/procurement/stock-counts.service";
+import { CostLedgerBackfillService } from "./modules/procurement/cost-ledger-backfill.service";
+import { AftercareScriptsService } from "./modules/aftercare/aftercare-scripts.service";
+import { CostLedgerService } from "./modules/procurement/cost-ledger.service";
+import { StockRequestsService } from "./modules/procurement/stock-requests.service";
+import { PostDischargeController } from "./modules/discharge/post-discharge.controller";
+import { RecordRetentionController } from "./modules/discharge/record-retention.controller";
+import { RecordRetentionService } from "./modules/discharge/record-retention.service";
+import { HousekeepingController } from "./modules/housekeeping/housekeeping.controller";
+import { HousekeepingService } from "./modules/housekeeping/housekeeping.service";
+import { PostDischargeService } from "./modules/discharge/post-discharge.service";
+import { BedTurnoverService } from "./modules/ipd/bed-turnover.service";
 import { WardsService } from "./modules/ipd/wards.service";
 import { MarService } from "./modules/nursing/mar.service";
 import { NursingController } from "./modules/nursing/nursing.controller";
 import { NursingService } from "./modules/nursing/nursing.service";
 import { DischargeController } from "./modules/discharge/discharge.controller";
 import { DischargeService } from "./modules/discharge/discharge.service";
+import { AdmissionTestsService } from "./modules/discharge/admission-tests.service";
+import { ProceduresController } from "./modules/procedures/procedures.controller";
+import { ProceduresService } from "./modules/procedures/procedures.service";
 import { SummaryService } from "./modules/discharge/summary.service";
 import { PrintController } from "./modules/print/print.controller";
 import { PrintService } from "./modules/print/print.service";
@@ -89,6 +114,8 @@ import { UsersController } from "./modules/users/users.controller";
 import { UsersService } from "./modules/users/users.service";
 import { AdvancesController } from "./modules/billing/advances.controller";
 import { OCR_PROVIDER, createOcrProvider } from "./modules/prescriptions/ocr.provider";
+import { ClaimExchangeService } from "./modules/claims/claim-exchange.service";
+import { CLAIM_TRANSPORT, createClaimTransport } from "./modules/claims/claim-transport";
 import { MESSAGE_PROVIDER, createMessageProvider } from "./modules/prescriptions/message.provider";
 import { PrescriptionDeliveryService } from "./modules/prescriptions/prescription-delivery.service";
 import { PrescriptionDeliveryController } from "./modules/prescriptions/prescription-delivery.controller";
@@ -155,7 +182,7 @@ export const CONTROLLERS = [
   HealthController, AuthController, TenantsController, FacilitiesController,
   UsersController, NumberingController, AuditController, MastersController, PatientsController,
   EncountersController, AppointmentsController, QueueController, VitalsController,
-  AllergiesController, ConsultationsController, TestOrdersController, PrescriptionsController, BillingController, PharmacyController, StockLocationsController, WardStoresController, PrescriptionDeliveryController, EarningsReportsController, LabController, RadiologyController, RadImagesController, ClaimsController, ClaimDocumentsController, PayrollController, AttendanceController, PortalAuthController, PortalController, AppointmentRequestsController, TelemedicineController, NotificationsController, EmailController, AbdmController, AiController, IpdController, NursingController, DischargeController, SettingsController, MedicineMasterController, PrintController, ReportsController, FilesController, FollowUpsController, PrivacyController, ImportsController, AdvancesController, StatementController, BookingApiController, IntegrationsController, EarningsController, ScansController, TemplatesController, OcrConfigController, PrescriptionShareController, PublicPrescriptionController,
+  AllergiesController, ConsultationsController, TestOrdersController, PrescriptionsController, BillingController, PharmacyController, StockLocationsController, WardStoresController, PrescriptionDeliveryController, EarningsReportsController, LabController, RadiologyController, RadImagesController, ClaimsController, ClaimDocumentsController, PayrollController, AttendanceController, PortalAuthController, PortalController, AppointmentRequestsController, TelemedicineController, NotificationsController, EmailController, AbdmController, AiController, IpdController, BedTurnoverController, PostDischargeController, RecordRetentionController, HousekeepingController, ProcurementController, ProcurementExtrasController, AftercareController, PublicFeedbackController, NursingController, DischargeController, ProceduresController, SettingsController, MedicineMasterController, PrintController, ReportsController, FilesController, FollowUpsController, PrivacyController, ImportsController, AdvancesController, StatementController, BookingApiController, IntegrationsController, EarningsController, ScansController, TemplatesController, OcrConfigController, PrescriptionShareController, PublicPrescriptionController,
 ];
 
 @Module({
@@ -168,9 +195,11 @@ export const CONTROLLERS = [
     ClinicianService, AllergiesService, ConsultationsService, PrescriptionsService,
     CatalogService, InvoicesService, LedgerService, PaymentsService, ShiftsService,
     StockService, MedicinesService, InventoryService, StockLocationsService, DispensingService,
-    WardsService, AdmissionsService, ChargesService, NursingService, MarService, SettingsService, DischargeService, SummaryService, PrintService, ReportsService, FilesService, StorageService, ScanService,
+    WardsService, BedTurnoverService, PostDischargeService, RecordRetentionService, HousekeepingService, ProcurementService, CostLedgerService, CostLedgerBackfillService, AftercareScriptsService, AftercareService, FeedbackService, FeedbackLinkService, AftercareJobsService, AftercareWorker, PayablesService, StockCountsService, StockRequestsService, AdmissionsService, ChargesService, NursingService, MarService, SettingsService, DischargeService, AdmissionTestsService, ProceduresService, SummaryService, PrintService, ReportsService, FilesService, StorageService, ScanService,
     RemindersService, ReminderWorker, FollowUpsService, TestOrdersService, PrescriptionDraftService, CashierViewService, CashierCollectService, PrivacyService, ImportsService, MergeService, PatientIdentifiersService, AdvancesService, StatementService, BookingApiService, IntegrationsService, EarningsService, ShareLedgerService, PayoutsService, LabService, RadiologyService, RadImagesService, ClaimsService, ClaimDocumentsService, PayrollService, AttendanceService, PortalAuthService, PortalService, PortalGuard, TelemedicineService, NotificationsService, EmailService, EmailWorker, AbdmService, AiService, ScansService, TemplatesService, OcrConfigService, SecretsService, PrescriptionShareService, RegistrationFeeService,
     { provide: OCR_PROVIDER, useFactory: (c: AppConfig) => createOcrProvider(c), inject: [CONFIG] },
+    { provide: CLAIM_TRANSPORT, useFactory: (c: AppConfig) => createClaimTransport(c), inject: [CONFIG] },
+    ClaimExchangeService,
     { provide: MESSAGE_PROVIDER, useFactory: (c: AppConfig) => createMessageProvider(c), inject: [CONFIG] },
     { provide: EMAIL_PROVIDER, useFactory: (c: AppConfig) => createEmailProvider(c), inject: [CONFIG] },
     WebhooksService, PrescriptionDeliveryService, OutboundWorker,

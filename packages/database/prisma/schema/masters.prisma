@@ -12,13 +12,13 @@ model Department {
   createdAt  DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
 
-  tenant        Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  facility      Facility       @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  practitioners Practitioner[]
-  encounters    Encounter[]
-  appointments  Appointment[]
-  queueEntries  QueueEntry[]
-  admissions    Admission[]
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facility        Facility         @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  practitioners   Practitioner[]
+  encounters      Encounter[]
+  appointments    Appointment[]
+  queueEntries    QueueEntry[]
+  admissions      Admission[]
   userDepartments UserDepartment[]
 
   @@unique([tenantId, id])
@@ -43,13 +43,13 @@ model Practitioner {
   createdAt      DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
 
-  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  facility   Facility    @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  user       User?       @relation(fields: [userId], references: [id], onDelete: Restrict)
-  shareRules DoctorShareRule[]
+  tenant       Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facility     Facility               @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  user         User?                  @relation(fields: [userId], references: [id], onDelete: Restrict)
+  shareRules   DoctorShareRule[]
   shareEntries DoctorShareEntry[]
   payouts      DoctorPayout[]
-  department Department? @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  department   Department?            @relation(fields: [departmentId], references: [id], onDelete: Restrict)
   encounters   Encounter[]
   schedules    PractitionerSchedule[]
   appointments Appointment[]

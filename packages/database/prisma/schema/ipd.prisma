@@ -65,6 +65,7 @@ model Bed {
   ward        Ward            @relation(fields: [tenantId, facilityId, wardId], references: [tenantId, facilityId, id], onDelete: Restrict)
   room        Room            @relation(fields: [tenantId, facilityId, roomId], references: [tenantId, facilityId, id], onDelete: Restrict)
   assignments BedAssignment[]
+  turnovers   BedTurnover[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, id])
@@ -99,23 +100,32 @@ model Admission {
   createdAt       DateTime        @default(now()) @db.Timestamptz(3)
   updatedAt       DateTime        @updatedAt @db.Timestamptz(3)
 
-  facility    Facility        @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  patient     Patient         @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  encounter   Encounter       @relation(fields: [encounterId], references: [id], onDelete: Restrict)
-  consultant  Practitioner    @relation(fields: [consultantId], references: [id], onDelete: Restrict)
-  department  Department?     @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  assignments BedAssignment[]
-  charges     Charge[]
-  nursingNotes NursingNote[]
-  nursingTasks NursingTask[]
-  administrations MedicationAdministration[]
-  intakeOutputs IntakeOutput[]
-  clearances  DischargeClearance[]
-  dischargeType  DischargeType?
-  dischargeNote  String?
-  finalInvoiceId String? @db.Uuid
-  wardIssues     StockLocationIssue[]
-  finalInvoice   Invoice? @relation("AdmissionFinalInvoice", fields: [finalInvoiceId], references: [id], onDelete: Restrict)
+  facility             Facility                       @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient              Patient                        @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter            Encounter                      @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+  consultant           Practitioner                   @relation(fields: [consultantId], references: [id], onDelete: Restrict)
+  department           Department?                    @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  assignments          BedAssignment[]
+  charges              Charge[]
+  nursingNotes         NursingNote[]
+  nursingTasks         NursingTask[]
+  administrations      MedicationAdministration[]
+  intakeOutputs        IntakeOutput[]
+  clearances           DischargeClearance[]
+  summaryVerifications DischargeSummaryVerification[]
+  departure            AdmissionDeparture?
+  turnover             BedTurnover?
+  recordCompletion     MedicalRecordCompletion?
+  recordCodes          MedicalRecordCode[]
+  recordFileMoves      MedicalRecordFileMovement[]
+  procedures           Procedure[]
+  dischargeType        DischargeType?
+  dischargeNote        String?
+  finalInvoiceId       String?                        @db.Uuid
+  wardIssues           StockLocationIssue[]
+  finalInvoice         Invoice?                       @relation("AdmissionFinalInvoice", fields: [finalInvoiceId], references: [id], onDelete: Restrict)
+  aftercareTasks       AftercareTask[]
+  patientFeedbacks     PatientFeedback[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, id])

@@ -8,6 +8,8 @@ export function middleware(req: NextRequest) {
   // A sign-in form submitted before the page finished loading must never leave a password in the address bar: drop anything like that and start again.
   if (pathname === "/login" && (req.nextUrl.searchParams.has("password") || req.nextUrl.searchParams.has("identifier"))) return NextResponse.redirect(new URL("/login", req.url));
   if (pathname === "/patient" || pathname.startsWith("/patient/")) return NextResponse.next();
+  // The patient's feedback form opens with its secret link alone.
+  if (pathname.startsWith("/feedback/")) return NextResponse.next();
   if (!has && pathname !== "/login") return NextResponse.redirect(new URL("/login", req.url));
   if (has && pathname === "/login") return NextResponse.redirect(new URL("/dashboard", req.url));
   return NextResponse.next();

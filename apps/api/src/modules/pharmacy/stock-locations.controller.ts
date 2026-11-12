@@ -4,7 +4,7 @@ import { Feature } from "../../common/feature.guard";
 import { Ctx, id, parse, RequireAnyPermission, RequirePermissions } from "../../common/http";
 import { parseIdempotencyKey } from "../../common/idempotency.service";
 import type { RequestContext } from "../../common/request-context";
-import { cancelTransferSchema, closeTransferSchema, createLocationSchema, StockLocationsService, transferListSchema, transferSchema, updateLocationSchema, wardIssueSchema } from "./stock-locations.service";
+import { cancelTransferSchema, closeTransferSchema, consumeSchema, consumptionListSchema, createLocationSchema, StockLocationsService, transferListSchema, transferSchema, updateLocationSchema, wardIssueSchema } from "./stock-locations.service";
 
 function respond(res: Response, replayed: boolean): void {
   res.status(replayed ? 200 : 201);
@@ -95,4 +95,20 @@ export class WardStoresController {
   @RequireAnyPermission("NURSING_READ", "PHARMACY_READ")
   @Get("admissions/:id/ward-store-issues")
   async issues(@Ctx() ctx: RequestContext, @Param("id") admissionId: string) { return { data: await this.locations.issuesOf(ctx, id(admissionId)) }; }
+
+  @RequirePermissions("STOCK_CONSUME")
+  @Post("procurement/consumption")
+  async consume(@Ctx() ctx: RequestContext, @Body() body: unknown, @Headers("idempotency-key") key: string | undefined, @Res({ passthrough: true }) res: Response) {
+    const { result, replayed } = await this.locations.consume(ctx, parse(consumeSchema, body), parseIdempotencyKey(key));
+    respond(res, replayed);
+    return { data: result };
+  }
+
+  @RequirePermissions("STOCK_CONSUME")
+  @Get("procurement/consumption/procedures")
+  async openProcedures(@Ctx() ctx: RequestContext) { return { data: await this.locations.openProcedures(ctx) }; }
+
+  @RequireAnyPermission("STOCK_CONSUME", "PURCHASE_READ", "PHARMACY_READ")
+  @Get("procurement/consumption")
+  async consumption(@Ctx() ctx: RequestContext, @Query() query: unknown) { return { data: await this.locations.listConsumption(ctx, parse(consumptionListSchema, query)) }; }
 }

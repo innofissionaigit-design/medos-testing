@@ -64,44 +64,47 @@ model Patient {
   createdAt              DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt              DateTime     @updatedAt @db.Timestamptz(3)
 
-  mergedInto  Patient?            @relation("PatientMerge", fields: [tenantId, mergedIntoId], references: [tenantId, id], onDelete: Restrict)
-  mergedFrom  Patient[]           @relation("PatientMerge")
-  facility    Facility            @relation(fields: [tenantId, registeredFacilityId], references: [tenantId, id], onDelete: Restrict)
-  identifiers  PatientIdentifier[]
-  encounters   Encounter[]
-  testOrders   TestOrder[]
-  testBillingLines TestBillingLine[]
-  labSamples   LabSample[]
-  labResults   LabResult[]
-  radStudies   RadStudy[]
-  policies     PatientPolicy[]
+  mergedInto          Patient?                   @relation("PatientMerge", fields: [tenantId, mergedIntoId], references: [tenantId, id], onDelete: Restrict)
+  mergedFrom          Patient[]                  @relation("PatientMerge")
+  facility            Facility                   @relation(fields: [tenantId, registeredFacilityId], references: [tenantId, id], onDelete: Restrict)
+  identifiers         PatientIdentifier[]
+  encounters          Encounter[]
+  testOrders          TestOrder[]
+  aftercareTasks      AftercareTask[]
+  patientFeedback     PatientFeedback[]
+  complaints          Complaint[]
+  testBillingLines    TestBillingLine[]
+  labSamples          LabSample[]
+  labResults          LabResult[]
+  radStudies          RadStudy[]
+  policies            PatientPolicy[]
   appointmentRequests AppointmentRequest[]
-  teleconsults Teleconsult[]
-  abhaLinks    AbhaLink[]
-  aiDrafts     AiDraft[]
-  claims       Claim[]
-  appointments Appointment[]
-  queueEntries QueueEntry[]
-  observations Observation[]
-  allergies    Allergy[]
-  diagnoses    Diagnosis[]
-  documents    ClinicalDocument[]
-  files        PatientFile[]
-  medicationOrders MedicationOrder[]
-  invoices     Invoice[]
-  dispenses    Dispense[]
-  admissions   Admission[]
-  charges      Charge[]
-  nursingNotes NursingNote[]
-  nursingTasks NursingTask[]
-  consents     PatientConsent[]
-  dataRequests PatientDataRequest[]
-  administrations MedicationAdministration[]
-  intakeOutputs IntakeOutput[]
-  advanceDeposits AdvanceDeposit[]
-  prescriptionScans PrescriptionScan[]
-  prescriptionShares PrescriptionShare[]
-  registration PatientRegistration?
+  teleconsults        Teleconsult[]
+  abhaLinks           AbhaLink[]
+  aiDrafts            AiDraft[]
+  claims              Claim[]
+  appointments        Appointment[]
+  queueEntries        QueueEntry[]
+  observations        Observation[]
+  allergies           Allergy[]
+  diagnoses           Diagnosis[]
+  documents           ClinicalDocument[]
+  files               PatientFile[]
+  medicationOrders    MedicationOrder[]
+  invoices            Invoice[]
+  dispenses           Dispense[]
+  admissions          Admission[]
+  charges             Charge[]
+  nursingNotes        NursingNote[]
+  nursingTasks        NursingTask[]
+  consents            PatientConsent[]
+  dataRequests        PatientDataRequest[]
+  administrations     MedicationAdministration[]
+  intakeOutputs       IntakeOutput[]
+  advanceDeposits     AdvanceDeposit[]
+  prescriptionScans   PrescriptionScan[]
+  prescriptionShares  PrescriptionShare[]
+  registration        PatientRegistration?
 
   @@unique([tenantId, id])
   @@index([tenantId, mobile])
@@ -200,21 +203,21 @@ enum DataRequestStatus {
 
 /// A log of requests a patient makes about their data. It tracks the request and its outcome only: nothing here erases or changes clinical records.
 model PatientDataRequest {
-  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String            @db.Uuid
-  patientId    String            @db.Uuid
-  type         DataRequestType
-  status       DataRequestStatus @default(OPEN)
-  details      String
-  receivedOn   DateTime          @db.Date
-  dueOn        DateTime?         @db.Date
-  resolution   String?
-  closedAt     DateTime?         @db.Timestamptz(3)
-  closedById   String?           @db.Uuid
-  version      Int               @default(1)
-  createdById  String            @db.Uuid
-  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime          @updatedAt @db.Timestamptz(3)
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String            @db.Uuid
+  patientId   String            @db.Uuid
+  type        DataRequestType
+  status      DataRequestStatus @default(OPEN)
+  details     String
+  receivedOn  DateTime          @db.Date
+  dueOn       DateTime?         @db.Date
+  resolution  String?
+  closedAt    DateTime?         @db.Timestamptz(3)
+  closedById  String?           @db.Uuid
+  version     Int               @default(1)
+  createdById String            @db.Uuid
+  createdAt   DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime          @updatedAt @db.Timestamptz(3)
 
   patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
 

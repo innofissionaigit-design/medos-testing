@@ -201,7 +201,7 @@ describe("booking changes: postpone and prepone, duplicate bookings, cancellatio
         ["PAID_FROM_ADVANCE", "0.00", "0.00", "-150.00"],
         ["BOOKING_FEE_GIVEN_BACK", "150.00", "0.00", "0.00"],
       ]);
-      assert.deepEqual(l.totals, { debit: "300.00", credit: "300.00", balance: "0.00" });
+      assert.deepEqual(l.totals, { debit: "300.00", credit: "300.00", balance: "0.00", insurerShare: "0.00", patientBalance: "0.00" });
     });
     it("no charge when the policy is 0%, however late", async () => {
       assert.equal((await setting("BOOKING_FEE_CANCEL_CHARGE_PERCENT", 0)).status, 200);

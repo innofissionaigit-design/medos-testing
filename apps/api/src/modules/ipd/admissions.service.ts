@@ -173,13 +173,15 @@ export class AdmissionsService {
   // ───── used by discharge ─────
 
   /** Closes the open assignment and moves the bed to the given status. */
-  async releaseBed(tx: Db, ctx: RequestContext, admissionId: string, to: "CLEANING" | "AVAILABLE", at: Date): Promise<void> {
+  /** Releases the admission's current bed; returns the bed that was released (null when there was none). */
+  async releaseBed(tx: Db, ctx: RequestContext, admissionId: string, to: "CLEANING" | "AVAILABLE", at: Date): Promise<string | null> {
     const current = await tx.bedAssignment.findFirst({ where: { tenantId: ctx.tenantId, admissionId, releasedAt: null } });
-    if (!current) return;
+    if (!current) return null;
     await this.lockBed(tx, ctx, current.bedId);
     const closed = await tx.bedAssignment.updateMany({ where: { id: current.id, tenantId: ctx.tenantId, releasedAt: null }, data: { releasedAt: at } });
     if (closed.count !== 1) throw new DomainError("INVALID_STATE", "The admission was changed by someone else", 409);
     await tx.bed.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: current.bedId } }, data: { status: to, version: { increment: 1 } } });
+    return current.bedId;
   }
 
   // ───── internals ─────

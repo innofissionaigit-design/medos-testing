@@ -9,6 +9,7 @@ A doctor sees only their own patients, records and reports. Staff assigned to de
 | Who | Sees | How it is decided |
 |---|---|---|
 | Organisation administrator | Every department, doctor, patient, record and report | Holds the permission `DATA_SCOPE_ALL` (the Administrator role has it). It wins over everything below, even for an administrator who is also a doctor. |
+| Resident medical officer (RMO) | The whole ward: every admitted patient | Holds `DATA_SCOPE_WARD` (the RMO role has it). The RMO is a registered practitioner, which would normally limit them to their own patients as consultant; this permission lifts that, so they can prepare and verify discharge summaries for any consultant's patients. They cannot sign. |
 | Doctor | Only their own patients, visits, records and reports | The login is linked to an active doctor record (practitioner) at the facility. A doctor's own record is the only scope; a department assignment does not widen it. |
 | Department staff | Only the patients, visits, admissions and reports of their departments | The user has at least one row in the department assignment (`UserDepartment`), set by an administrator. |
 | Everyone else (Reception, Cashier, Pharmacist, Nurse, Manager with no department) | What their role gives, as before | Not a doctor and no department assigned. Assigning a department to any of them limits them as above. |

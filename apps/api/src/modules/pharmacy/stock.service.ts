@@ -3,6 +3,8 @@ import { DomainError } from "@medos/shared";
 import type { Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { dateOnly, localDateStr } from "../../common/time";
+import { CostLedgerService, movementLines } from "../procurement/cost-ledger.service";
+import { Decimal } from "@medos/shared";
 
 export type StockType = "PURCHASE" | "SALE" | "PATIENT_RETURN" | "PURCHASE_RETURN" | "ADJUSTMENT" | "DAMAGE" | "TRANSFER";
 export type StockDir = "IN" | "OUT";
@@ -33,6 +35,8 @@ export interface Allocation {
  */
 @Injectable()
 export class StockService {
+  constructor(private readonly costLedger: CostLedgerService) {}
+
   async today(db: Db, ctx: RequestContext): Promise<Date> {
     const f = await db.facility.findFirstOrThrow({ where: { id: ctx.facilityId, tenantId: ctx.tenantId }, select: { timezone: true } });
     return dateOnly(localDateStr(new Date(), f.timezone));
@@ -57,12 +61,23 @@ export class StockService {
       throw new DomainError("INSUFFICIENT_STOCK", `Only ${current} unit${current === 1 ? "" : "s"} available in this batch`, 409, { available: current, requested: m.quantity });
     }
     await db.stockBalance.updateMany({ where: { batchId: m.batchId, tenantId: ctx.tenantId }, data: { quantity: next } });
-    await db.stockLedger.create({
+    const row = await db.stockLedger.create({
       data: {
         tenantId: ctx.tenantId, facilityId: ctx.facilityId, medicineId: m.medicineId, batchId: m.batchId, type: m.type, direction: m.direction,
         quantity: m.quantity, balanceAfter: next, sourceType: m.sourceType ?? null, sourceId: m.sourceId ?? null, reason: m.reason ?? null, userId: ctx.userId,
       },
+      select: { id: true },
     });
+    // The cost ledger: what is sold, returned by a patient, written off or found is posted at the batch's purchase price (purchases, supplier returns and transfers are posted where they happen).
+    if (m.type === "SALE" || m.type === "PATIENT_RETURN" || m.type === "ADJUSTMENT" || m.type === "DAMAGE") {
+      const b = await db.medicineBatch.findFirstOrThrow({ where: { id: m.batchId, tenantId: ctx.tenantId }, select: { purchasePrice: true } });
+      const cost = new Decimal(b.purchasePrice.toString()).times(m.quantity).toDecimalPlaces(2);
+      const sold = m.type === "SALE" || m.type === "PATIENT_RETURN";
+      await this.costLedger.post(db, { tenantId: ctx.tenantId, facilityId: ctx.facilityId, userId: ctx.userId }, {
+        sourceKey: `STOCK_MOVE:${row.id}`, sourceType: "StockLedger", sourceId: row.id, date: new Date(), narration: sold ? (m.type === "SALE" ? "Medicines sold" : "Medicines returned by a patient") : `Stock ${m.type === "DAMAGE" ? "written off" : m.direction === "OUT" ? "adjusted down" : "adjusted up"}${m.reason ? `: ${m.reason}` : ""}`,
+        lines: movementLines(sold ? "SOLD" : "ADJUSTED", m.direction, cost, sold ? "Pharmacy sales" : "Main store", "Main store"),
+      });
+    }
     return next;
   }
 

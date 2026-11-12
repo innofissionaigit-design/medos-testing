@@ -31,9 +31,9 @@ model PatientFile {
   removedAt    DateTime?         @db.Timestamptz(3)
   removeReason String?
 
-  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  patient          Patient               @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
   prescriptionScan PrescriptionScan?
-  scanPage PrescriptionScanPage?
+  scanPage         PrescriptionScanPage?
 
   @@unique([tenantId, id])
   @@index([tenantId, patientId, status, uploadedAt(sort: Desc)])

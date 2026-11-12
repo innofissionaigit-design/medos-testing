@@ -6,12 +6,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import clsx from "clsx";
 import { Gate } from "@/components/gate";
 import { PatientPicker, useAvailableBeds, type PickedPatient } from "@/components/pickers";
-import { Button, Card, ErrorNote, Field, Input, Modal, PageHeader, Select, Spinner, StatusBadge, Table, Tabs, Td } from "@/components/ui";
+import { Badge, Button, Card, ErrorNote, Field, Input, Modal, PageHeader, Select, Spinner, StatusBadge, Table, Tabs, Td } from "@/components/ui";
 import { api, newKey } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
 
-interface Bed { id: string; code: string; status: string; dailyRate: string; occupant: { admissionId: string; admissionNumber: string; patientName: string; mrn: string | null; since: string } | null }
+interface Bed { id: string; code: string; status: string; dailyRate: string; occupant: { admissionId: string; admissionNumber: string; patientName: string; mrn: string | null; since: string; awaitingDeparture?: boolean } | null }
 interface Board { wards: { id: string; name: string; rooms: { id: string; name: string; beds: Bed[] }[] }[]; summary: Record<string, number> }
 interface AdmissionRow { id: string; admissionNumber: string; patientName: string; mrn: string | null; consultantName: string; reason: string | null; admittedAt: string; lengthOfStayDays: number; bed: { code: string; ward: string; room: string } | null; status: string }
 
@@ -73,7 +73,7 @@ function IpdInner() {
                     {r.beds.map((b) => (
                       <div key={b.id} className={clsx("rounded-md border p-2 text-sm", BED_STYLE[b.status])}>
                         <div className="flex items-center justify-between"><b>{b.code}</b><StatusBadge value={b.status} /></div>
-                        {b.occupant ? <Link href={`/ipd/${b.occupant.admissionId}`} className="mt-1 block text-brand-700 hover:underline">{b.occupant.patientName}<div className="text-xs text-slate-600">{b.occupant.mrn} · {t("since")} {dateTime(b.occupant.since)}</div></Link> : null}
+                        {b.occupant ? <Link href={`/ipd/${b.occupant.admissionId}`} className="mt-1 block text-brand-700 hover:underline">{b.occupant.patientName}<div className="text-xs text-slate-600">{b.occupant.mrn} · {t("since")} {dateTime(b.occupant.since)}</div>{b.occupant.awaitingDeparture && <div className="mt-0.5"><Badge tone="amber">discharged, awaiting departure</Badge></div>}</Link> : null}
                         {b.status === "CLEANING" && can("NURSING_DOCUMENT", "ADMIN_MASTERS") && <button className="mt-1 text-xs text-brand-700 hover:underline" onClick={() => setStatus.mutate({ id: b.id, status: "AVAILABLE" })}>Mark clean</button>}
                       </div>
                     ))}

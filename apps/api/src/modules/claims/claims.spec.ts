@@ -1,8 +1,10 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { registerPatient, startApp, uniqueWord, type TestApp, type TestTenant } from "../../test/harness";
 import { Decimal } from "@medos/shared";
+import { CLAIM_TRANSPORT, HttpClaimTransport, type ClaimTransport } from "./claim-transport";
 import { calculateCopay, type CopayRule, hasCopayRule, nextStatus, stepsFrom, type ClaimStatus, type ClaimStep } from "./claims.domain";
 
 type User = { id: string; token: string };
@@ -65,7 +67,7 @@ describe("claims: insurers, policies, and a claim from pre-authorisation to sett
   let t: TestApp;
   let a: TestTenant;
   let b: TestTenant;
-  let officer: User; let cashier: User; let rec: User; let nurse: User; let bOfficer: User;
+  let admin: User; let officer: User; let cashier: User; let rec: User; let nurse: User; let bOfficer: User;
   let insurer: { id: string; name: string };
 
   const mkInsurer = async (tok = officer.token, name = `Star ${uniqueWord(6)}`) => { const r = await t.api("post", "/claims/insurers", tok).send({ name, kind: "TPA" }); assert.equal(r.status, 201, JSON.stringify(r.body)); return r.body.data as { id: string; name: string }; };
@@ -105,10 +107,325 @@ describe("claims: insurers, policies, and a claim from pre-authorisation to sett
   before(async () => {
     t = await startApp();
     a = await t.makeTenant("claims-a"); b = await t.makeTenant("claims-b");
-    officer = await t.makeUser(a, ["CLAIMS_OFFICER"]); cashier = await t.makeUser(a, ["CASHIER"]); rec = await t.makeUser(a, ["RECEPTIONIST"]); nurse = await t.makeUser(a, ["NURSE"]); bOfficer = await t.makeUser(b, ["CLAIMS_OFFICER"]);
+    admin = await t.makeUser(a, ["ADMINISTRATOR"]); officer = await t.makeUser(a, ["CLAIMS_OFFICER"]); cashier = await t.makeUser(a, ["CASHIER"]); rec = await t.makeUser(a, ["RECEPTIONIST"]); nurse = await t.makeUser(a, ["NURSE"]); bOfficer = await t.makeUser(b, ["CLAIMS_OFFICER"]);
     insurer = await mkInsurer();
   });
   after(async () => { await t.close(); });
+
+  it("claim package: only for a submitted claim, with the invoice lines and documents; for the claims officer only; audited; never across hospitals", async () => {
+    const s = await setup();
+    const pkg = (id: string, tok = officer.token) => t.api("get", `/claims/${id}/package`, tok);
+    assert.equal((await pkg(s.claimId)).status, 409, "a draft claim has no invoice yet, so no package");
+    assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "8000" })).status, 200);
+    const ok = await pkg(s.claimId);
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    const d = ok.body.data;
+    assert.equal(d.format, "medos-claim-package/1");
+    assert.equal(d.transmitted, false, "MedOS does not send it");
+    assert.equal(d.claim.id, s.claimId);
+    assert.equal(d.invoice.total, "10000.00");
+    assert.ok(d.invoice.lines.length >= 1);
+    assert.deepEqual(d.documents, []);
+    assert.equal((await pkg(s.claimId, cashier.token)).status, 403, "claims officer only");
+    assert.equal((await pkg(s.claimId, nurse.token)).status, 403);
+    assert.equal((await pkg(s.claimId, bOfficer.token)).status, 404, "another hospital cannot see it");
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_PACKAGE_EXPORTED", entityId: s.claimId } }), "exporting is audited");
+  });
+
+  it("payer verification: recorded with the insurer's reference; a 'not eligible' answer needs a reason and stops pre-authorisation until a new check; officer only; audited; not across hospitals", async () => {
+    const s = await setup();
+    const verify = (id: string, body: Record<string, unknown>, tok = officer.token) => post(`/claims/${id}/verification`, body, tok);
+    assert.equal((await view(s.claimId)).verification, null, "nothing recorded yet");
+    assert.equal((await verify(s.claimId, { outcome: "VERIFIED" })).status, 400, "the insurer's reference is required");
+    assert.equal((await verify(s.claimId, { outcome: "NOT_ELIGIBLE", reference: "CALL-001" })).status, 400, "a not-eligible answer needs the reason given");
+    assert.equal((await verify(s.claimId, { outcome: "MAYBE", reference: "CALL-001" })).status, 400);
+    assert.equal((await verify(s.claimId, { outcome: "VERIFIED", reference: "CALL-001", extra: 1 })).status, 400, "unexpected fields are refused");
+    assert.equal((await verify(s.claimId, { outcome: "NOT_ELIGIBLE", reference: "CALL-001", note: "Policy lapsed on 1 Oct" })).status, 200);
+    const no = (await view(s.claimId)).verification;
+    assert.deepEqual([no.outcome, no.reference, no.note], ["NOT_ELIGIBLE", "CALL-001", "Policy lapsed on 1 Oct"]);
+    assert.equal((await post(`/claims/${s.claimId}/preauth`, { requestedAmount: "9000" })).status, 409, "no pre-authorisation request on a patient the insurer said is not eligible");
+    assert.equal((await verify(s.claimId, { outcome: "VERIFIED", reference: "PORTAL-77", note: "Renewed, active" })).status, 200, "a new check replaces the old answer");
+    const yes = await view(s.claimId);
+    assert.deepEqual([yes.verification.outcome, yes.verification.reference, typeof yes.verification.by], ["VERIFIED", "PORTAL-77", "string"]);
+    assert.equal((await post(`/claims/${s.claimId}/preauth`, { requestedAmount: "9000" })).status, 200);
+    assert.equal(yes.events.filter((e: { note: string | null }) => e.note?.includes("ref ")).length, 2, "both checks stay on the timeline");
+    assert.equal((await verify(s.claimId, { outcome: "VERIFIED", reference: "X-1" }, cashier.token)).status, 403, "claims officer only");
+    assert.equal((await verify(s.claimId, { outcome: "VERIFIED", reference: "X-1" }, nurse.token)).status, 403);
+    assert.equal((await verify(s.claimId, { outcome: "VERIFIED", reference: "X-1" }, bOfficer.token)).status, 404, "another hospital cannot touch it");
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_PAYER_VERIFIED", entityId: s.claimId } }), "verification is audited");
+    const closed = await setup("REIMBURSEMENT");
+    assert.equal((await post(`/claims/${closed.claimId}/close`, { reason: "Patient withdrew" })).status, 200);
+    assert.equal((await verify(closed.claimId, { outcome: "VERIFIED", reference: "LATE-1" })).status, 409, "a finished claim is not verified again");
+  });
+
+  it("enhancement requests: asked while the pre-authorisation is approved; one at a time; approval adds to the authorised amount; rejection keeps it; decided once; blocks submission while waiting", async () => {
+    const s = await setup("CASHLESS", "20000");
+    const ask = (id: string, body: Record<string, unknown>, tok = officer.token) => post(`/claims/${id}/enhancements`, body, tok);
+    const decide = (id: string, eid: string, body: Record<string, unknown>, tok = officer.token) => post(`/claims/${id}/enhancements/${eid}/decision`, body, tok);
+    assert.equal((await ask(s.claimId, { requestedAmount: "3000", reason: "Longer ICU stay than planned" })).status, 409, "nothing is authorised yet, so there is nothing to enhance");
+    assert.equal((await post(`/claims/${s.claimId}/preauth`, { requestedAmount: "9000" })).status, 200);
+    assert.equal((await ask(s.claimId, { requestedAmount: "3000", reason: "Longer ICU stay than planned" })).status, 409, "the first pre-authorisation is still waiting");
+    assert.equal((await post(`/claims/${s.claimId}/preauth-decision`, { decision: "APPROVE", amount: "7500" })).status, 200);
+    for (const bad of [{ requestedAmount: "0", reason: "Longer ICU stay than planned" }, { requestedAmount: "-5", reason: "Longer ICU stay than planned" }, { requestedAmount: "3000", reason: "short" }, { requestedAmount: "3000" }, { requestedAmount: "3000", reason: "Longer ICU stay than planned", extra: 1 }]) assert.equal((await ask(s.claimId, bad)).status, 400, JSON.stringify(bad));
+    assert.equal((await ask(s.claimId, { requestedAmount: "3000", reason: "Longer ICU stay than planned" }, cashier.token)).status, 403, "claims officer only");
+    assert.equal((await ask(s.claimId, { requestedAmount: "3000", reason: "Longer ICU stay than planned" }, bOfficer.token)).status, 404, "another hospital cannot ask on this claim");
+    const first = await ask(s.claimId, { requestedAmount: "3000", reason: "Longer ICU stay than planned" });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const eid = first.body.data.id as string;
+    assert.equal((await ask(s.claimId, { requestedAmount: "1000", reason: "Another request while one waits" })).status, 409, "one request waits at a time");
+    assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "10000" })).status, 409, "cannot submit while the insurer has not answered");
+    assert.equal((await decide(s.claimId, eid, { decision: "APPROVE" })).status, 400, "an approval needs an amount");
+    assert.equal((await decide(s.claimId, eid, { decision: "APPROVE", amount: "3500" })).status, 400, "not more than was asked for");
+    assert.equal((await decide(s.claimId, eid, { decision: "REJECT" })).status, 400, "a rejection needs the insurer's reason");
+    assert.equal((await decide(s.claimId, eid, { decision: "APPROVE", amount: "2000" }, nurse.token)).status, 403);
+    assert.equal((await decide(s.claimId, eid, { decision: "APPROVE", amount: "2000" }, bOfficer.token)).status, 404);
+    assert.equal((await decide(s.claimId, randomUUID(), { decision: "APPROVE", amount: "2000" })).status, 404, "an unknown request");
+    const ok = await decide(s.claimId, eid, { decision: "APPROVE", amount: "2000", reason: "Approved for 2 more ICU days" });
+    assert.equal(ok.status, 200, JSON.stringify(ok.body));
+    assert.equal(ok.body.data.authorised, "9500.00", "7,500 + 2,000");
+    assert.equal((await decide(s.claimId, eid, { decision: "REJECT", reason: "Changed their mind" })).status, 409, "a decision is made once");
+    let v = await view(s.claimId);
+    assert.equal(v.preauthApproved, "9500.00");
+    assert.deepEqual(v.enhancements.map((e: { status: string; requestedAmount: string; approvedAmount: string | null }) => [e.status, e.requestedAmount, e.approvedAmount]), [["APPROVED", "3000.00", "2000.00"]]);
+    const second = await ask(s.claimId, { requestedAmount: "1500", reason: "Complication needs extra tests" });
+    assert.equal(second.status, 201, "a new request can follow a decided one");
+    assert.equal((await decide(s.claimId, second.body.data.id, { decision: "REJECT", reason: "Not covered under the plan" })).status, 200);
+    v = await view(s.claimId);
+    assert.equal(v.preauthApproved, "9500.00", "a rejection changes nothing");
+    assert.deepEqual(v.enhancements.map((e: { status: string }) => e.status), ["APPROVED", "REJECTED"]);
+    assert.ok(v.events.some((e: { note: string | null }) => e.note?.startsWith("Enhancement approved")), "on the timeline");
+    for (const action of ["CLAIM_ENHANCEMENT_REQUESTED", "CLAIM_ENHANCEMENT_APPROVED", "CLAIM_ENHANCEMENT_REJECTED"]) assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action, entityId: s.claimId } }), `${action} is audited`);
+    await assert.rejects(() => t.prisma.claimEnhancement.update({ where: { tenantId_id: { tenantId: a.tenantId, id: eid } }, data: { approvedAmount: "9999.00" } }), "a decided request cannot be changed, even directly in the database");
+    await assert.rejects(() => t.prisma.claimEnhancement.delete({ where: { tenantId_id: { tenantId: a.tenantId, id: eid } } }), "nor deleted");
+    assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "10000" })).status, 200, "with nothing waiting, the claim goes to the insurer");
+    assert.equal((await ask(s.claimId, { requestedAmount: "500", reason: "Too late, already submitted" })).status, 409, "after submission the stay is over");
+    const r = await setup("REIMBURSEMENT");
+    assert.equal((await ask(r.claimId, { requestedAmount: "500", reason: "Reimbursement has no pre-authorisation" })).status, 409, "cashless claims only");
+  });
+
+  it("non-payable items: left out of the claim and paid by the patient; changed only before submission or under query; never over the invoice; removed with a reason; officer only", async () => {
+    const s = await setup("CASHLESS", "10000");
+    const add = (id: string, body: Record<string, unknown>, tok = officer.token) => post(`/claims/${id}/non-payables`, body, tok);
+    const item = { description: "Consumables excluded by the policy", amount: "1500", reason: "Excluded in the policy schedule" };
+    for (const bad of [{ ...item, amount: "0" }, { ...item, amount: "-1" }, { ...item, description: "x" }, { ...item, reason: "no" }, { description: item.description, amount: "10" }, { ...item, extra: 1 }]) assert.equal((await add(s.claimId, bad)).status, 400, JSON.stringify(bad));
+    assert.equal((await add(s.claimId, item, cashier.token)).status, 403, "claims officer only");
+    assert.equal((await add(s.claimId, item, bOfficer.token)).status, 404, "another hospital cannot add to this claim");
+    const one = await add(s.claimId, item);
+    assert.equal(one.status, 201, JSON.stringify(one.body));
+    assert.equal((await view(s.claimId)).nonPayableTotal, "1500.00");
+    const prev = (await post(`/claims/${s.claimId}/copay-preview`, { invoiceId: s.invoiceId })).body.data;
+    assert.deepEqual([prev.hasRule, prev.invoiceAmount, prev.nonPayable, prev.mostToClaim], [false, "10000.00", "1500.00", "8500.00"]);
+    assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "9000" })).status, 400, "cannot claim what the insurer will not pay");
+    assert.equal((await post(`/claims/${s.claimId}/submit`, { invoiceId: s.invoiceId, claimedAmount: "8500" })).status, 200);
+    assert.equal((await add(s.claimId, item)).status, 409, "once submitted the items are fixed");
+    assert.equal((await post(`/claims/${s.claimId}/query`, { note: "Please explain the room charges" })).status, 200);
+    assert.equal((await add(s.claimId, { description: "Admission kit", amount: "500", reason: "Excluded in the policy schedule" })).status, 201, "while the claim is under query items can be added");
+    assert.equal((await post(`/claims/${s.claimId}/resubmit`, { note: "Replied with the room tariff", claimedAmount: "8500" })).status, 400, "the claim must come down to what can still be claimed");
+    assert.equal((await post(`/claims/${s.claimId}/resubmit`, { note: "Replied; admission kit not payable", claimedAmount: "8000" })).status, 200);
+    assert.equal((await view(s.claimId)).claimedAmount, "8000.00");
+    assert.equal((await add(s.claimId, item)).status, 409);
+
+    const r = await setup("CASHLESS", "1000");
+    assert.equal((await add(r.claimId, { description: "Everything", amount: "1000.01", reason: "Excluded in the policy schedule" })).status, 201, "before an invoice is attached there is nothing to compare with");
+    assert.equal((await post(`/claims/${r.claimId}/submit`, { invoiceId: r.invoiceId, claimedAmount: "100" })).status, 400, "non-payable items above the invoice stop submission");
+    const gone = await add(r.claimId, { description: "Wrong entry", amount: "5", reason: "Excluded in the policy schedule" });
+    const goneId = gone.body.data.id as string;
+    assert.equal((await post(`/claims/${r.claimId}/non-payables/${goneId}/remove`, { reason: "x" })).status, 400, "a reason is needed");
+    assert.equal((await post(`/claims/${r.claimId}/non-payables/${goneId}/remove`, { reason: "Entered on the wrong claim" }, cashier.token)).status, 403);
+    assert.equal((await post(`/claims/${r.claimId}/non-payables/${goneId}/remove`, { reason: "Entered on the wrong claim" })).status, 200);
+    assert.equal((await post(`/claims/${r.claimId}/non-payables/${goneId}/remove`, { reason: "Entered on the wrong claim" })).status, 409, "already removed");
+    const shown = (await view(r.claimId)).nonPayables as { id: string; status: string }[];
+    assert.deepEqual(shown.map((n) => n.status), ["ACTIVE", "REMOVED"], "a removed item stays on the record");
+    await assert.rejects(() => t.prisma.claimNonPayable.delete({ where: { tenantId_id: { tenantId: a.tenantId, id: goneId } } }), "never deleted, even directly in the database");
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_NON_PAYABLE_REMOVED", entityId: r.claimId } }));
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_NON_PAYABLE_ADDED", entityId: s.claimId } }));
+  });
+
+  it("non-payable items with a co-pay rule: the percentage applies to what is payable; the patient bears the non-payable items plus the co-pay", async () => {
+    const patient = await registerPatient(t, rec.token);
+    const pol = await policy(patient.id, { copayPercent: "10" });
+    const c = await post("/claims", { patientId: patient.id, policyId: pol.body.data.id, type: "CASHLESS" });
+    const invoiceId = await issued(patient.id, "10000");
+    assert.equal((await post(`/claims/${c.body.data.id}/non-payables`, { description: "Excluded implant accessories", amount: "2000", reason: "Excluded in the policy schedule" })).status, 201);
+    const prev = (await post(`/claims/${c.body.data.id}/copay-preview`, { invoiceId })).body.data;
+    assert.deepEqual([prev.nonPayable, prev.copayAmount, prev.claimAmount, prev.patientShare], ["2000.00", "800.00", "7200.00", "2800.00"]);
+    assert.equal((await post(`/claims/${c.body.data.id}/submit`, { invoiceId })).status, 200);
+    const v = await view(c.body.data.id);
+    assert.deepEqual([v.claimedAmount, v.copay.patientShare], ["7200.00", "2800.00"], "patient share = non-payable 2,000 + co-pay 800");
+  });
+
+  it("appeals: only against a claim rejected after submission; one at a time; overturned means approved again and settlement follows; upheld stays rejected; decided once; the database refuses any other reopening", async () => {
+    const rejected = async () => {
+      const s = await submitted();
+      assert.equal((await post(`/claims/${s.claimId}/decision`, { decision: "REJECT", reason: "Pre-existing condition" })).status, 200);
+      return s;
+    };
+    const appeal = (id: string, body: Record<string, unknown>, tok = officer.token) => post(`/claims/${id}/appeals`, body, tok);
+    const decide = (id: string, aid: string, body: Record<string, unknown>, tok = officer.token) => post(`/claims/${id}/appeals/${aid}/decision`, body, tok);
+    const reason = "Records show the condition was declared and covered";
+
+    const live = await submitted();
+    assert.equal((await appeal(live.claimId, { reason })).status, 409, "a claim still with the insurer is not appealed");
+    const early = await setup("CASHLESS");
+    await post(`/claims/${early.claimId}/preauth`, { requestedAmount: "5000" });
+    await post(`/claims/${early.claimId}/preauth-decision`, { decision: "REJECT", reason: "Waiting period not over" });
+    assert.equal((await appeal(early.claimId, { reason })).status, 409, "a refused pre-authorisation is not appealed; start a new claim");
+
+    const s = await rejected();
+    for (const bad of [{ reason: "short" }, {}, { reason, extra: 1 }]) assert.equal((await appeal(s.claimId, bad)).status, 400, JSON.stringify(bad));
+    assert.equal((await appeal(s.claimId, { reason }, cashier.token)).status, 403, "claims officer only");
+    assert.equal((await appeal(s.claimId, { reason }, bOfficer.token)).status, 404, "another hospital cannot appeal this claim");
+    const first = await appeal(s.claimId, { reason });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    const aid = first.body.data.id as string;
+    assert.equal((await appeal(s.claimId, { reason })).status, 409, "one appeal waits at a time");
+    assert.equal((await decide(s.claimId, aid, { decision: "OVERTURN" })).status, 400, "needs the amount now approved");
+    assert.equal((await decide(s.claimId, aid, { decision: "OVERTURN", amount: "8000.01" })).status, 400, "not more than was claimed");
+    assert.equal((await decide(s.claimId, aid, { decision: "UPHOLD" })).status, 400, "an upheld rejection needs their reason");
+    assert.equal((await decide(s.claimId, aid, { decision: "OVERTURN", amount: "6000" }, nurse.token)).status, 403);
+    assert.equal((await decide(s.claimId, aid, { decision: "OVERTURN", amount: "6000" }, bOfficer.token)).status, 404);
+    assert.equal((await decide(s.claimId, randomUUID(), { decision: "OVERTURN", amount: "6000" })).status, 404);
+    const win = await decide(s.claimId, aid, { decision: "OVERTURN", amount: "6000", reason: "Reviewed by the medical board" });
+    assert.equal(win.status, 200, JSON.stringify(win.body));
+    assert.equal((await decide(s.claimId, aid, { decision: "UPHOLD", reason: "Changed their mind" })).status, 409, "decided once");
+    const v = await view(s.claimId);
+    assert.deepEqual([v.status, v.approvedAmount, v.closeReason, v.appeals.map((x: { status: string }) => x.status)], ["APPROVED", "6000.00", null, ["OVERTURNED"]]);
+    assert.ok(v.events.some((e: { from: string | null; to: string }) => e.from === "REJECTED" && e.to === "APPROVED"), "the reversal is on the timeline");
+    const paid = await settle(s.claimId, "6000");
+    assert.equal(paid.status, 201, JSON.stringify(paid.body));
+    assert.equal((await view(s.claimId)).status, "SETTLED", "the normal settlement follows");
+    assert.equal((await invoice(s.invoiceId)).paidTotal, "6000.00");
+
+    const u = await rejected();
+    const lost = await appeal(u.claimId, { reason });
+    assert.equal((await decide(u.claimId, lost.body.data.id, { decision: "UPHOLD", reason: "Exclusion applies" })).status, 200);
+    const again = await view(u.claimId);
+    assert.deepEqual([again.status, again.appeals.map((x: { status: string }) => x.status)], ["REJECTED", ["UPHELD"]]);
+    assert.equal((await appeal(u.claimId, { reason: "A second review with new reports" })).status, 201, "a new appeal can follow a lost one");
+    await assert.rejects(() => t.prisma.claim.update({ where: { tenantId_id: { tenantId: a.tenantId, id: u.claimId } }, data: { status: "APPROVED", approvedAmount: "100.00" } }), "no appeal was overturned, so the database refuses to reopen the claim");
+    await assert.rejects(() => t.prisma.claimAppeal.update({ where: { tenantId_id: { tenantId: a.tenantId, id: lost.body.data.id } }, data: { status: "OVERTURNED", approvedAmount: "100.00" } }), "a decided appeal cannot change");
+    for (const action of ["CLAIM_APPEAL_REQUESTED", "CLAIM_APPEAL_OVERTURNED", "CLAIM_APPEAL_UPHELD"]) assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action } }), `${action} is audited`);
+  });
+
+  it("tax deducted at source: cash plus TDS settle the claim; the invoice is credited with both; the TDS is posted as a marked 'other' payment; nothing exceeds the approved amount", async () => {
+    const s = await approved("6000");
+    const paid = (body: Record<string, unknown>, k = key()) => t.api("post", `/claims/${s.claimId}/settlements`, officer.token).set("Idempotency-Key", k).send({ reference: `UTR${uniqueWord(8)}`, receivedOn: iso(0), ...body });
+    assert.equal((await paid({ amount: "100", tdsAmount: "-1" })).status, 400, "TDS cannot be negative");
+    assert.equal((await paid({ amount: "100", tdsAmount: "10.123" })).status, 400);
+    assert.equal((await paid({ amount: "5500", tdsAmount: "600" })).status, 409, "cash and TDS together cannot pass the approved amount");
+    const k = key();
+    const body = { amount: "3500", tdsAmount: "400", reference: "UTR-TDS-0001" };
+    const first = await paid(body, k);
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    assert.equal(first.body.data.settledAmount, "3900.00", "cash and TDS both count");
+    assert.equal(first.body.data.outstanding, "2100.00");
+    assert.equal((await paid(body, k)).status, 200, "a retry with the same key replays and posts nothing twice");
+    const last = await paid({ amount: "2000", tdsAmount: "100" });
+    assert.equal(last.status, 201, JSON.stringify(last.body));
+    const v = await view(s.claimId);
+    assert.deepEqual([v.status, v.settledAmount, v.outstanding], ["SETTLED", "6000.00", "0.00"]);
+    assert.deepEqual(v.settlements.map((x: { amount: string; tdsAmount: string }) => [x.amount, x.tdsAmount]), [["3500.00", "400.00"], ["2000.00", "100.00"]]);
+    assert.equal((await invoice(s.invoiceId)).paidTotal, "6000.00", "the invoice is credited with cash plus tax deducted");
+    const pays = await t.prisma.payment.findMany({ where: { tenantId: a.tenantId, receipt: { invoiceId: s.invoiceId } }, select: { method: true, amount: true, reference: true } });
+    const tds = pays.filter((x) => x.method === "OTHER");
+    assert.deepEqual(tds.map((x) => x.amount.toString()).sort(), ["100", "400"]);
+    assert.ok(tds.every((x) => x.reference?.startsWith("TDS ")), "marked as TDS");
+    assert.equal(pays.filter((x) => x.method === "BANK_TRANSFER").reduce((n, x) => n + Number(x.amount), 0), 5500);
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_SETTLEMENT_RECEIVED", entityId: s.claimId, metadata: { path: ["tds"], equals: "400.00" } } }), "the audit trail shows the TDS");
+  });
+
+  it("several invoices on one claim: claimed together, held by this claim only, money allocated main invoice first; more can join while under query", async () => {
+    const patient = await registerPatient(t, rec.token);
+    const pol = await policy(patient.id);
+    const mk = async () => (await post("/claims", { patientId: patient.id, policyId: pol.body.data.id, type: "REIMBURSEMENT" })).body.data.id as string;
+    const inv1 = await issued(patient.id, "6000"); const inv2 = await issued(patient.id, "4000"); const inv3 = await issued(patient.id, "1000");
+    const claimId = await mk();
+    assert.equal((await post(`/claims/${claimId}/submit`, { invoiceId: inv1, extraInvoiceIds: [inv1], claimedAmount: "1000" })).status, 400, "the main invoice is not repeated");
+    assert.equal((await post(`/claims/${claimId}/submit`, { invoiceId: inv1, extraInvoiceIds: [inv2], claimedAmount: "10000.01" })).status, 400, "not more than the invoices together");
+    assert.equal((await post(`/claims/${claimId}/submit`, { invoiceId: inv1, extraInvoiceIds: [randomUUID()], claimedAmount: "100" })).status, 404, "an unknown invoice");
+    const prev = (await post(`/claims/${claimId}/copay-preview`, { invoiceId: inv1, extraInvoiceIds: [inv2] })).body.data;
+    assert.deepEqual([prev.invoiceAmount, prev.mostToClaim], ["10000.00", "10000.00"]);
+    assert.equal((await post(`/claims/${claimId}/submit`, { invoiceId: inv1, extraInvoiceIds: [inv2], claimedAmount: "9000" })).status, 200);
+    const other = await mk();
+    assert.equal((await post(`/claims/${other}/submit`, { invoiceId: inv2, claimedAmount: "100" })).status, 409, "an invoice on another live claim cannot be claimed again");
+    const v = await view(claimId);
+    assert.deepEqual(v.extraInvoices.map((x: { id: string }) => x.id), [inv2]);
+    assert.equal((await post(`/claims/${claimId}/invoices`, { invoiceId: inv3 })).status, 409, "only while under query");
+    assert.equal((await post(`/claims/${claimId}/query`, { note: "Send the pharmacy bill too" })).status, 200);
+    assert.equal((await post(`/claims/${claimId}/invoices`, { invoiceId: inv3 }, cashier.token)).status, 403, "claims officer only");
+    assert.equal((await post(`/claims/${claimId}/invoices`, { invoiceId: inv3 }, bOfficer.token)).status, 404, "another hospital");
+    assert.equal((await post(`/claims/${claimId}/invoices`, { invoiceId: inv1 })).status, 400, "already the main invoice");
+    assert.equal((await post(`/claims/${claimId}/invoices`, { invoiceId: inv3 })).status, 201);
+    assert.equal((await post(`/claims/${claimId}/invoices`, { invoiceId: inv3 })).status, 409, "already on this claim");
+    assert.equal((await post(`/claims/${claimId}/resubmit`, { note: "Added the pharmacy bill", claimedAmount: "11000.01" })).status, 400);
+    assert.equal((await post(`/claims/${claimId}/resubmit`, { note: "Added the pharmacy bill", claimedAmount: "10500" })).status, 200);
+    assert.equal((await post(`/claims/${claimId}/decision`, { decision: "APPROVE", approvedAmount: "10500" })).status, 200);
+    const pay = await settle(claimId, "10500");
+    assert.equal(pay.status, 201, JSON.stringify(pay.body));
+    assert.deepEqual([(await invoice(inv1)).paidTotal, (await invoice(inv2)).paidTotal, (await invoice(inv3)).paidTotal], ["6000.00", "4000.00", "500.00"], "main invoice first, then the others in the order they joined");
+    assert.equal((await view(claimId)).status, "SETTLED");
+    const pkg = (await t.api("get", `/claims/${claimId}/package`, officer.token)).body.data;
+    assert.equal(pkg.extraInvoices.length, 2, "the claim package carries every invoice");
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_INVOICE_ADDED", entityId: claimId } }));
+    await assert.rejects(() => t.prisma.claimInvoice.deleteMany({ where: { tenantId: a.tenantId, claimId } }), "a link is never removed, even directly in the database");
+  });
+
+  it("insurer rate cards and packages: rates set by the claims officer; a line above the insurer's rate has its excess left to the patient; a package caps the claim; claims keep the package price they chose", async () => {
+    const mkService = async (price: number) => (await t.api("post", "/services", admin.token).send({ code: `rc${uniqueWord(5)}`, name: `Rate test ${uniqueWord(4)}`, category: "INVESTIGATION", price, taxPercent: "0" })).body.data.id as string;
+    const svc = await mkService(1000);
+    const ins = await mkInsurer(officer.token, `Rates ${uniqueWord(6)}`);
+    const put = (insurerId: string, serviceId: string, body: Record<string, unknown>, tok = officer.token) => t.api("put", `/claims/insurers/${insurerId}/rates/${serviceId}`, tok).send(body);
+    assert.equal((await put(ins.id, svc, { price: "800" }, cashier.token)).status, 403, "rate cards are set by the claims masters role");
+    assert.equal((await put(ins.id, svc, { price: "-1" })).status, 400);
+    assert.equal((await put(ins.id, randomUUID(), { price: "800" })).status, 404);
+    assert.equal((await put(ins.id, svc, { price: "800" }, bOfficer.token)).status, 404, "another hospital cannot set this insurer's rates");
+    assert.equal((await put(ins.id, svc, { price: "900" })).status, 200);
+    assert.equal((await put(ins.id, svc, { price: "800" })).status, 200, "a rate can be changed");
+    const list = (await t.api("get", `/claims/insurers/${ins.id}/rates`, cashier.token)).body.data;
+    assert.deepEqual(list.map((r: { price: string; standardPrice: string }) => [r.price, r.standardPrice]), [["800.00", "1000.00"]]);
+    assert.equal((await t.api("get", `/claims/insurers/${ins.id}/rates`, bOfficer.token)).status, 404);
+
+    const patient = await registerPatient(t, rec.token);
+    const pol = await t.api("post", `/patients/${patient.id}/policies`, officer.token).send({ insurerId: ins.id, policyNumber: `POL-${uniqueWord(6)}`, validFrom: iso(-30), validTo: iso(300), sumInsured: "500000" });
+    const c = await post("/claims", { patientId: patient.id, policyId: pol.body.data.id, type: "REIMBURSEMENT" });
+    const claimId = c.body.data.id as string;
+    const d = await t.api("post", "/invoices", cashier.token).send({ patientId: patient.id, lines: [{ serviceId: svc, quantity: 2 }, { description: "Room charges", unitPrice: "3000", taxPercent: 0, quantity: 1 }] });
+    assert.equal((await t.api("post", `/invoices/${d.body.data.id}/issue`, cashier.token)).status, 200);
+    const invoiceId = d.body.data.id as string;
+    const chk = (await t.api("get", `/claims/${claimId}/rate-check?invoiceId=${invoiceId}`, officer.token)).body.data;
+    assert.equal(chk.totalExcess, "400.00", "(1000 - 800) x 2; the line with no rate is not touched");
+    assert.equal(chk.lines.length, 1);
+    assert.equal((await t.api("get", `/claims/${claimId}/rate-check?invoiceId=${invoiceId}`, cashier.token)).status, 403);
+    assert.equal((await post(`/claims/${claimId}/rate-check/apply`, { invoiceId })).body.data.added, 1);
+    assert.equal((await post(`/claims/${claimId}/rate-check/apply`, { invoiceId })).body.data.added, 0, "running it again adds nothing");
+    const v = await view(claimId);
+    assert.equal(v.nonPayableTotal, "400.00");
+    assert.equal((await post(`/claims/${claimId}/submit`, { invoiceId, claimedAmount: "5000" })).status, 400, "5,000 invoice - 400 above the insurer's rate = 4,600 at most");
+
+    const pk = (id: string, body: Record<string, unknown>, tok = officer.token) => t.api("post", `/claims/insurers/${id}/packages`, tok).send(body);
+    assert.equal((await pk(ins.id, { code: "HERNIA", name: "Hernia repair", price: "0" })).status, 400);
+    assert.equal((await pk(ins.id, { code: "HERNIA", name: "Hernia repair", price: "3000" }, cashier.token)).status, 403);
+    const made = await pk(ins.id, { code: "HERNIA", name: "Hernia repair", price: "3000" });
+    assert.equal(made.status, 201, JSON.stringify(made.body));
+    assert.equal((await pk(ins.id, { code: "HERNIA", name: "Again", price: "10" })).status, 409, "one package per code");
+    assert.equal((await pk(ins.id, { code: "X", name: "Other hospital", price: "10" }, bOfficer.token)).status, 404);
+    const pid = made.body.data.id as string;
+    const tariff = (body: Record<string, unknown>, id = claimId, tok = officer.token) => post(`/claims/${id}/tariff-package`, body, tok);
+    assert.equal((await tariff({ packageId: randomUUID() })).status, 404, "an unknown package");
+    assert.equal((await tariff({ packageId: pid }, claimId, cashier.token)).status, 403);
+    assert.equal((await tariff({ packageId: pid })).status, 200);
+    assert.equal((await view(claimId)).package.price, "3000.00");
+    assert.equal((await t.api("put", `/claims/insurers/${ins.id}/packages/${pid}`, officer.token).send({ price: "3500" })).status, 200, "a package price can change");
+    assert.equal((await view(claimId)).package.price, "3000.00", "a claim keeps the price it chose the package at");
+    assert.equal((await post(`/claims/${claimId}/submit`, { invoiceId, claimedAmount: "3000.01" })).status, 400, "never more than the package price");
+    assert.equal((await post(`/claims/${claimId}/submit`, { invoiceId, claimedAmount: "3000" })).status, 200);
+    assert.equal((await tariff({ packageId: null })).status, 409, "the package is fixed once submitted");
+    const other = await t.api("post", `/claims/insurers`, officer.token).send({ name: `Other ${uniqueWord(6)}`, kind: "INSURER" });
+    const alien = await pk(other.body.data.id, { code: "ALIEN", name: "Another insurer's package", price: "1000" });
+    const c2 = await post("/claims", { patientId: patient.id, policyId: pol.body.data.id, type: "REIMBURSEMENT" });
+    assert.equal((await tariff({ packageId: alien.body.data.id }, c2.body.data.id)).status, 404, "a claim can only use its own insurer's packages");
+    for (const action of ["INSURER_RATE_SET", "INSURER_PACKAGE_ADDED", "INSURER_PACKAGE_UPDATED", "CLAIM_PACKAGE_CHOSEN"]) assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action } }), `${action} is audited`);
+  });
 
   it("insurers: the claims officer sets them up; others may only look; names are unique; another hospital's list is its own", async () => {
     assert.equal((await t.api("get", "/claims/insurers", cashier.token)).status, 200);
@@ -541,5 +858,123 @@ describe("claims: insurers, policies, and a claim from pre-authorisation to sett
   it("the claims officer role exists with what it needs", async () => {
     const r = await t.prisma.role.findFirstOrThrow({ where: { tenantId: a.tenantId, name: "CLAIMS_OFFICER", isSystem: true }, include: { permissions: true } });
     for (const p of ["CLAIM_READ", "CLAIM_MANAGE", "CLAIM_SETTLE", "CLAIM_MASTERS"]) assert.ok(r.permissions.some((x) => x.permission === p), p);
+  });
+  it("standard-format exchange: a FHIR eligibility request, pre-authorisation and claim built from the claim; downloaded as FHIR or CSV; sent through the insurer channel, every attempt recorded", async () => {
+    const s = await submitted("CASHLESS", "10000", "8000");
+    const get = (path: string, tok = officer.token) => t.api("get", path, tok);
+
+    // The eligibility request: patient, cover, insurer and hospital, no clinical notes.
+    const el = await get(`/claims/${s.claimId}/eligibility-request`);
+    assert.equal(el.status, 200, JSON.stringify(el.body));
+    const types = (el.body.data.entry as { resource: { resourceType: string } }[]).map((e) => e.resource.resourceType);
+    assert.deepEqual(types, ["CoverageEligibilityRequest", "Patient", "Coverage", "Organization", "Organization"]);
+    const request = el.body.data.entry[0].resource;
+    assert.equal(request.status, "active");
+    assert.ok(request.purpose.includes("benefits"));
+    assert.equal(request.patient.reference, `Patient/${s.patient.id}`);
+    const cover = el.body.data.entry[2].resource;
+    assert.ok(cover.identifier[0].value, "the policy number");
+    assert.match(cover.period.start, /^\d{4}-\d{2}-\d{2}$/);
+
+    // The claim: the billed lines become items, the claimed amount is the total.
+    const exp = await get(`/claims/${s.claimId}/export?format=fhir`);
+    assert.equal(exp.status, 200);
+    assert.match(String(exp.headers["content-type"]), /application\/fhir\+json/);
+    const bundle = JSON.parse(exp.text) as { resourceType: string; entry: { resource: Record<string, unknown> }[] };
+    assert.equal(bundle.resourceType, "Bundle");
+    const claim = bundle.entry[0]!.resource as { resourceType: string; use: string; item: { sequence: number; net: { value: number } }[]; total: { value: number; currency: string }; diagnosis: unknown[] };
+    assert.equal(claim.resourceType, "Claim");
+    assert.equal(claim.use, "claim");
+    assert.equal(claim.total.value, 8000);
+    assert.equal(claim.total.currency, "INR");
+    assert.ok(claim.item.length >= 1);
+    assert.equal(claim.item[0]!.sequence, 1);
+    assert.equal(claim.diagnosis.length, 1);
+    assert.equal(JSON.stringify(bundle).includes("passwordHash"), false);
+    const pre = JSON.parse((await get(`/claims/${s.claimId}/export?format=fhir&stage=PREAUTH`)).text);
+    assert.equal(pre.entry[0].resource.use, "preauthorization");
+
+    // CSV for a portal upload: one row per billed line.
+    const csv = await get(`/claims/${s.claimId}/export?format=csv&download=1`);
+    assert.equal(csv.status, 200);
+    assert.match(String(csv.headers["content-type"]), /text\/csv/);
+    assert.match(String(csv.headers["content-disposition"]), /attachment; filename="claim-.*\.csv"/);
+    const rows = csv.text.trim().split("\r\n");
+    assert.match(rows[0]!, /^claim_number,stage,insurer,/);
+    assert.equal(rows.length - 1, claim.item.length);
+    assert.equal((await get(`/claims/${s.claimId}/export?format=xml`)).status, 400);
+    assert.equal((await get(`/claims/${s.claimId}/export?bogus=1`)).status, 400);
+
+    // Permissions and hospital isolation.
+    assert.equal((await get(`/claims/${s.claimId}/export`, nurse.token)).status, 403);
+    assert.equal((await get(`/claims/${s.claimId}/eligibility-request`, bOfficer.token)).status, 404);
+    assert.equal((await get(`/claims/${s.claimId}/export`, bOfficer.token)).status, 404);
+    assert.equal((await get(`/claims/${s.claimId}/transmissions`, bOfficer.token)).status, 404);
+    assert.equal((await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM" }, bOfficer.token)).status, 404);
+    assert.equal((await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM" }, rec.token)).status, 403);
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_EXPORTED", entityId: s.claimId } }));
+
+    // Sending with no channel set up: recorded as not sent, and says why.
+    const none = await post(`/claims/${s.claimId}/transmit`, { kind: "ELIGIBILITY" });
+    assert.equal(none.status, 200, JSON.stringify(none.body));
+    assert.equal(none.body.data.status, "NOT_SENT");
+    assert.match(none.body.data.detail, /nothing was sent/i);
+    assert.equal((await post(`/claims/${s.claimId}/transmit`, { kind: "BOGUS" })).status, 400);
+    assert.equal((await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM", extra: 1 })).status, 400);
+
+    // Through a real HTTP channel: the FHIR bundle is posted with the key, the insurer's reference is kept, a refusal or an outage is recorded and never lost.
+    const seen: { body: string; auth: string | undefined; type: string | undefined; kind: string | undefined }[] = [];
+    let mode: "ok" | "refuse" = "ok";
+    const server = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => { body += c; });
+      req.on("end", () => {
+        seen.push({ body, auth: req.headers["authorization"], type: req.headers["content-type"], kind: req.headers["x-medos-kind"] as string | undefined });
+        if (mode === "refuse") { res.writeHead(422, { "content-type": "application/json" }); res.end("{}"); return; }
+        res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify({ id: "INS-REF-7788" }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    const transport = t.app.get<ClaimTransport>(CLAIM_TRANSPORT);
+    const original = transport.send.bind(transport);
+    const http = new HttpClaimTransport({ url: `http://127.0.0.1:${port}/claims`, apiKey: "test-key-123", timeoutMs: 3000, production: false });
+    Object.assign(transport, { send: (m: Parameters<ClaimTransport["send"]>[0]) => http.send(m) });
+    try {
+      const sent = await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM" });
+      assert.equal(sent.status, 200, JSON.stringify(sent.body));
+      assert.equal(sent.body.data.status, "SENT");
+      assert.equal(sent.body.data.httpStatus, 200);
+      assert.equal(sent.body.data.externalRef, "INS-REF-7788");
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0]!.auth, "Bearer test-key-123");
+      assert.match(String(seen[0]!.type), /application\/fhir\+json/);
+      assert.equal(seen[0]!.kind, "CLAIM");
+      assert.equal((JSON.parse(seen[0]!.body) as { resourceType: string }).resourceType, "Bundle");
+      mode = "refuse";
+      const refused = await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM" });
+      assert.equal(refused.body.data.status, "FAILED");
+      assert.equal(refused.body.data.httpStatus, 422);
+      assert.match(refused.body.data.detail, /HTTP 422/);
+    } finally { Object.assign(transport, { send: original }); await new Promise<void>((resolve) => server.close(() => resolve())); }
+    const down = await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM" }); // the channel is back to "log"
+    assert.equal(down.body.data.status, "NOT_SENT");
+    Object.assign(transport, { send: () => new HttpClaimTransport({ url: `http://127.0.0.1:${port}/claims`, apiKey: undefined, timeoutMs: 1500, production: false }).send({ kind: "CLAIM", reference: "x", payload: {} }) });
+    try {
+      const unreachable = await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM" });
+      assert.equal(unreachable.status, 200, JSON.stringify(unreachable.body));
+      assert.equal(unreachable.body.data.status, "FAILED");
+      assert.match(unreachable.body.data.detail, /could not be reached|did not answer/);
+    } finally { Object.assign(transport, { send: original }); }
+
+    // The history keeps every attempt, never edited, without the content or the key.
+    const hist = (await get(`/claims/${s.claimId}/transmissions`)).body.data as { status: string; payloadHash?: string }[];
+    assert.deepEqual(hist.map((h) => h.status).sort(), ["FAILED", "FAILED", "NOT_SENT", "NOT_SENT", "SENT"].sort());
+    assert.equal(JSON.stringify(hist).includes("test-key-123"), false);
+    await assert.rejects(() => t.prisma.claimTransmission.updateMany({ where: { claimId: s.claimId }, data: { status: "SENT" } }), "a record of what was sent is never edited");
+    await assert.rejects(() => t.prisma.claimTransmission.deleteMany({ where: { claimId: s.claimId } }));
+    assert.ok(await t.prisma.auditEvent.findFirst({ where: { tenantId: a.tenantId, action: "CLAIM_TRANSMITTED", entityId: s.claimId } }));
+    assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "Closed for the test of finished claims" })).status, 200);
+    assert.equal((await post(`/claims/${s.claimId}/transmit`, { kind: "CLAIM" })).status, 409, "a closed claim is not sent");
   });
 });

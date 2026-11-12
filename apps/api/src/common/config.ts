@@ -68,6 +68,11 @@ const schema = z.object({
   MESSAGE_PROVIDER: z.enum(["log", "http"]).default("log"),
   MESSAGE_API_URL: z.string().url().optional(),
   MESSAGE_API_KEY: z.string().min(1).optional(),
+  // Insurer channel (docs/claims.md). "log" (default) only records what would be sent; "http" posts each FHIR message to CLAIM_API_URL (CLAIM_API_KEY, or CLAIM_API_KEY_FILE, as a bearer token).
+  CLAIM_TRANSPORT: z.enum(["log", "http"]).default("log"),
+  CLAIM_API_URL: z.string().url().optional(),
+  CLAIM_API_KEY: z.string().min(1).optional(),
+  CLAIM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(15_000),
   MESSAGE_TIMEOUT_MS: z.coerce.number().int().min(1000).max(60_000).default(10_000),
   // Email (docs/email.md). "log" records what would be sent and sends nothing; "http" posts each email to EMAIL_API_URL (EMAIL_API_KEY, or EMAIL_API_KEY_FILE, is sent as a bearer token).
   // EMAIL_FROM_ADDRESS is the sender address the hospital has verified with its email service (SPF, DKIM and DMARC are set in DNS, not here).
@@ -92,6 +97,7 @@ const checked = schema.superRefine((c, ctx) => {
   if (c.STORAGE_DRIVER === "s3" && !c.S3_BUCKET) ctx.addIssue({ code: "custom", path: ["S3_BUCKET"], message: "is required when STORAGE_DRIVER=s3" });
   if (c.STORAGE_DRIVER === "s3" && !c.S3_REGION) ctx.addIssue({ code: "custom", path: ["S3_REGION"], message: "is required when STORAGE_DRIVER=s3" });
   if (c.OCR_PROVIDER === "http" && !c.OCR_API_URL) ctx.addIssue({ code: "custom", path: ["OCR_API_URL"], message: "OCR_API_URL is required when OCR_PROVIDER=http" });
+  if (c.CLAIM_TRANSPORT === "http" && !c.CLAIM_API_URL) ctx.addIssue({ code: "custom", path: ["CLAIM_API_URL"], message: "CLAIM_API_URL is required when CLAIM_TRANSPORT=http" });
   if (c.MESSAGE_PROVIDER === "http" && !c.MESSAGE_API_URL) ctx.addIssue({ code: "custom", path: ["MESSAGE_API_URL"], message: "MESSAGE_API_URL is required when MESSAGE_PROVIDER=http" });
   if (c.EMAIL_PROVIDER === "http" && !c.EMAIL_API_URL) ctx.addIssue({ code: "custom", path: ["EMAIL_API_URL"], message: "EMAIL_API_URL is required when EMAIL_PROVIDER=http" });
   if (c.EMAIL_PROVIDER === "http" && !c.EMAIL_FROM_ADDRESS) ctx.addIssue({ code: "custom", path: ["EMAIL_FROM_ADDRESS"], message: "EMAIL_FROM_ADDRESS is required when EMAIL_PROVIDER=http" });
@@ -118,7 +124,7 @@ const checked = schema.superRefine((c, ctx) => {
 const PLACEHOLDER_SECRET = /change-?me|dev-only|ci-only|e2e-only|unit-test|test-access|example|password|x{8,}/i;
 
 /** Settings that may instead be given as `<NAME>_FILE`, the path of a file holding the value (Docker and Kubernetes secrets). */
-const FILE_SECRETS = ["DATABASE_URL", "JWT_ACCESS_SECRET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "OCR_API_KEY", "MESSAGE_API_KEY", "EMAIL_API_KEY", "SECRETS_ENCRYPTION_KEY"] as const;
+const FILE_SECRETS = ["DATABASE_URL", "JWT_ACCESS_SECRET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "OCR_API_KEY", "MESSAGE_API_KEY", "EMAIL_API_KEY", "CLAIM_API_KEY", "SECRETS_ENCRYPTION_KEY"] as const;
 
 /**
  * Empty values count as unset (Docker passes an empty string for a variable that is merely declared), and `<NAME>_FILE`

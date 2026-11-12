@@ -1,4 +1,5 @@
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { run, type RunResult } from "./pgtools";
@@ -25,6 +26,32 @@ export function restoreSettings(archiveDir: string, targetTime: string, platform
  * Proves point-in-time recovery end to end on a throwaway cluster (never the real database): archive WAL, take a base backup,
  * keep writing, simulate a mistake, then rebuild the data as it was just before the mistake.
  */
+/** True when nothing is listening on, or holding, this local port right now. */
+export function isPortFree(port: number): Promise<boolean> {
+  return new Promise((resolveP) => {
+    const s = createServer();
+    s.once("error", () => resolveP(false));
+    s.listen(port, "127.0.0.1", () => s.close(() => resolveP(true)));
+  });
+}
+
+/**
+ * Asks the operating system for a local port nobody is using. A fixed port is not safe: on Windows the range from 49152 up is also what
+ * the system hands to every outgoing connection, so a long test run can be holding any given port (such as 54400) at the moment the
+ * scratch server needs it, and then the server cannot start.
+ */
+export function freePort(): Promise<number> {
+  return new Promise((resolveP, reject) => {
+    const s = createServer();
+    s.once("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const addr = s.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      s.close(() => (port > 0 ? resolveP(port) : reject(new Error("The system did not give a free port"))));
+    });
+  });
+}
+
 export async function pitrRehearsal(opts: { pgBin?: string | undefined; port?: number; keepDir?: boolean }): Promise<PitrResult> {
   const started = Date.now();
   const steps: PitrStep[] = [];
@@ -32,8 +59,10 @@ export async function pitrRehearsal(opts: { pgBin?: string | undefined; port?: n
   const root = mkdtempSync(join(tmpdir(), "medos-pitr-"));
   const primary = join(root, "primary"); const base = join(root, "base"); const restored = join(root, "restored"); const archive = join(root, "archive");
   mkdirSync(archive);
-  const port = opts.port ?? 54400;
-  const env = { ...process.env, PGHOST: "127.0.0.1", PGPORT: String(port), PGUSER: "medos" } as NodeJS.ProcessEnv;
+  // Unless a port is asked for (--port), take one that is free right now. PGCONNECT_TIMEOUT makes a stalled connection fail in seconds
+  // instead of waiting for ever.
+  const port = opts.port ?? (await freePort());
+  const env = { ...process.env, PGHOST: "127.0.0.1", PGPORT: String(port), PGUSER: "medos", PGCONNECT_TIMEOUT: "10" } as NodeJS.ProcessEnv;
   const rec = (name: string, r: boolean, detail = ""): boolean => { steps.push({ name, ok: r, detail }); return r; };
   const must = (r: RunResult, what: string): RunResult => { if (r.code !== 0) throw new Error(`${what} failed: ${(r.stderr || r.stdout).trim().slice(0, 400)}`); return r; };
   const sql = async (q: string, db = "pitr"): Promise<string> => must(await run(bin("psql"), ["-X", "-At", "-v", "ON_ERROR_STOP=1", "-d", db, "-c", q], env), `SQL ${q.slice(0, 40)}`).stdout.trim();
@@ -45,6 +74,7 @@ export async function pitrRehearsal(opts: { pgBin?: string | undefined; port?: n
   };
 
   try {
+    if (!(await isPortFree(port))) throw new Error(`Port ${port} is already in use on this machine; pick another with --port, or leave it out to let the system choose`);
     await initCluster();
     await start(primary, "primary.log");
     await sql("CREATE DATABASE pitr", "postgres");
@@ -81,7 +111,8 @@ export async function pitrRehearsal(opts: { pgBin?: string | undefined; port?: n
   } catch (e) {
     rec("rehearsal completed", false, e instanceof Error ? e.message : String(e));
   } finally {
-    await stop(restored); await stop(primary);
+    // Cleanup must never hide the real result: the tools may be missing, or the server may never have started.
+    await stop(restored).catch(() => undefined); await stop(primary).catch(() => undefined);
     if (!opts.keepDir) rmSync(root, { recursive: true, force: true });
   }
   return { ok: steps.length > 0 && steps.every((s) => s.ok), steps, seconds: Math.round((Date.now() - started) / 100) / 10 };

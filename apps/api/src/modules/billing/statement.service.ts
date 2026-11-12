@@ -3,7 +3,7 @@ import { Decimal, DomainError } from "@medos/shared";
 import { PrismaService } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { chartPatientIds } from "../patients/patient-links";
-import { fmt } from "./billing.domain";
+import { balanceDue, fmt } from "./billing.domain";
 
 export type EntryKind =
   | "BILL" | "BILL_CANCELLED" | "CREDIT_NOTE" | "PAYMENT" | "PAID_FROM_ADVANCE" | "REFUND" | "REFUND_TO_ADVANCE"
@@ -39,7 +39,7 @@ export class StatementService {
     const [invoices, receipts, refunds, credits, deposits, advanceRefunds] = await Promise.all([
       this.prisma.invoice.findMany({
         where: { tenantId: t, facilityId: f, patientId: { in: chart }, issuedAt: { not: null } },
-        select: { id: true, invoiceNumber: true, kind: true, notes: true, total: true, creditedTotal: true, issuedAt: true, cancelledAt: true, status: true, lines: { select: { sourceType: true }, take: 1 } },
+        select: { id: true, invoiceNumber: true, kind: true, notes: true, total: true, creditedTotal: true, paidTotal: true, refundedTotal: true, encounterId: true, issuedAt: true, cancelledAt: true, status: true, lines: { select: { sourceType: true }, take: 1 } },
       }),
       this.prisma.receipt.findMany({ where: { tenantId: t, facilityId: f, invoice: { patientId: { in: chart } } }, select: { id: true, receiptNumber: true, receivedAt: true, invoiceId: true, invoice: { select: { invoiceNumber: true } }, payments: { select: { method: true, amount: true, advanceUseId: true } } } }),
       this.prisma.refund.findMany({ where: { tenantId: t, facilityId: f, invoice: { patientId: { in: chart } } }, select: { id: true, refundNumber: true, createdAt: true, amount: true, advanceReturned: true, method: true, reason: true, invoiceId: true, cancelsInvoice: true, invoice: { select: { invoiceNumber: true } } } }),
@@ -100,9 +100,43 @@ export class StatementService {
       creditsTotal = creditsTotal.plus(D(e.credit));
       return { ...e, balance: fmt(balance) };
     });
+    // The insurer's share: what an insurer has authorised on a bill and not yet paid (docs/patient-ledger.md). It is part of the account balance but it is
+    // not the patient's debt, so it is shown apart; the same rule the discharge checklist uses for patient liability (docs/discharge-stages.md).
+    const insurerShare = await this.insurerShare(ctx, chart, invoices);
+    const patientBalance = balance.minus(insurerShare);
     return {
-      entries, totals: { debit: fmt(debits), credit: fmt(creditsTotal), balance: fmt(balance) },
-      position: balance.gt(0) ? "PATIENT_OWES" : balance.lt(0) ? "HELD_FOR_PATIENT" : "SETTLED",
+      entries, totals: { debit: fmt(debits), credit: fmt(creditsTotal), balance: fmt(balance), insurerShare: fmt(insurerShare), patientBalance: fmt(patientBalance) },
+      position: patientBalance.gt(0) ? "PATIENT_OWES" : patientBalance.lt(0) ? "HELD_FOR_PATIENT" : insurerShare.gt(0) ? "AWAITING_INSURER" : "SETTLED",
     };
+  }
+
+  /**
+   * What insurers have authorised on this patient's bills and not yet paid: for each live claim with an approved amount (or an approved pre-authorisation),
+   * the authorised amount less what the insurer has already paid, never more than its bills still owe. A claim's bills are the one it was submitted with,
+   * or the bills of the visit it was opened for (an inpatient final bill). A rejected, closed or settled claim adds nothing.
+   */
+  private async insurerShare(ctx: RequestContext, chart: string[], invoices: { id: string; encounterId: string | null; status: string; total: { toString(): string }; paidTotal: { toString(): string }; refundedTotal: { toString(): string }; creditedTotal: { toString(): string } }[]): Promise<Decimal> {
+    const claims = await this.prisma.claim.findMany({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: { in: chart }, status: { in: ["PREAUTH_APPROVED", "SUBMITTED", "QUERY", "APPROVED"] } },
+      select: { invoiceId: true, encounterId: true, approvedAmount: true, preauthApproved: true, claimedAmount: true, settledAmount: true }, orderBy: { createdAt: "asc" },
+    });
+    const left = new Map(invoices.filter((i) => i.status !== "CANCELLED" && i.status !== "REFUNDED")
+      .map((i) => [i.id, balanceDue({ total: i.total.toString(), paidTotal: i.paidTotal.toString(), refundedTotal: i.refundedTotal.toString(), creditedTotal: i.creditedTotal.toString() })]));
+    let share = new Decimal(0);
+    for (const c of claims) {
+      // Once a claim is submitted the insurer is asked for the claimed amount (after co-pay and non-payable items), which can be less than the pre-authorisation.
+      const authorised = c.approvedAmount ?? (c.preauthApproved === null ? null : c.claimedAmount === null ? c.preauthApproved : D(c.claimedAmount).lt(D(c.preauthApproved)) ? c.claimedAmount : c.preauthApproved);
+      if (authorised === null) continue;
+      let outstanding = Decimal.max(0, D(authorised).minus(D(c.settledAmount)));
+      for (const i of invoices) {
+        if (outstanding.isZero()) break;
+        if (!(c.invoiceId === i.id || (c.encounterId !== null && i.encounterId === c.encounterId))) continue;
+        const due = left.get(i.id);
+        if (!due || due.isZero()) continue;
+        const take = Decimal.min(due, outstanding);
+        left.set(i.id, due.minus(take)); outstanding = outstanding.minus(take); share = share.plus(take);
+      }
+    }
+    return share;
   }
 }

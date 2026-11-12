@@ -26,10 +26,11 @@ model Service {
   createdAt  DateTime        @default(now()) @db.Timestamptz(3)
   updatedAt  DateTime        @updatedAt @db.Timestamptz(3)
 
-  facility Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  lines    InvoiceLine[]
+  facility       Facility            @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  lines          InvoiceLine[]
   labDefinitions LabTestDefinition[]
-  charges  Charge[]
+  charges        Charge[]
+  insurerRates   InsurerRate[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, code])
@@ -57,54 +58,55 @@ enum InvoiceKind {
 }
 
 model Invoice {
-  id             String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId       String        @db.Uuid
-  facilityId     String        @db.Uuid
-  patientId      String        @db.Uuid
-  encounterId    String?       @db.Uuid
-  kind           InvoiceKind   @default(OPD)
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String        @db.Uuid
+  facilityId    String        @db.Uuid
+  patientId     String        @db.Uuid
+  encounterId   String?       @db.Uuid
+  kind          InvoiceKind   @default(OPD)
   /// Assigned at issue time only.
-  invoiceNumber  String?
-  status         InvoiceStatus @default(DRAFT)
-  subtotal       Decimal       @default(0) @db.Decimal(14, 2)
-  discountTotal  Decimal       @default(0) @db.Decimal(14, 2)
-  taxTotal       Decimal       @default(0) @db.Decimal(14, 2)
+  invoiceNumber String?
+  status        InvoiceStatus @default(DRAFT)
+  subtotal      Decimal       @default(0) @db.Decimal(14, 2)
+  discountTotal Decimal       @default(0) @db.Decimal(14, 2)
+  taxTotal      Decimal       @default(0) @db.Decimal(14, 2)
   /// Set when the invoice is created, from the facility settings, and never changed: tax is shown and calculated as equal CGST and SGST halves.
-  taxSplit       Boolean       @default(false)
+  taxSplit      Boolean       @default(false)
   /// Set when the invoice is created and never changed: the total is rounded to the whole rupee and the difference is kept in roundOff.
-  roundsToRupee  Boolean       @default(false)
-  roundOff       Decimal       @default(0) @db.Decimal(4, 2)
-  total          Decimal       @default(0) @db.Decimal(14, 2)
-  paidTotal      Decimal       @default(0) @db.Decimal(14, 2)
-  refundedTotal  Decimal       @default(0) @db.Decimal(14, 2)
-  creditedTotal  Decimal       @default(0) @db.Decimal(14, 2)
-  notes          String?
-  createdById    String        @db.Uuid
-  issuedById     String?       @db.Uuid
-  issuedAt       DateTime?     @db.Timestamptz(3)
-  cancelledById  String?       @db.Uuid
-  cancelledAt    DateTime?     @db.Timestamptz(3)
-  cancelReason   String?
-  version        Int           @default(1)
-  createdAt      DateTime      @default(now()) @db.Timestamptz(3)
-  updatedAt      DateTime      @updatedAt @db.Timestamptz(3)
+  roundsToRupee Boolean       @default(false)
+  roundOff      Decimal       @default(0) @db.Decimal(4, 2)
+  total         Decimal       @default(0) @db.Decimal(14, 2)
+  paidTotal     Decimal       @default(0) @db.Decimal(14, 2)
+  refundedTotal Decimal       @default(0) @db.Decimal(14, 2)
+  creditedTotal Decimal       @default(0) @db.Decimal(14, 2)
+  notes         String?
+  createdById   String        @db.Uuid
+  issuedById    String?       @db.Uuid
+  issuedAt      DateTime?     @db.Timestamptz(3)
+  cancelledById String?       @db.Uuid
+  cancelledAt   DateTime?     @db.Timestamptz(3)
+  cancelReason  String?
+  version       Int           @default(1)
+  createdAt     DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime      @updatedAt @db.Timestamptz(3)
 
-  patient     Patient       @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  facility    Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  registration PatientRegistration?
-  visitCover   VisitConsultationBill?
-  encounter   Encounter?    @relation(fields: [encounterId], references: [id], onDelete: Restrict)
-  lines       InvoiceLine[]
-  receipts    Receipt[]
-  refunds     Refund[]
-  creditNotes CreditNote[]
-  advanceUses AdvanceUse[]
+  patient        Patient                @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  facility       Facility               @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  registration   PatientRegistration?
+  visitCover     VisitConsultationBill?
+  encounter      Encounter?             @relation(fields: [encounterId], references: [id], onDelete: Restrict)
+  lines          InvoiceLine[]
+  receipts       Receipt[]
+  refunds        Refund[]
+  creditNotes    CreditNote[]
+  advanceUses    AdvanceUse[]
   advanceReturns AdvanceReturn[]
-  dispenses   Dispense[]
-  charges     Charge[]
-  claims      Claim[]
-  finalFor    Admission[] @relation("AdmissionFinalInvoice")
-  shareEntries DoctorShareEntry[]
+  dispenses      Dispense[]
+  charges        Charge[]
+  claims         Claim[]
+  claimLinks     ClaimInvoice[]
+  finalFor       Admission[]            @relation("AdmissionFinalInvoice")
+  shareEntries   DoctorShareEntry[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, invoiceNumber])
@@ -114,24 +116,24 @@ model Invoice {
 }
 
 model InvoiceLine {
-  id             String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId       String   @db.Uuid
-  invoiceId      String   @db.Uuid
+  id             String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String  @db.Uuid
+  invoiceId      String  @db.Uuid
   lineNo         Int
-  serviceId      String?  @db.Uuid
+  serviceId      String? @db.Uuid
   description    String
-  quantity       Decimal  @db.Decimal(12, 3)
-  unitPrice      Decimal  @db.Decimal(12, 2)
-  discountAmount Decimal  @default(0) @db.Decimal(12, 2)
-  taxPercent     Decimal  @default(0) @db.Decimal(5, 2)
-  taxAmount      Decimal  @db.Decimal(12, 2)
+  quantity       Decimal @db.Decimal(12, 3)
+  unitPrice      Decimal @db.Decimal(12, 2)
+  discountAmount Decimal @default(0) @db.Decimal(12, 2)
+  taxPercent     Decimal @default(0) @db.Decimal(5, 2)
+  taxAmount      Decimal @db.Decimal(12, 2)
   /// Net after discount plus tax.
-  lineTotal      Decimal  @db.Decimal(12, 2)
+  lineTotal      Decimal @db.Decimal(12, 2)
   /// Links a line to the operational record it bills (CHARGE, DISPENSE), so nothing is billed twice.
   /// HSN/SAC code as it was when the line was created (a snapshot: later changes to the master never alter an issued invoice).
   hsnSac         String?
   sourceType     String?
-  sourceId       String?  @db.Uuid
+  sourceId       String? @db.Uuid
 
   invoice Invoice  @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
   service Service? @relation(fields: [serviceId], references: [id], onDelete: Restrict)
@@ -163,9 +165,9 @@ model Receipt {
   receivedAt    DateTime @default(now()) @db.Timestamptz(3)
   shiftId       String?  @db.Uuid
 
-  invoice  Invoice       @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
-  shift    CashierShift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  payments Payment[]
+  invoice     Invoice       @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  shift       CashierShift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  payments    Payment[]
   advanceUses AdvanceUse[]
 
   @@unique([tenantId, id])
@@ -176,14 +178,14 @@ model Receipt {
 }
 
 model Payment {
-  id        String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId  String        @db.Uuid
-  receiptId String        @db.Uuid
-  method    PaymentMethod
-  amount    Decimal       @db.Decimal(14, 2)
-  reference String?
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String        @db.Uuid
+  receiptId    String        @db.Uuid
+  method       PaymentMethod
+  amount       Decimal       @db.Decimal(14, 2)
+  reference    String?
   /// Set when this tender is an advance being used up (docs/advance-payments.md): the money was received when the advance was taken, so reports do not count it again.
-  advanceUseId String? @db.Uuid
+  advanceUseId String?       @db.Uuid
 
   receipt Receipt @relation(fields: [tenantId, receiptId], references: [tenantId, id], onDelete: Restrict)
 
@@ -195,25 +197,25 @@ model Payment {
 // ───────────────────────── Stage 20: refunds and credit notes ─────────────────────────
 
 model Refund {
-  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String        @db.Uuid
-  facilityId   String        @db.Uuid
-  invoiceId    String        @db.Uuid
-  refundNumber String
-  method       PaymentMethod
-  amount       Decimal       @db.Decimal(14, 2)
-  reason       String
-  reference    String?
+  id              String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String        @db.Uuid
+  facilityId      String        @db.Uuid
+  invoiceId       String        @db.Uuid
+  refundNumber    String
+  method          PaymentMethod
+  amount          Decimal       @db.Decimal(14, 2)
+  reason          String
+  reference       String?
   /// True when the refund is part of cancelling the whole invoice.
-  cancelsInvoice Boolean     @default(false)
+  cancelsInvoice  Boolean       @default(false)
   /// The part of this refund that was returned to the patient's advance instead of being paid out (docs/advance-payments.md). Reports leave it out of money paid out.
-  advanceReturned Decimal    @default(0) @db.Decimal(14, 2)
-  createdById  String        @db.Uuid
-  createdAt    DateTime      @default(now()) @db.Timestamptz(3)
-  shiftId      String?       @db.Uuid
+  advanceReturned Decimal       @default(0) @db.Decimal(14, 2)
+  createdById     String        @db.Uuid
+  createdAt       DateTime      @default(now()) @db.Timestamptz(3)
+  shiftId         String?       @db.Uuid
 
-  invoice Invoice       @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
-  shift   CashierShift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  invoice        Invoice         @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  shift          CashierShift?   @relation(fields: [shiftId], references: [id], onDelete: Restrict)
   advanceReturns AdvanceReturn[]
 
   @@unique([tenantId, id])
@@ -262,9 +264,9 @@ model CashierShift {
   status       ShiftStatus @default(OPEN)
   closeNotes   String?
 
-  facility Facility  @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  receipts Receipt[]
-  refunds  Refund[]
+  facility        Facility         @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  receipts        Receipt[]
+  refunds         Refund[]
   advanceDeposits AdvanceDeposit[]
   advanceRefunds  AdvanceRefund[]
 
@@ -292,13 +294,13 @@ model AdvanceDeposit {
   receivedAt    DateTime @default(now()) @db.Timestamptz(3)
   shiftId       String?  @db.Uuid
 
-  patient Patient       @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  appointment Appointment? @relation(fields: [tenantId, appointmentId], references: [tenantId, id], onDelete: Restrict)
-  shift   CashierShift? @relation(fields: [shiftId], references: [id], onDelete: Restrict)
-  tenders AdvanceTender[]
-  uses    AdvanceUse[]
-  refunds AdvanceRefund[]
-  returns AdvanceReturn[]
+  patient     Patient         @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  appointment Appointment?    @relation(fields: [tenantId, appointmentId], references: [tenantId, id], onDelete: Restrict)
+  shift       CashierShift?   @relation(fields: [shiftId], references: [id], onDelete: Restrict)
+  tenders     AdvanceTender[]
+  uses        AdvanceUse[]
+  refunds     AdvanceRefund[]
+  returns     AdvanceReturn[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, receiptNumber])
@@ -333,9 +335,9 @@ model AdvanceUse {
   appliedById String   @db.Uuid
   appliedAt   DateTime @default(now()) @db.Timestamptz(3)
 
-  deposit AdvanceDeposit @relation(fields: [tenantId, depositId], references: [tenantId, id], onDelete: Restrict)
-  invoice Invoice        @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
-  receipt Receipt        @relation(fields: [tenantId, receiptId], references: [tenantId, id], onDelete: Restrict)
+  deposit AdvanceDeposit  @relation(fields: [tenantId, depositId], references: [tenantId, id], onDelete: Restrict)
+  invoice Invoice         @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  receipt Receipt         @relation(fields: [tenantId, receiptId], references: [tenantId, id], onDelete: Restrict)
   returns AdvanceReturn[]
 
   @@unique([tenantId, id])
@@ -432,8 +434,8 @@ model TestOrder {
   createdAt           DateTime        @default(now()) @db.Timestamptz(3)
   updatedAt           DateTime        @updatedAt @db.Timestamptz(3)
 
-  patient   Patient   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  patient    Patient     @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter  Encounter   @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
   labSamples LabSample[]
   labResult  LabResult?
   radStudy   RadStudy?

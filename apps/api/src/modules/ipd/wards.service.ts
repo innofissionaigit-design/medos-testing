@@ -1,4 +1,5 @@
 import { Injectable } from "@nestjs/common";
+import { closeTurnoverForBed } from "./bed-turnover.service";
 import { DomainError } from "@medos/shared";
 import type { Prisma } from "@medos/database";
 import { z } from "zod";
@@ -153,6 +154,8 @@ export class WardsService {
         throw new DomainError("BED_NOT_AVAILABLE", `A ${from.toLowerCase()} bed cannot be set to ${input.status.toLowerCase()} manually`, 409);
       }
       const b = await tx.bed.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id } }, data: { status: input.status, version: { increment: 1 } }, select: BED });
+      // A bed made available from cleaning by hand (the nurse's "Mark clean") completes its open turnover, so the two never disagree.
+      if (from === "CLEANING" && input.status === "AVAILABLE") await closeTurnoverForBed(tx, ctx, id, new Date());
       await this.audit.record(tx, actorOf(ctx), { action: "BED_STATUS_CHANGED", entityType: "Bed", entityId: id, metadata: { from, to: input.status, ...(input.reason ? { reason: input.reason } : {}) } });
       return toBed(b);
     });
@@ -166,7 +169,7 @@ export class WardsService {
     });
     const open = await this.prisma.bedAssignment.findMany({
       where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, releasedAt: null },
-      select: { bedId: true, assignedAt: true, admission: { select: { id: true, admissionNumber: true, patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } } } } },
+      select: { bedId: true, assignedAt: true, admission: { select: { id: true, admissionNumber: true, status: true, patient: { select: { firstName: true, lastName: true, identifiers: { where: { type: "MRN" }, select: { value: true } } } } } } },
     });
     const byBed = new Map(open.map((o) => [o.bedId, o]));
     const summary = { total: 0, AVAILABLE: 0, OCCUPIED: 0, RESERVED: 0, CLEANING: 0, MAINTENANCE: 0 };
@@ -177,7 +180,7 @@ export class WardsService {
         beds: r.beds.map((b) => {
           summary.total++; summary[b.status]++;
           const o = byBed.get(b.id);
-          return { ...toBed(b), occupant: o ? { admissionId: o.admission.id, admissionNumber: o.admission.admissionNumber, since: o.assignedAt, patientName: [o.admission.patient.firstName, o.admission.patient.lastName].filter(Boolean).join(" "), mrn: o.admission.patient.identifiers[0]?.value ?? null } : null };
+          return { ...toBed(b), occupant: o ? { admissionId: o.admission.id, admissionNumber: o.admission.admissionNumber, since: o.assignedAt, patientName: [o.admission.patient.firstName, o.admission.patient.lastName].filter(Boolean).join(" "), mrn: o.admission.patient.identifiers[0]?.value ?? null, awaitingDeparture: o.admission.status === "DISCHARGED" } : null };
         }),
       })),
     }));

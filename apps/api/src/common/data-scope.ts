@@ -6,13 +6,16 @@ import type { DataScope, RequestContext } from "./request-context";
 /**
  * Who may see which clinical data (docs/data-access.md).
  *  - DATA_SCOPE_ALL (the organisation administrator) sees everything.
+ *  - DATA_SCOPE_WARD (the resident medical officer) is not narrowed to their own patients even though they are a registered practitioner.
  *  - A doctor sees only the patients, visits, records and reports of their own practitioner record.
  *  - Anyone else assigned to departments sees only those departments.
  *  - Staff who are neither (Reception, Cashier, Pharmacist, Nurse, Manager without a department) keep the access their role gives.
  * Everything here is derived from the session on the server; nothing comes from the request.
  */
 export function resolveDataScope(permissions: ReadonlySet<Permission>, practitionerIds: readonly string[], departmentIds: readonly string[]): DataScope {
-  if (permissions.has("DATA_SCOPE_ALL")) return { kind: "ALL" };
+  // DATA_SCOPE_WARD (the resident medical officer) is a registered practitioner who covers the whole ward, so being a practitioner
+  // must not narrow them to "my own patients".
+  if (permissions.has("DATA_SCOPE_ALL") || permissions.has("DATA_SCOPE_WARD")) return { kind: "ALL" };
   if (practitionerIds.length > 0) return { kind: "DOCTOR", practitionerIds: [...practitionerIds] };
   if (departmentIds.length > 0) return { kind: "DEPARTMENT", departmentIds: [...departmentIds] };
   return { kind: "ALL" };

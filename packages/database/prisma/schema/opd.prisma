@@ -28,39 +28,39 @@ model Encounter {
   createdAt       DateTime        @default(now()) @db.Timestamptz(3)
   updatedAt       DateTime        @updatedAt @db.Timestamptz(3)
 
-  facility     Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  patient      Patient       @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  department   Department?   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  practitioner Practitioner? @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
-  appointment  Appointment?  @relation("AppointmentEncounter")
-  followUps    Appointment[] @relation("FollowUpOf")
-  queueEntry   QueueEntry?
-  observations Observation[]
-  diagnoses    Diagnosis[]
-  documents    ClinicalDocument[]
+  facility         Facility                @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient          Patient                 @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  department       Department?             @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  practitioner     Practitioner?           @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  appointment      Appointment?            @relation("AppointmentEncounter")
+  followUps        Appointment[]           @relation("FollowUpOf")
+  queueEntry       QueueEntry?
+  observations     Observation[]
+  diagnoses        Diagnosis[]
+  documents        ClinicalDocument[]
   medicationOrders MedicationOrder[]
-  invoices     Invoice[]
-  dispenses    Dispense[]
-  admission    Admission?
+  invoices         Invoice[]
+  dispenses        Dispense[]
+  admission        Admission?
+  retentionReviews RecordRetentionReview[]
 
-  prescriptionScans PrescriptionScan[]
-  prescriptionShares PrescriptionShare[]
-  consultationBill VisitConsultationBill?
-  shareEntries DoctorShareEntry[]
+  prescriptionScans      PrescriptionScan[]
+  prescriptionShares     PrescriptionShare[]
+  consultationBill       VisitConsultationBill?
+  shareEntries           DoctorShareEntry[]
   prescriptionDeliveries PrescriptionDelivery[]
+  testOrders             TestOrder[]
+  testBillingLines       TestBillingLine[]
+  labSamples             LabSample[]
+  labResults             LabResult[]
+  radStudies             RadStudy[]
+  claims                 Claim[]
+  aiDrafts               AiDraft[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, id])
   @@unique([tenantId, facilityId, encounterNumber])
   @@index([tenantId, patientId, startedAt(sort: Desc)])
-  testOrders TestOrder[]
-  testBillingLines TestBillingLine[]
-  labSamples LabSample[]
-  labResults LabResult[]
-  radStudies RadStudy[]
-  claims     Claim[]
-  aiDrafts   AiDraft[]
-
   @@index([tenantId, facilityId, type, status])
 }
 
@@ -109,48 +109,49 @@ model PractitionerSchedule {
 }
 
 model Appointment {
-  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId         String            @db.Uuid
-  facilityId       String            @db.Uuid
-  patientId        String            @db.Uuid
-  practitionerId   String            @db.Uuid
-  departmentId     String?           @db.Uuid
-  startAt          DateTime          @db.Timestamptz(3)
-  endAt            DateTime          @db.Timestamptz(3)
-  type             AppointmentType   @default(CONSULTATION)
-  source           AppointmentSource @default(SCHEDULED)
-  status           AppointmentStatus @default(BOOKED)
-  notes            String?
+  id                    String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId              String            @db.Uuid
+  facilityId            String            @db.Uuid
+  patientId             String            @db.Uuid
+  practitionerId        String            @db.Uuid
+  departmentId          String?           @db.Uuid
+  startAt               DateTime          @db.Timestamptz(3)
+  endAt                 DateTime          @db.Timestamptz(3)
+  type                  AppointmentType   @default(CONSULTATION)
+  source                AppointmentSource @default(SCHEDULED)
+  status                AppointmentStatus @default(BOOKED)
+  notes                 String?
   /// True when an authorised user deliberately booked over another appointment (or for a walk-in).
-  overbooked       Boolean           @default(false)
-  overbookReason   String?
-  cancelReason     String?
-  encounterId      String?           @unique @db.Uuid
+  overbooked            Boolean           @default(false)
+  overbookReason        String?
+  cancelReason          String?
+  encounterId           String?           @unique @db.Uuid
   /// The consultation that ordered this follow-up (FOLLOW_UP only; same patient, tenant and facility; never changes).
-  followUpOfEncounterId String?      @db.Uuid
+  followUpOfEncounterId String?           @db.Uuid
   /// The booking fee asked for when this appointment was booked (a snapshot of the setting at that time); null when no fee applies.
   /// Check-in needs it paid or skipped (docs/booking-fee.md).
-  bookingFee       Decimal?          @db.Decimal(12, 2)
-  feeSkippedAt     DateTime?         @db.Timestamptz(3)
-  feeSkippedById   String?           @db.Uuid
-  feeSkipReason    String?
-  feeSkipNote      String?
-  createdById      String            @db.Uuid
-  version          Int               @default(1)
-  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
-  updatedAt        DateTime          @updatedAt @db.Timestamptz(3)
+  bookingFee            Decimal?          @db.Decimal(12, 2)
+  feeSkippedAt          DateTime?         @db.Timestamptz(3)
+  feeSkippedById        String?           @db.Uuid
+  feeSkipReason         String?
+  feeSkipNote           String?
+  createdById           String            @db.Uuid
+  version               Int               @default(1)
+  createdAt             DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime          @updatedAt @db.Timestamptz(3)
 
-  facility     Facility     @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  patient      Patient      @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  practitioner Practitioner @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
-  department   Department?  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  encounter    Encounter?   @relation("AppointmentEncounter", fields: [encounterId], references: [id], onDelete: Restrict)
-  followUpOf   Encounter?   @relation("FollowUpOf", fields: [followUpOfEncounterId], references: [id], onDelete: Restrict)
-  queueEntry   QueueEntry?
-  reminders    AppointmentReminder[]
-  teleconsults Teleconsult[]
+  facility        Facility              @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient         Patient               @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  practitioner    Practitioner          @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  department      Department?           @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  encounter       Encounter?            @relation("AppointmentEncounter", fields: [encounterId], references: [id], onDelete: Restrict)
+  followUpOf      Encounter?            @relation("FollowUpOf", fields: [followUpOfEncounterId], references: [id], onDelete: Restrict)
+  queueEntry      QueueEntry?
+  reminders       AppointmentReminder[]
+  aftercareTasks  AftercareTask[]
+  teleconsults    Teleconsult[]
   advanceDeposits AdvanceDeposit[]
-  paymentLink  BookingPaymentLink?
+  paymentLink     BookingPaymentLink?
 
   @@unique([tenantId, id])
   @@index([tenantId, facilityId, startAt])

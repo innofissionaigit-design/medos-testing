@@ -28,6 +28,7 @@ export type SummaryContent = z.infer<typeof summaryContentSchema>;
 
 export const saveSummarySchema = z.object({ content: summaryContentSchema, version: z.number().int().min(1).optional() }).strict();
 export const signSummarySchema = z.object({ version: z.number().int().min(1) }).strict();
+export const verifySummarySchema = z.object({ version: z.number().int().min(1), note: z.string().trim().min(3).max(300).optional() }).strict();
 export const amendSummarySchema = z.object({ expectedVersion: z.number().int().min(1), reason: z.string().trim().min(10).max(500), content: summaryContentSchema }).strict();
 
 /** Drops null fields so a suggestion can be saved as-is under the strict content schema. */
@@ -59,7 +60,8 @@ export class SummaryService {
       this.prisma.medicationOrderItem.findMany({ where: { tenantId: ctx.tenantId, status: "ACTIVE", order: { encounterId: adm.encounterId, status: "SIGNED" } }, orderBy: { lineNo: "asc" }, select: { genericName: true, brandName: true, strength: true, dosage: true, route: true, frequency: true, durationDays: true, instructions: true } }),
       this.prisma.charge.findMany({ where: { tenantId: ctx.tenantId, admissionId, type: "PROCEDURE", status: { not: "VOIDED" } }, orderBy: { chargedAt: "asc" }, select: { description: true, chargedAt: true } }),
     ]);
-    const names = new Map((await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set([doc?.authorId, doc?.signedById, ...(doc?.versions.map((v) => v.authorId) ?? [])].filter((x): x is string => !!x))] } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
+    const verification = doc && doc.status !== "DRAFT" ? await this.prisma.dischargeSummaryVerification.findFirst({ where: { tenantId: ctx.tenantId, documentId: doc.id, version: doc.currentVersion } }) : null;
+    const names = new Map((await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set([doc?.authorId, doc?.signedById, verification?.verifiedById, ...(doc?.versions.map((v) => v.authorId) ?? [])].filter((x): x is string => !!x))] } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
     return {
       admission: {
         id: adm.id, admissionNumber: adm.admissionNumber, admittedAt: adm.admittedAt, dischargedAt: adm.dischargedAt, status: adm.status, dischargeType: adm.dischargeType,
@@ -67,6 +69,8 @@ export class SummaryService {
       },
       document: doc ? {
         id: doc.id, status: doc.status, version: doc.version, currentVersion: doc.currentVersion, content, signedAt: doc.signedAt, signedByName: doc.signedById ? names.get(doc.signedById) ?? null : null,
+        preparedByName: names.get(doc.authorId) ?? null,
+        verified: !!verification, verifiedAt: verification?.at ?? null, verifiedByName: verification ? names.get(verification.verifiedById) ?? null : null, verificationNote: verification?.note ?? null,
         versions: doc.versions.map((v) => ({ ...v, authorName: names.get(v.authorId) ?? null })),
       } : null,
       suggested: {
@@ -80,7 +84,7 @@ export class SummaryService {
     return this.prisma.$transaction(async (tx) => {
       const adm = await this.admission(tx, ctx, admissionId);
       if (adm.status !== "ADMITTED") throw new DomainError("INVALID_STATE", "The discharge summary can only be drafted while the patient is admitted", 409);
-      await this.clinicians.requireActive(tx, ctx);
+      const clinician = await this.clinicians.requireActive(tx, ctx);
       const doc = await tx.clinicalDocument.findFirst({ where: { tenantId: ctx.tenantId, encounterId: adm.encounterId, kind: "DISCHARGE_SUMMARY" } });
       if (!doc) {
         if (input.version !== undefined && input.version !== 1) throw new DomainError("STALE_VERSION", "Reload and try again", 409);
@@ -89,7 +93,8 @@ export class SummaryService {
         return { id: created.id, status: created.status, version: created.version, content: input.content };
       }
       if (doc.status !== "DRAFT") throw new DomainError("CONSULTATION_SIGNED", "The discharge summary is signed. Use an amendment.", 409);
-      if (doc.authorId !== ctx.userId) throw new DomainError("FORBIDDEN", "This draft belongs to another doctor", 403);
+      // The RMO prepares the draft and the treating consultant reviews and corrects it before signing, so both may change it; nobody else.
+      if (doc.authorId !== ctx.userId && adm.consultantId !== clinician.id) throw new DomainError("FORBIDDEN", "This draft belongs to another doctor", 403);
       if (input.version !== doc.version) throw new DomainError("STALE_VERSION", "The summary was changed elsewhere. Reload and try again.", 409, { currentVersion: doc.version });
       const res = await tx.clinicalDocument.updateMany({ where: { id: doc.id, tenantId: ctx.tenantId, status: "DRAFT", version: doc.version }, data: { draft: input.content as Prisma.InputJsonObject, version: { increment: 1 } } });
       if (res.count !== 1) throw new DomainError("STALE_VERSION", "The summary was changed elsewhere", 409);
@@ -138,6 +143,30 @@ export class SummaryService {
       if (res.count !== 1) throw new DomainError("STALE_VERSION", "The summary was amended by someone else", 409);
       await this.audit.record(tx, actorOf(ctx), { action: "DISCHARGE_SUMMARY_AMENDED", entityType: "ClinicalDocument", entityId: doc.id, metadata: { admissionId, fromVersion: doc.currentVersion, toVersion: next, reason: input.reason } });
       return { id: doc.id, status: "AMENDED" as const, currentVersion: next };
+    });
+  }
+
+  /**
+   * The RMO checks the signed summary and verifies it. It is not the same act as signing: the treating consultant signs, someone else
+   * confirms the signed copy is complete and correct. The verification belongs to one version: an amendment has to be verified again.
+   */
+  async verify(ctx: RequestContext, admissionId: string, input: z.infer<typeof verifySummarySchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      const adm = await tx.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] } });
+      if (!adm) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      if (adm.status !== "ADMITTED") throw new DomainError("INVALID_STATE", "The admission is already closed", 409);
+      await this.clinicians.requireActive(tx, ctx);
+      const doc = await tx.clinicalDocument.findFirst({ where: { tenantId: ctx.tenantId, encounterId: adm.encounterId, kind: "DISCHARGE_SUMMARY" } });
+      if (!doc) throw new DomainError("INVALID_STATE", "There is no discharge summary to verify", 409);
+      if (doc.status === "DRAFT") throw new DomainError("INVALID_STATE", "The summary has to be signed by the treating consultant before it can be verified", 409);
+      if (doc.currentVersion !== input.version) throw new DomainError("STALE_VERSION", "The summary was amended since you opened it. Review the latest version first.", 409, { currentVersion: doc.currentVersion });
+      // The person who put their name to the signed version cannot be the one who checks it. For an amendment the author of that version signs it.
+      const v = await tx.clinicalDocumentVersion.findFirstOrThrow({ where: { tenantId: ctx.tenantId, documentId: doc.id, version: doc.currentVersion }, select: { authorId: true } });
+      if (v.authorId === ctx.userId || doc.signedById === ctx.userId) throw new DomainError("FORBIDDEN", "The person who signed or amended this summary cannot verify it", 403);
+      if (await tx.dischargeSummaryVerification.findFirst({ where: { tenantId: ctx.tenantId, documentId: doc.id, version: doc.currentVersion }, select: { id: true } })) throw new DomainError("CONFLICT", "This version of the summary is already verified", 409);
+      await tx.dischargeSummaryVerification.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, admissionId, documentId: doc.id, version: doc.currentVersion, verifiedById: ctx.userId, note: input.note ?? null } });
+      await this.audit.record(tx, actorOf(ctx), { action: "DISCHARGE_SUMMARY_VERIFIED", entityType: "ClinicalDocument", entityId: doc.id, metadata: { admissionId, version: doc.currentVersion } });
+      return { id: doc.id, status: "VERIFIED" as const, currentVersion: doc.currentVersion };
     });
   }
 

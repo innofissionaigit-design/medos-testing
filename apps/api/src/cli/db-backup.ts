@@ -15,7 +15,7 @@ import { pitrRehearsal } from "./backup/pitr";
  *   node dist/cli/db-backup.js drill   [--out DIR] [--file BACKUP] [--keep-scratch]
  *   node dist/cli/db-backup.js status  [--out DIR] [--max-backup-age-hours 26] [--max-drill-age-days 8]
  *   node dist/cli/db-backup.js keygen
- *   node dist/cli/db-backup.js pitr-rehearsal [--port 54400]   (throwaway cluster; needs initdb, pg_ctl, pg_basebackup in PG_BIN)
+ *   node dist/cli/db-backup.js pitr-rehearsal [--port N]   (throwaway cluster on a free port unless N is given; needs initdb, pg_ctl, pg_basebackup in PG_BIN)
  *
  * Environment: DATABASE_URL (owner login), BACKUP_DIR (default ./.local/backups), BACKUP_KEEP (default 14), BACKUP_ENCRYPTION_KEY or
  * BACKUP_KEYRING_FILE, BACKUP_UPLOAD_COMMAND (e.g. `aws s3 cp {file} s3://bucket/medos/`), PG_BIN (directory of the PostgreSQL client programs).

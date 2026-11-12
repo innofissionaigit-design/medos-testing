@@ -134,7 +134,7 @@ flowchart TD
 |---|---|
 | Built and tested | All of Platform, Front desk and OPD, Clinical, Inpatient, Money, Reports and print; laboratory, radiology (reporting only), claims, payroll, patient app (web), telemedicine (link-based), AI assistant (drafts only) |
 | Partly built | ABDM: ABHA numbers and a gateway connection test; no verification, linking or consent flows |
-| Not built | Image storage and viewer (PACS), electronic insurer submission, native store app, online payment, Form 16 and PF/ESI challans, attendance and leave, Swasthya Sathi, OT, full accounting |
+| Not built | Image storage and viewer (PACS), electronic insurer submission, native store app, online payment, Form 16 and PF/ESI challans, attendance and leave, Swasthya Sathi, theatre management (only a small procedure record with implants and consumables is built: docs/procedures.md), full accounting |
 
 ## 6. Deployment
 

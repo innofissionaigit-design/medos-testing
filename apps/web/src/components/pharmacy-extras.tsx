@@ -1,7 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, newKey } from "@/lib/api";
+import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, Spinner, Table, Td, useDebounced } from "./ui";
 
@@ -67,23 +67,32 @@ export function SuppliersTab() {
 
 interface PurchaseItem { id: string; medicineName: string; batchNo: string | null; expiryDate: string | null; quantity: number; returnedQuantity: number; purchasePrice: string }
 interface Purchase { id: string; purchaseNumber: string; supplierName: string; supplierInvoiceNo: string; supplierInvoiceDate: string; status: string; total: string; receivedAt: string; items: PurchaseItem[]; returns: { returnNumber: string; total: string; reason: string }[] }
-type PRow = { med: Med | null; batchNo: string; expiryDate: string; quantity: string; mrp: string; purchasePrice: string; sellingPrice: string };
-const blankRow = (): PRow => ({ med: null, batchNo: "", expiryDate: "", quantity: "", mrp: "", purchasePrice: "", sellingPrice: "" });
+type PRow = { med: Med | null; batchNo: string; expiryDate: string; quantity: string; mrp: string; purchasePrice: string; sellingPrice: string; rejected: string; rejectReason: string; poItemId?: string };
+const blankRow = (): PRow => ({ med: null, batchNo: "", expiryDate: "", quantity: "", mrp: "", purchasePrice: "", sellingPrice: "", rejected: "", rejectReason: "" });
+interface OpenOrder { id: string; poNumber: string; status: string; supplierId: string; supplier: string; items: { id: string; medicineId: string; medicine: string; pendingQuantity: number; rate: string }[] }
 
 function NewPurchase({ onClose }: { onClose: () => void }) {
   const qc = useQueryClient();
   const suppliers = useQuery({ queryKey: ["suppliers"], queryFn: () => api.get<Supplier[]>("/pharmacy/suppliers") });
   const [supplierId, setSupplierId] = useState("");
+  const [poId, setPoId] = useState("");
+  const orders = useQuery({ queryKey: ["open-orders"], queryFn: () => api.page<OpenOrder>("/procurement/orders", { pageSize: 100 }) });
+  const open = (orders.data?.data ?? []).filter((o) => ["ISSUED", "PARTIALLY_RECEIVED"].includes(o.status) && (!supplierId || o.supplierId === supplierId));
+  const picked = open.find((o) => o.id === poId);
+  const fromOrder = () => { if (picked) setRows(picked.items.filter((i) => i.pendingQuantity > 0).map((i) => ({ ...blankRow(), med: { id: i.medicineId, brandName: i.medicine, genericName: "", strength: null }, quantity: String(i.pendingQuantity), purchasePrice: i.rate, poItemId: i.id }))); };
   const [invNo, setInvNo] = useState("");
   const [invDate, setInvDate] = useState(new Date().toISOString().slice(0, 10));
   const [rows, setRows] = useState<PRow[]>([blankRow()]);
+  const [rej, setRej] = useState<{ med: Med | null; quantity: string; unitPrice: string; reason: string }[]>([]);
+  const patchRej = (i: number, p: Partial<(typeof rej)[number]>) => setRej(rej.map((r, j) => (j === i ? { ...r, ...p } : r)));
   const [key] = useState(newKey);
   const patch = (i: number, p: Partial<PRow>) => setRows(rows.map((r, j) => (j === i ? { ...r, ...p } : r)));
-  const ready = supplierId && invNo.trim() && rows.length > 0 && rows.every((r) => r.med && r.batchNo && r.expiryDate && Number(r.quantity) > 0 && r.mrp && r.purchasePrice && r.sellingPrice);
+  const ready = supplierId && invNo.trim() && rows.length + rej.length > 0 && rej.every((r) => r.med && Number(r.quantity) > 0 && r.unitPrice && r.reason.trim().length >= 5) && rows.every((r) => r.med && r.batchNo && r.expiryDate && Number(r.quantity) > 0 && r.mrp && r.purchasePrice && r.sellingPrice && (!(Number(r.rejected) > 0) || r.rejectReason.trim().length >= 5));
   const save = useMutation({
     mutationFn: () => api.post("/pharmacy/purchases", {
-      supplierId, supplierInvoiceNo: invNo.trim(), supplierInvoiceDate: invDate,
-      items: rows.map((r) => ({ medicineId: r.med!.id, batchNo: r.batchNo.trim(), expiryDate: r.expiryDate, quantity: Number(r.quantity), mrp: r.mrp, purchasePrice: r.purchasePrice, sellingPrice: r.sellingPrice })),
+      supplierId, supplierInvoiceNo: invNo.trim(), supplierInvoiceDate: invDate, ...(poId ? { purchaseOrderId: poId } : {}),
+      rejections: rej.map((r) => ({ medicineId: r.med!.id, quantity: Number(r.quantity), unitPrice: r.unitPrice, reason: r.reason.trim() })),
+      items: rows.map((r) => ({ medicineId: r.med!.id, batchNo: r.batchNo.trim(), expiryDate: r.expiryDate, quantity: Number(r.quantity), mrp: r.mrp, purchasePrice: r.purchasePrice, sellingPrice: r.sellingPrice, ...(r.poItemId ? { poItemId: r.poItemId } : {}), ...(Number(r.rejected) > 0 ? { rejectedQuantity: Number(r.rejected), rejectReason: r.rejectReason.trim() } : {}) })),
     }, key),
     onSuccess: async () => { await qc.invalidateQueries({ queryKey: ["purchases"] }); await qc.invalidateQueries({ queryKey: ["pharmacy-stock"] }); onClose(); },
   });
@@ -95,6 +104,11 @@ function NewPurchase({ onClose }: { onClose: () => void }) {
           <Field label="Supplier invoice no."><Input value={invNo} onChange={(e) => setInvNo(e.target.value)} /></Field>
           <Field label="Invoice date"><Input type="date" value={invDate} onChange={(e) => setInvDate(e.target.value)} /></Field>
         </div>
+        <div className="flex flex-wrap items-end gap-2">
+          <Field label="Against purchase order (optional)"><Select value={poId} onChange={(e) => { setPoId(e.target.value); const o = open.find((x) => x.id === e.target.value); if (o) setSupplierId(o.supplierId); }}><option value="">No order: a direct delivery</option>{open.map((o) => <option key={o.id} value={o.id}>{o.poNumber} · {o.supplier}</option>)}</Select></Field>
+          {picked && <Button variant="secondary" onClick={fromOrder}>Fill the lines from the order</Button>}
+        </div>
+        <p className="text-xs text-slate-500">Check the goods as they arrive: <b>Qty</b> is what you accept into stock. Anything turned away goes in <b>Rejected</b> with the reason; it does not enter stock.</p>
         {rows.map((r, i) => (
           <div key={i} className="grid grid-cols-12 items-start gap-2 rounded-md border border-slate-100 p-2">
             <div className="col-span-12 sm:col-span-4"><MedPick value={r.med} onPick={(m) => patch(i, { med: m })} /></div>
@@ -104,10 +118,22 @@ function NewPurchase({ onClose }: { onClose: () => void }) {
             <Input className="col-span-3 sm:col-span-1" aria-label="MRP" placeholder="MRP" inputMode="decimal" value={r.mrp} onChange={(e) => patch(i, { mrp: e.target.value })} />
             <Input className="col-span-3 sm:col-span-1" aria-label="Purchase price" placeholder="Cost" inputMode="decimal" value={r.purchasePrice} onChange={(e) => patch(i, { purchasePrice: e.target.value })} />
             <Input className="col-span-3 sm:col-span-1" aria-label="Selling price" placeholder="Sell" inputMode="decimal" value={r.sellingPrice} onChange={(e) => patch(i, { sellingPrice: e.target.value })} />
-            {rows.length > 1 && <button className="col-span-12 text-left text-xs text-slate-400 hover:text-red-700" onClick={() => setRows(rows.filter((_, j) => j !== i))}>remove line</button>}
+            <Input className="col-span-4 sm:col-span-2" aria-label="Rejected quantity" placeholder="Rejected" inputMode="numeric" value={r.rejected} onChange={(e) => patch(i, { rejected: e.target.value.replace(/[^0-9]/g, "") })} />
+            {Number(r.rejected) > 0 && <Input className="col-span-8 sm:col-span-6" aria-label="Why rejected" placeholder="Why was it rejected? (at least 5 characters)" value={r.rejectReason} onChange={(e) => patch(i, { rejectReason: e.target.value })} />}
+            <button className="col-span-12 text-left text-xs text-slate-400 hover:text-red-700" onClick={() => setRows(rows.filter((_, j) => j !== i))}>remove line</button>
           </div>
         ))}
         <Button variant="ghost" onClick={() => setRows([...rows, blankRow()])}>+ Add line</Button>
+        {rej.map((r, i) => (
+          <div key={i} className="grid grid-cols-12 items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2">
+            <div className="col-span-12 sm:col-span-4"><MedPick value={r.med} onPick={(m) => patchRej(i, { med: m })} /></div>
+            <Input className="col-span-3 sm:col-span-2" aria-label="Rejected in full quantity" placeholder="Units" inputMode="numeric" value={r.quantity} onChange={(e) => patchRej(i, { quantity: e.target.value.replace(/[^0-9]/g, "") })} />
+            <Input className="col-span-3 sm:col-span-2" aria-label="Invoice rate" placeholder="Rate" inputMode="decimal" value={r.unitPrice} onChange={(e) => patchRej(i, { unitPrice: e.target.value })} />
+            <Input className="col-span-12 sm:col-span-4" aria-label="Why rejected in full" placeholder="Why turned away? (at least 5 characters)" value={r.reason} onChange={(e) => patchRej(i, { reason: e.target.value })} />
+            <button className="col-span-12 text-left text-xs text-slate-400 hover:text-red-700" onClick={() => setRej(rej.filter((_, j) => j !== i))}>remove</button>
+          </div>
+        ))}
+        <Button variant="ghost" onClick={() => setRej([...rej, { med: null, quantity: "", unitPrice: "", reason: "" }])}>+ Goods turned away in full (none of it enters stock; credit is asked from the supplier)</Button>
         <ErrorNote error={save.error} />
         <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!ready} loading={save.isPending} onClick={() => save.mutate()}>Receive stock</Button></div>
       </div>
@@ -154,7 +180,7 @@ export function PurchasesTab() {
           {list.data?.data.map((p) => (
             <tr key={p.id}>
               <Td>{p.purchaseNumber}<div className="text-xs text-slate-500">{p.items.length} line(s){p.returns.length ? ` · ${p.returns.length} return(s)` : ""}</div></Td><Td>{p.supplierName}</Td><Td>{p.supplierInvoiceNo}<div className="text-xs text-slate-500">{p.supplierInvoiceDate}</div></Td>
-              <Td>{money(p.total)}</Td><Td>{dateTime(p.receivedAt)}</Td><Td>{can("PHARMACY_PURCHASE") && <Button variant="ghost" onClick={() => setReturning(p)}>Return…</Button>}</Td>
+              <Td>{money(p.total)}</Td><Td>{dateTime(p.receivedAt)}</Td><Td><div className="flex items-center gap-2"><a className="text-xs text-brand-700" href={printUrl(`goods-receipts/${p.id}`)} target="_blank" rel="noreferrer">Print</a>{can("PHARMACY_PURCHASE") && <Button variant="ghost" onClick={() => setReturning(p)}>Return…</Button>}</div></Td>
             </tr>
           ))}
         </Table>

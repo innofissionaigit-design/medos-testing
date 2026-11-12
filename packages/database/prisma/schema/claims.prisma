@@ -18,6 +18,24 @@ enum ClaimType {
   REIMBURSEMENT
 }
 
+/// The result of checking the patient's cover with the insurer or TPA (by call, portal or email; MedOS records it, it does not ask the insurer itself).
+enum ClaimVerification {
+  VERIFIED
+  NOT_ELIGIBLE
+}
+
+enum EnhancementStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AppealStatus {
+  PENDING
+  OVERTURNED
+  UPHELD
+}
+
 enum ClaimStatus {
   DRAFT
   PREAUTH_PENDING
@@ -41,31 +59,33 @@ model Insurer {
   updatedAt DateTime    @updatedAt @db.Timestamptz(3)
 
   policies PatientPolicy[]
+  rates    InsurerRate[]
+  packages InsurerPackage[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, name])
 }
 
 model PatientPolicy {
-  id           String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String      @db.Uuid
-  patientId    String      @db.Uuid
-  insurerId    String      @db.Uuid
-  policyNumber String
-  memberId     String?
-  holderName   String?
-  validFrom    DateTime    @db.Date
-  validTo      DateTime    @db.Date
-  sumInsured   Decimal?    @db.Decimal(14, 2)
+  id             String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String      @db.Uuid
+  patientId      String      @db.Uuid
+  insurerId      String      @db.Uuid
+  policyNumber   String
+  memberId       String?
+  holderName     String?
+  validFrom      DateTime    @db.Date
+  validTo        DateTime    @db.Date
+  sumInsured     Decimal?    @db.Decimal(14, 2)
   /// What the patient pays of the covered amount, in percent. Empty means the policy has no co-pay rule and the claimed amount is entered by hand.
-  copayPercent Decimal?    @db.Decimal(5, 2)
+  copayPercent   Decimal?    @db.Decimal(5, 2)
   /// Fixed amount the patient bears first, and how much of it earlier claims have already used.
-  deductible     Decimal   @default(0) @db.Decimal(14, 2)
-  deductibleUsed Decimal   @default(0) @db.Decimal(14, 2)
-  status       PayerStatus @default(ACTIVE)
-  createdById  String      @db.Uuid
-  createdAt    DateTime    @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime    @updatedAt @db.Timestamptz(3)
+  deductible     Decimal     @default(0) @db.Decimal(14, 2)
+  deductibleUsed Decimal     @default(0) @db.Decimal(14, 2)
+  status         PayerStatus @default(ACTIVE)
+  createdById    String      @db.Uuid
+  createdAt      DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime    @updatedAt @db.Timestamptz(3)
 
   patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
   insurer Insurer @relation(fields: [tenantId, insurerId], references: [tenantId, id], onDelete: Restrict)
@@ -77,42 +97,57 @@ model PatientPolicy {
 }
 
 model Claim {
-  id               String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId         String      @db.Uuid
-  facilityId       String      @db.Uuid
-  patientId        String      @db.Uuid
-  policyId         String      @db.Uuid
-  encounterId      String?     @db.Uuid
-  invoiceId        String?     @db.Uuid
-  claimNumber      String
-  type             ClaimType
-  status           ClaimStatus @default(DRAFT)
-  diagnosis        String?
-  preauthRequested Decimal?    @db.Decimal(14, 2)
-  preauthApproved  Decimal?    @db.Decimal(14, 2)
-  claimedAmount    Decimal?    @db.Decimal(14, 2)
-  approvedAmount   Decimal?    @db.Decimal(14, 2)
-  settledAmount    Decimal     @default(0) @db.Decimal(14, 2)
+  id                   String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId             String             @db.Uuid
+  facilityId           String             @db.Uuid
+  patientId            String             @db.Uuid
+  policyId             String             @db.Uuid
+  encounterId          String?            @db.Uuid
+  invoiceId            String?            @db.Uuid
+  claimNumber          String
+  type                 ClaimType
+  status               ClaimStatus        @default(DRAFT)
+  diagnosis            String?
+  preauthRequested     Decimal?           @db.Decimal(14, 2)
+  preauthApproved      Decimal?           @db.Decimal(14, 2)
+  claimedAmount        Decimal?           @db.Decimal(14, 2)
+  approvedAmount       Decimal?           @db.Decimal(14, 2)
+  settledAmount        Decimal            @default(0) @db.Decimal(14, 2)
   /// The co-pay calculation used when the claim was submitted (a snapshot: later changes to the policy do not touch it).
-  calculatedAmount     Decimal? @db.Decimal(14, 2)
-  patientShare         Decimal? @db.Decimal(14, 2)
-  copayPercentApplied  Decimal? @db.Decimal(5, 2)
-  deductibleApplied    Decimal? @db.Decimal(14, 2)
+  calculatedAmount     Decimal?           @db.Decimal(14, 2)
+  patientShare         Decimal?           @db.Decimal(14, 2)
+  copayPercentApplied  Decimal?           @db.Decimal(5, 2)
+  deductibleApplied    Decimal?           @db.Decimal(14, 2)
   /// Why the claimed amount differs from the calculated one.
   amountOverrideReason String?
   /// Why the insurer rejected it, or why it was closed without full payment.
-  closeReason      String?
-  createdById      String      @db.Uuid
-  createdAt        DateTime    @default(now()) @db.Timestamptz(3)
-  updatedAt        DateTime    @updatedAt @db.Timestamptz(3)
+  closeReason          String?
+  /// The insurer's package the claim is paid under, if any: the claim never asks for more than the package price (a snapshot of the package when it was chosen).
+  packageId            String?            @db.Uuid
+  packageName          String?
+  packagePrice         Decimal?           @db.Decimal(14, 2)
+  /// Payer verification: the last check of the patient's cover with the insurer, who did it, and the insurer's reference for it.
+  verification         ClaimVerification?
+  verifiedAt           DateTime?          @db.Timestamptz(3)
+  verifiedById         String?            @db.Uuid
+  verificationRef      String?
+  verificationNote     String?
+  createdById          String             @db.Uuid
+  createdAt            DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime           @updatedAt @db.Timestamptz(3)
 
-  patient     Patient           @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  policy      PatientPolicy     @relation(fields: [tenantId, policyId], references: [tenantId, id], onDelete: Restrict)
-  encounter   Encounter?        @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
-  invoice     Invoice?          @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
-  events      ClaimEvent[]
-  settlements ClaimSettlement[]
-  documents   ClaimDocument[]
+  patient       Patient             @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  policy        PatientPolicy       @relation(fields: [tenantId, policyId], references: [tenantId, id], onDelete: Restrict)
+  encounter     Encounter?          @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  invoice       Invoice?            @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+  events        ClaimEvent[]
+  settlements   ClaimSettlement[]
+  documents     ClaimDocument[]
+  enhancements  ClaimEnhancement[]
+  nonPayables   ClaimNonPayable[]
+  extraInvoices ClaimInvoice[]
+  appeals       ClaimAppeal[]
+  transmissions ClaimTransmission[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, claimNumber])
@@ -147,6 +182,8 @@ model ClaimSettlement {
   reference   String
   receivedOn  DateTime @db.Date
   receiptId   String?  @db.Uuid
+  /// Tax the insurer deducted at source from this payment (TDS). The claim is settled by the cash received plus this, and the invoice is credited with both.
+  tdsAmount   Decimal  @default(0) @db.Decimal(14, 2)
   createdById String   @db.Uuid
   createdAt   DateTime @default(now()) @db.Timestamptz(3)
 
@@ -181,4 +218,156 @@ model ClaimDocument {
 
   @@unique([tenantId, id])
   @@index([tenantId, claimId, status, uploadedAt])
+}
+
+/// A request, while the patient is admitted, for the insurer to authorise more than the first pre-authorisation (docs/claims.md). Asked for, then approved (for an amount up to
+/// what was asked, which is added to the claim's authorised amount) or rejected. Never deleted or edited once decided.
+model ClaimEnhancement {
+  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String            @db.Uuid
+  claimId         String            @db.Uuid
+  requestedAmount Decimal           @db.Decimal(14, 2)
+  reason          String
+  status          EnhancementStatus @default(PENDING)
+  approvedAmount  Decimal?          @db.Decimal(14, 2)
+  decisionNote    String?
+  requestedById   String            @db.Uuid
+  requestedAt     DateTime          @default(now()) @db.Timestamptz(3)
+  decidedById     String?           @db.Uuid
+  decidedAt       DateTime?         @db.Timestamptz(3)
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId, requestedAt])
+}
+
+/// A charge on the bill that the insurer will not pay (docs/claims.md): for example items excluded by the policy. It is left out of what the claim asks the insurer for and
+/// is paid by the patient. A wrong entry is marked REMOVED with a reason; nothing is deleted.
+model ClaimNonPayable {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  claimId      String            @db.Uuid
+  description  String
+  amount       Decimal           @db.Decimal(14, 2)
+  reason       String
+  status       PatientFileStatus @default(ACTIVE)
+  recordedById String            @db.Uuid
+  recordedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  removedById  String?           @db.Uuid
+  removedAt    DateTime?         @db.Timestamptz(3)
+  removeReason String?
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId, status])
+}
+
+/// An appeal against the insurer's rejection of a submitted claim (docs/claims.md). Asked for, then overturned (the claim becomes approved for an amount up to what was
+/// claimed) or upheld. Decided once; never deleted.
+model ClaimAppeal {
+  id             String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId       String       @db.Uuid
+  claimId        String       @db.Uuid
+  reason         String
+  status         AppealStatus @default(PENDING)
+  approvedAmount Decimal?     @db.Decimal(14, 2)
+  decisionNote   String?
+  requestedById  String       @db.Uuid
+  requestedAt    DateTime     @default(now()) @db.Timestamptz(3)
+  decidedById    String?      @db.Uuid
+  decidedAt      DateTime?    @db.Timestamptz(3)
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId, requestedAt])
+}
+
+/// What an insurer has agreed to pay for a service (its rate card). A bill line priced above it has its excess left to the patient (docs/claims.md).
+model InsurerRate {
+  id        String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String      @db.Uuid
+  insurerId String      @db.Uuid
+  serviceId String      @db.Uuid
+  price     Decimal     @db.Decimal(12, 2)
+  status    PayerStatus @default(ACTIVE)
+  createdAt DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime    @updatedAt @db.Timestamptz(3)
+
+  insurer Insurer @relation(fields: [tenantId, insurerId], references: [tenantId, id], onDelete: Restrict)
+  service Service @relation(fields: [tenantId, serviceId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, insurerId, serviceId])
+}
+
+/// A package an insurer pays a fixed price for (for example a surgery with its stay). A claim under a package never asks the insurer for more than the package price.
+model InsurerPackage {
+  id        String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId  String      @db.Uuid
+  insurerId String      @db.Uuid
+  code      String
+  name      String
+  price     Decimal     @db.Decimal(14, 2)
+  status    PayerStatus @default(ACTIVE)
+  createdAt DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt DateTime    @updatedAt @db.Timestamptz(3)
+
+  insurer Insurer @relation(fields: [tenantId, insurerId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, insurerId, code])
+}
+
+/// A further invoice of the same patient that one claim covers (for example an interim or pharmacy bill beside the final bill). The claim's main invoice stays on the claim.
+model ClaimInvoice {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  claimId     String   @db.Uuid
+  invoiceId   String   @db.Uuid
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  claim   Claim   @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+  invoice Invoice @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, claimId, invoiceId])
+  @@index([tenantId, invoiceId])
+}
+
+enum TransmissionKind {
+  ELIGIBILITY
+  CLAIM
+}
+
+enum TransmissionStatus {
+  SENT
+  FAILED
+  NOT_SENT
+}
+
+/// A standard-format message built from a claim (a FHIR eligibility request or claim) and what happened when it was sent: through the configured channel, or only recorded when none is set up.
+/// The insurer's reply is entered by hand (verification, decision, settlement). Never edited.
+model ClaimTransmission {
+  id          String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String             @db.Uuid
+  claimId     String             @db.Uuid
+  kind        TransmissionKind
+  status      TransmissionStatus
+  channel     String
+  /// A fingerprint of what was built, so a resend of the same content is recognisable. Not the content itself.
+  payloadHash String
+  httpStatus  Int?
+  externalRef String?
+  detail      String?
+  sentById    String             @db.Uuid
+  at          DateTime           @default(now()) @db.Timestamptz(3)
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId, at])
 }

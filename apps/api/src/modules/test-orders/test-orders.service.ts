@@ -106,10 +106,13 @@ export class TestOrdersService {
       const services = await tx.service.findMany({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE" }, select: { id: true, name: true, code: true } });
       const byText = new Map<string, string>();
       for (const s of services) { byText.set(norm(s.name), s.id); if (!byText.has(norm(s.code))) byText.set(norm(s.code), s.id); }
+      // The tests are written in one go, so they would all share one timestamp and come back in no fixed order. Stamping them a millisecond
+      // apart, in the order the doctor wrote them, keeps every list (the Cashier's, the laboratory's) in the doctor's order.
+      const at = Date.now();
       await tx.testOrder.createMany({
-        data: toCreate.map((t) => ({
+        data: toCreate.map((t, i) => ({
           tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: enc.patientId, encounterId: enc.id, category: t.category, name: t.name,
-          serviceId: byText.get(norm(t.name)) ?? null, source: "DIGITAL", orderedById: ctx.userId, consultationVersion: version,
+          serviceId: byText.get(norm(t.name)) ?? null, source: "DIGITAL", orderedById: ctx.userId, consultationVersion: version, createdAt: new Date(at + i),
         })),
       });
       await this.audit.record(tx, actorOf(ctx), { action: "TEST_ORDERS_PLACED", entityType: "Encounter", entityId: enc.id, metadata: { count: toCreate.length, version } });

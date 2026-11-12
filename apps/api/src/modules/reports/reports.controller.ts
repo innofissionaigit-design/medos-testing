@@ -61,11 +61,19 @@ export class ReportsController {
   async outstanding(@Ctx() ctx: RequestContext, @Query() q: unknown) { return { data: await this.reports.outstanding(ctx, parse(outstandingSchema, q)) }; }
 
   @Feature("IPD_ENABLED")
+  @RequireAnyPermission("REPORT_READ", "REPORT_PHARMACY", "REPORT_FINANCE")
+  @Get("pharmacy/consumption-cost")
+  async consumptionCost(@Ctx() ctx: RequestContext, @Query() q: unknown) { return { data: await this.reports.consumptionCost(ctx, parse(rangeSchema, q)) }; }
+
   @RequireAnyPermission("REPORT_READ", "REPORT_IPD")
   @Get("ipd/current-admissions")
   async currentAdmissions(@Ctx() ctx: RequestContext) { return { data: await this.reports.currentAdmissions(ctx) }; }
 
   @Feature("IPD_ENABLED")
+  @RequireAnyPermission("REPORT_READ", "REPORT_IPD")
+  @Get("ipd/discharge-turnaround")
+  async dischargeTurnaround(@Ctx() ctx: RequestContext, @Query() q: unknown) { return { data: await this.reports.dischargeTurnaround(ctx, parse(rangeSchema, q)) }; }
+
   @RequireAnyPermission("REPORT_READ", "REPORT_IPD")
   @Get("ipd/admissions-discharges")
   async admissionsAndDischarges(@Ctx() ctx: RequestContext, @Query() q: unknown) { return { data: await this.reports.admissionsAndDischarges(ctx, parse(rangeSchema, q)) }; }

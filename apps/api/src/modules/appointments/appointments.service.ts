@@ -306,12 +306,12 @@ export class AppointmentsService {
     }
   }
 
-  private assertCreate(ctx: RequestContext, input: z.infer<typeof createAppointmentSchema>): void {
+  assertCreate(ctx: RequestContext, input: z.infer<typeof createAppointmentSchema>): void {
     this.assertOverbookAllowed(ctx, input.overbook);
     this.assertNotInPast(input.startAt);
   }
 
-  private async createInTx(tx: Db, ctx: RequestContext, input: z.infer<typeof createAppointmentSchema>, link: { followUpOfEncounterId?: string }) {
+  async createInTx(tx: Db, ctx: RequestContext, input: z.infer<typeof createAppointmentSchema>, link: { followUpOfEncounterId?: string }) {
     await this.lockBooking(tx, `practitioner:${input.practitionerId}`, `patient:${input.patientId}`);
     const tz = await this.tz(tx, ctx);
     const duration = input.durationMinutes ?? (await this.slotLengthAt(tx, ctx, input.practitionerId, input.startAt, tz)) ?? 15;
@@ -707,7 +707,7 @@ export class AppointmentsService {
     if (!ok) throw new DomainError("SLOT_UNAVAILABLE", "The practitioner is not available at that time", 409);
   }
 
-  private mapConflict(e: unknown): unknown {
+  mapConflict(e: unknown): unknown {
     if (isConstraintViolation(e, "appointment_no_practitioner_overlap")) {
       return new DomainError("SLOT_UNAVAILABLE", "That time slot is already booked for this practitioner", 409);
     }

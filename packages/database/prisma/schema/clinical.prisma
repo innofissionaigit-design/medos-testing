@@ -117,9 +117,10 @@ model ClinicalDocument {
   createdAt      DateTime          @default(now()) @db.Timestamptz(3)
   updatedAt      DateTime          @updatedAt @db.Timestamptz(3)
 
-  patient   Patient                   @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  encounter Encounter                 @relation(fields: [tenantId, facilityId, encounterId], references: [tenantId, facilityId, id], onDelete: Restrict)
-  versions  ClinicalDocumentVersion[]
+  patient       Patient                        @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter     Encounter                      @relation(fields: [tenantId, facilityId, encounterId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  versions      ClinicalDocumentVersion[]
+  verifications DischargeSummaryVerification[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, encounterId, kind])
@@ -181,23 +182,23 @@ enum OrderItemStatus {
 
 /// A medication ORDER (what the doctor prescribes). Administration (what the nurse gave) is a separate record.
 model MedicationOrder {
-  id           String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId     String                @db.Uuid
-  facilityId   String                @db.Uuid
-  patientId    String                @db.Uuid
-  encounterId  String                @db.Uuid
+  id                  String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String                @db.Uuid
+  facilityId          String                @db.Uuid
+  patientId           String                @db.Uuid
+  encounterId         String                @db.Uuid
   /// Assigned at signing, never for drafts.
-  orderNumber  String?
-  status       MedicationOrderStatus @default(DRAFT)
-  orderedById  String                @db.Uuid
-  signedById   String?               @db.Uuid
-  signedAt     DateTime?             @db.Timestamptz(3)
+  orderNumber         String?
+  status              MedicationOrderStatus @default(DRAFT)
+  orderedById         String                @db.Uuid
+  signedById          String?               @db.Uuid
+  signedAt            DateTime?             @db.Timestamptz(3)
   supersededAtVersion Int?
-  notes        String?
+  notes               String?
   /// DIGITAL: written on the consultation screen. HANDWRITTEN: made from a scanned handwritten prescription once the doctor approved it.
-  source       String                @default("DIGITAL")
-  createdAt    DateTime              @default(now()) @db.Timestamptz(3)
-  updatedAt    DateTime              @updatedAt @db.Timestamptz(3)
+  source              String                @default("DIGITAL")
+  createdAt           DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime              @updatedAt @db.Timestamptz(3)
 
   patient   Patient               @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
   encounter Encounter             @relation(fields: [tenantId, facilityId, encounterId], references: [tenantId, facilityId, id], onDelete: Restrict)
@@ -228,7 +229,7 @@ model MedicationOrderItem {
   durationDays      Int?
   quantity          Int?
   /// Before / after food etc. (BEFORE_FOOD, AFTER_FOOD, WITH_FOOD, EMPTY_STOMACH, ANY_TIME); null when not stated.
-  foodRelation       String?
+  foodRelation      String?
   instructions      String?
   status            OrderItemStatus     @default(ACTIVE)
   /// Increased by pharmacy dispensing; an item that was partly dispensed can never be edited away.
@@ -239,11 +240,11 @@ model MedicationOrderItem {
   /// Set when this item replaces another medicine of a signed prescription (docs/prescriptions.md): the replaced item is kept, stopped as "Amended".
   amendsItemId      String?             @db.Uuid
 
-  order    MedicationOrder @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Restrict)
-  medicine Medicine?       @relation(fields: [medicineId], references: [id], onDelete: Restrict)
+  order           MedicationOrder            @relation(fields: [tenantId, orderId], references: [tenantId, id], onDelete: Restrict)
+  medicine        Medicine?                  @relation(fields: [medicineId], references: [id], onDelete: Restrict)
   administrations MedicationAdministration[]
-  amendsItem MedicationOrderItem?  @relation("ItemAmendment", fields: [tenantId, amendsItemId], references: [tenantId, id], onDelete: Restrict)
-  amendedBy  MedicationOrderItem[] @relation("ItemAmendment")
+  amendsItem      MedicationOrderItem?       @relation("ItemAmendment", fields: [tenantId, amendsItemId], references: [tenantId, id], onDelete: Restrict)
+  amendedBy       MedicationOrderItem[]      @relation("ItemAmendment")
 
   @@unique([tenantId, id])
   @@unique([orderId, lineNo])
@@ -274,8 +275,8 @@ model DoctorShareRule {
   createdById    String    @db.Uuid
   createdAt      DateTime  @default(now()) @db.Timestamptz(3)
 
-  facility     Facility      @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  practitioner Practitioner? @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
+  facility     Facility           @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  practitioner Practitioner?      @relation(fields: [practitionerId], references: [id], onDelete: Restrict)
   entries      DoctorShareEntry[]
 
   @@unique([tenantId, id])
@@ -333,45 +334,45 @@ enum ScanStatus {
 /// what the OCR service read, kept exactly as returned; the doctor's corrections are stored separately and the original is never overwritten. Nothing here
 /// orders, dispenses or bills anything: it is a record, and the doctor decides what to copy into the digital prescription.
 model PrescriptionScan {
-  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId      String     @db.Uuid
-  facilityId    String     @db.Uuid
-  patientId     String     @db.Uuid
-  encounterId   String     @db.Uuid
-  fileId        String     @db.Uuid
-  status        ScanStatus @default(UPLOADED)
-  ocrProvider   String?
-  ocrText       String?
-  ocrConfidence Decimal?   @db.Decimal(5, 4)
-  ocrError      String?
-  ocrAttempts   Int        @default(0)
-  ocrAt         DateTime?  @db.Timestamptz(3)
-  correctedText String?
-  correctedById String?    @db.Uuid
-  correctedAt   DateTime?  @db.Timestamptz(3)
+  id                String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String     @db.Uuid
+  facilityId        String     @db.Uuid
+  patientId         String     @db.Uuid
+  encounterId       String     @db.Uuid
+  fileId            String     @db.Uuid
+  status            ScanStatus @default(UPLOADED)
+  ocrProvider       String?
+  ocrText           String?
+  ocrConfidence     Decimal?   @db.Decimal(5, 4)
+  ocrError          String?
+  ocrAttempts       Int        @default(0)
+  ocrAt             DateTime?  @db.Timestamptz(3)
+  correctedText     String?
+  correctedById     String?    @db.Uuid
+  correctedAt       DateTime?  @db.Timestamptz(3)
   /// The doctor's structured medicine lines (the same shape as a prescription item), kept as a draft until approval; frozen after it.
-  lines         Json?
-  linesById     String?    @db.Uuid
-  linesAt       DateTime?  @db.Timestamptz(3)
+  lines             Json?
+  linesById         String?    @db.Uuid
+  linesAt           DateTime?  @db.Timestamptz(3)
   /// Approval is the doctor's verification: it creates the prescription (a signed HANDWRITTEN order) that the pharmacy sees.
-  approvedById  String?    @db.Uuid
-  approvedAt    DateTime?  @db.Timestamptz(3)
-  medicationOrderId String? @db.Uuid
+  approvedById      String?    @db.Uuid
+  approvedAt        DateTime?  @db.Timestamptz(3)
+  medicationOrderId String?    @db.Uuid
   /// What the pharmacy did with the picture: DISPENSED (the pharmacist verified it, entered the medicines and billed) or REJECTED (could not be used, with the reason).
-  pharmacyOutcome String?
-  pharmacyAt    DateTime?  @db.Timestamptz(3)
-  pharmacyById  String?    @db.Uuid
-  pharmacyNote  String?
-  createdById   String     @db.Uuid
-  createdAt     DateTime   @default(now()) @db.Timestamptz(3)
+  pharmacyOutcome   String?
+  pharmacyAt        DateTime?  @db.Timestamptz(3)
+  pharmacyById      String?    @db.Uuid
+  pharmacyNote      String?
+  createdById       String     @db.Uuid
+  createdAt         DateTime   @default(now()) @db.Timestamptz(3)
 
-  facility Facility    @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
-  medicationOrder MedicationOrder? @relation(fields: [tenantId, medicationOrderId], references: [tenantId, id], onDelete: Restrict)
-  pages PrescriptionScanPage[]
-  dispenses Dispense[]
-  patient  Patient     @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
-  encounter Encounter  @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
-  file     PatientFile @relation(fields: [tenantId, fileId], references: [tenantId, id], onDelete: Restrict)
+  facility        Facility               @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  medicationOrder MedicationOrder?       @relation(fields: [tenantId, medicationOrderId], references: [tenantId, id], onDelete: Restrict)
+  pages           PrescriptionScanPage[]
+  dispenses       Dispense[]
+  patient         Patient                @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  encounter       Encounter              @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+  file            PatientFile            @relation(fields: [tenantId, fileId], references: [tenantId, id], onDelete: Restrict)
 
   @@unique([tenantId, id])
   @@unique([tenantId, fileId])

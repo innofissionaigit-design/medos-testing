@@ -25,8 +25,8 @@ const EXPORT_PERMISSION: Record<string, Permission> = {
   "bookings-earnings": "REPORT_FINANCE", "my-bookings": "REPORT_MY_PRACTICE", "my-payouts": "REPORT_MY_PRACTICE",
   "opd-daily": "REPORT_OPD", "opd-doctor": "REPORT_OPD", "opd-dept": "REPORT_OPD",
   collections: "REPORT_FINANCE", registrations: "REPORT_FINANCE", "fee-skips": "REPORT_FINANCE", shifts: "REPORT_FINANCE", outstanding: "REPORT_FINANCE",
-  "cur-adm": "REPORT_IPD", "adm-dis": "REPORT_IPD", occupancy: "REPORT_IPD",
-  sales: "REPORT_PHARMACY", movement: "REPORT_PHARMACY", stock: "REPORT_PHARMACY", low: "REPORT_PHARMACY", expiry: "REPORT_PHARMACY",
+  "cur-adm": "REPORT_IPD", "adm-dis": "REPORT_IPD", "discharge-tat": "REPORT_IPD", occupancy: "REPORT_IPD",
+  sales: "REPORT_PHARMACY", "consumption-cost": "REPORT_PHARMACY", movement: "REPORT_PHARMACY", stock: "REPORT_PHARMACY", low: "REPORT_PHARMACY", expiry: "REPORT_PHARMACY",
 };
 
 interface Range { from: string; to: string; start: Date; end: Date; tz: string }
@@ -288,6 +288,136 @@ export class ReportsService {
     return {
       from: r.from, to: r.to, totalAdmissions: adm.reduce((n, x) => n + x.count, 0), totalDischarges: dis.reduce((n, x) => n + x.count, 0),
       days: days.map((d) => ({ day: d, admissions: adm.find((x) => x.day === d)?.count ?? 0, discharges: dis.find((x) => x.day === d)?.count ?? 0 })),
+    };
+  }
+
+  /**
+   * Discharge turnaround (docs/discharge-stages.md): for stays discharged in the range, how long each part of the discharge took, from the doctor's advice to the bed being ready,
+   * with the average, median and slowest tenth for each part, and the stage that was slowest to clear. Times come from the records the checklist already keeps.
+   */
+  async dischargeTurnaround(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
+    const r = await this.range(ctx, q);
+    const rows = await this.prisma.$queryRaw<{ id: string; admissionNumber: string; dischargedAt: Date; clearances: Record<string, string> | null; summarySignedAt: Date | null; summaryVerifiedAt: Date | null; billIssuedAt: Date | null; paidAt: Date | null; departedAt: Date | null; bedReadyAt: Date | null }[]>`
+      SELECT a.id, a."admissionNumber", a."dischargedAt",
+        (SELECT jsonb_object_agg(c.step::text, c.at) FROM "DischargeClearance" c WHERE c."admissionId" = a.id AND c."tenantId" = a."tenantId") AS clearances,
+        (SELECT d."signedAt" FROM "ClinicalDocument" d WHERE d."encounterId" = a."encounterId" AND d."tenantId" = a."tenantId" AND d.kind = 'DISCHARGE_SUMMARY') AS "summarySignedAt",
+        (SELECT min(v.at) FROM "DischargeSummaryVerification" v WHERE v."admissionId" = a.id AND v."tenantId" = a."tenantId") AS "summaryVerifiedAt",
+        (SELECT i."issuedAt" FROM "Invoice" i WHERE i.id = a."finalInvoiceId" AND i."tenantId" = a."tenantId") AS "billIssuedAt",
+        (SELECT max(rc."receivedAt") FROM "Receipt" rc WHERE rc."invoiceId" = a."finalInvoiceId" AND rc."tenantId" = a."tenantId") AS "paidAt",
+        (SELECT dep."departedAt" FROM "AdmissionDeparture" dep WHERE dep."admissionId" = a.id AND dep."tenantId" = a."tenantId") AS "departedAt",
+        (SELECT t."readyAt" FROM "BedTurnover" t WHERE t."admissionId" = a.id AND t."tenantId" = a."tenantId") AS "bedReadyAt"
+      FROM "Admission" a
+      WHERE a."tenantId" = ${ctx.tenantId}::uuid AND a."facilityId" = ${ctx.facilityId}::uuid AND a.status = 'DISCHARGED' AND a."dischargedAt" >= ${r.start} AND a."dischargedAt" < ${r.end} ${admissionScopeSql(ctx)}
+      ORDER BY a."dischargedAt" DESC, a.id LIMIT 1000`;
+    // Lab, OT and insurance clear on their own and keep no time of their own, so only the stages that do are measured.
+    const STEPS: [string, string][] = [["NURSING", "Nursing clearance"], ["CHARGES_REVIEWED", "Charges review"], ["PHARMACY", "Pharmacy clearance"], ["BILLING", "Final bill issued"], ["FINANCIAL_RELEASE", "Dues paid or released"]];
+    const mins = (from: Date | string | null | undefined, to: Date | string | null | undefined): number | null => {
+      if (!from || !to) return null;
+      const d = (new Date(to).getTime() - new Date(from).getTime()) / 60_000;
+      return Number.isFinite(d) ? Math.max(0, Math.round(d)) : null;
+    };
+    const acc = new Map<string, number[]>();
+    const add = (k: string, v: number | null) => { if (v !== null) (acc.get(k) ?? acc.set(k, []).get(k)!).push(v); };
+    const out = rows.map((a) => {
+      const cl: Record<string, string | Date | null> = { ...(a.clearances ?? {}) };
+      // The final bill and the payment are timed from the bill and its receipts (a waived release, which has its own time, takes precedence).
+      if (a.billIssuedAt) cl["BILLING"] = a.billIssuedAt;
+      if (!cl["FINANCIAL_RELEASE"] && a.paidAt) cl["FINANCIAL_RELEASE"] = a.paidAt;
+      const advised = (cl["MEDICALLY_FIT"] as string | Date | null | undefined) ?? null;
+      const times = STEPS.map(([s]) => cl[s]).filter((x): x is string | Date => !!x);
+      const allCleared = times.length ? times.reduce((m, x) => (new Date(x) > new Date(m) ? x : m)) : null;
+      for (const [s] of STEPS) add(s, mins(advised, cl[s]));
+      const m = {
+        summary: mins(advised, a.summarySignedAt), verify: mins(a.summarySignedAt, a.summaryVerifiedAt), cleared: mins(advised, allCleared), toDischarge: mins(allCleared ?? advised, a.dischargedAt),
+        advice: mins(advised, a.dischargedAt), exit: mins(a.dischargedAt, a.departedAt), bed: mins(a.departedAt, a.bedReadyAt), total: mins(advised, a.bedReadyAt),
+      };
+      add("SUMMARY", m.summary); add("VERIFY", m.verify); add("CLEARED", m.cleared); add("TO_DISCHARGE", m.toDischarge); add("ADVICE", m.advice); add("EXIT", m.exit); add("BED", m.bed); add("TOTAL", m.total);
+      return { admissionNumber: a.admissionNumber, dischargedAt: a.dischargedAt, adviceToDischargeMinutes: m.advice, dischargeToDepartureMinutes: m.exit, departureToBedReadyMinutes: m.bed, adviceToBedReadyMinutes: m.total };
+    });
+    const stat = (key: string, label: string) => {
+      const v = [...(acc.get(key) ?? [])].sort((x, y) => x - y);
+      const at = (p: number) => v[Math.min(v.length - 1, Math.max(0, Math.ceil(p * v.length) - 1))] ?? null;
+      return { stage: label, cases: v.length, averageMinutes: v.length ? Math.round((v.reduce((n, x) => n + x, 0) / v.length) * 10) / 10 : null, medianMinutes: v.length ? (v.length % 2 ? v[(v.length - 1) / 2]! : Math.round(((v[v.length / 2 - 1]! + v[v.length / 2]!) / 2) * 10) / 10) : null, slowestTenthMinutes: at(0.9) };
+    };
+    const clearing = STEPS.map(([k, label]) => stat(k, `${label}, after the doctor's advice`));
+    const slowest = clearing.filter((s) => s.cases > 0).sort((a, b) => (b.medianMinutes ?? 0) - (a.medianMinutes ?? 0))[0];
+    return {
+      from: r.from, to: r.to, discharges: rows.length, slowestToClear: slowest ? slowest.stage.replace(", after the doctor's advice", "") : null,
+      stages: [
+        stat("SUMMARY", "Summary signed, after the doctor's advice"), stat("VERIFY", "Summary verified, after it was signed"), ...clearing, stat("CLEARED", "Every measured clearance done, after the doctor's advice"),
+        stat("TO_DISCHARGE", "Discharge completed, after the last clearance"), stat("ADVICE", "Advice to discharge completed"), stat("EXIT", "Discharge completed to patient leaving"), stat("BED", "Patient leaving to bed ready"), stat("TOTAL", "Whole journey: advice to bed ready"),
+      ],
+      admissions: out,
+    };
+  }
+
+  /**
+   * Stock purchased, consumed and still held, at cost (docs/procurement.md): what was received (accepted into stock) in the range, what was used up by selling, ward issues,
+   * procedures and department use, what was written off or returned to suppliers, and the value of the stock now in the main store and in the locations. Every figure is units
+   * times the batch's purchase price (before GST) read from the stock ledgers, so it can be checked against them.
+   */
+  async consumptionCost(ctx: RequestContext, q: z.infer<typeof rangeSchema>) {
+    const r = await this.range(ctx, q);
+    const t = ctx.tenantId;
+    const f = ctx.facilityId;
+    const [bought, main, issues, uses, valueMain, valueLoc, byLocation, byProcedure] = await Promise.all([
+      this.prisma.$queryRaw<{ units: number; rejected: number; cost: string }[]>`
+        SELECT COALESCE(SUM(pi.quantity), 0)::int AS units, COALESCE(SUM(pi."rejectedQuantity"), 0)::int AS rejected, COALESCE(SUM(pi.quantity * pi."purchasePrice"), 0)::numeric(14,2)::text AS cost
+        FROM "PurchaseItem" pi JOIN "Purchase" p ON p.id = pi."purchaseId" AND p."tenantId" = pi."tenantId"
+        WHERE p."tenantId" = ${t}::uuid AND p."facilityId" = ${f}::uuid AND p."receivedAt" >= ${r.start} AND p."receivedAt" < ${r.end}`,
+      this.prisma.$queryRaw<{ type: string; direction: string; units: number; cost: string }[]>`
+        SELECT l.type::text AS type, l.direction::text AS direction, SUM(l.quantity)::int AS units, SUM(l.quantity * b."purchasePrice")::numeric(14,2)::text AS cost
+        FROM "StockLedger" l JOIN "MedicineBatch" b ON b.id = l."batchId" AND b."tenantId" = l."tenantId"
+        WHERE l."tenantId" = ${t}::uuid AND l."facilityId" = ${f}::uuid AND l."createdAt" >= ${r.start} AND l."createdAt" < ${r.end} AND l.type IN ('SALE', 'PATIENT_RETURN', 'DAMAGE', 'ADJUSTMENT', 'PURCHASE_RETURN')
+        GROUP BY 1, 2`,
+      this.prisma.$queryRaw<{ units: number; cost: string }[]>`
+        SELECT COALESCE(SUM(i.quantity), 0)::int AS units, COALESCE(SUM(i.quantity * b."purchasePrice"), 0)::numeric(14,2)::text AS cost
+        FROM "StockLocationIssue" i JOIN "MedicineBatch" b ON b.id = i."batchId" AND b."tenantId" = i."tenantId"
+        WHERE i."tenantId" = ${t}::uuid AND i."facilityId" = ${f}::uuid AND i."createdAt" >= ${r.start} AND i."createdAt" < ${r.end}`,
+      this.prisma.$queryRaw<{ kind: string; units: number; cost: string }[]>`
+        SELECT c.kind::text AS kind, SUM(c.quantity)::int AS units, SUM(c."totalCost")::numeric(14,2)::text AS cost FROM "StockConsumption" c
+        WHERE c."tenantId" = ${t}::uuid AND c."facilityId" = ${f}::uuid AND c."createdAt" >= ${r.start} AND c."createdAt" < ${r.end} GROUP BY 1`,
+      this.prisma.$queryRaw<{ cost: string }[]>`
+        SELECT COALESCE(SUM(sb.quantity * b."purchasePrice"), 0)::numeric(14,2)::text AS cost FROM "StockBalance" sb JOIN "MedicineBatch" b ON b.id = sb."batchId" AND b."tenantId" = sb."tenantId"
+        WHERE sb."tenantId" = ${t}::uuid AND sb."facilityId" = ${f}::uuid`,
+      this.prisma.$queryRaw<{ cost: string }[]>`
+        SELECT COALESCE(SUM(lb.quantity * b."purchasePrice"), 0)::numeric(14,2)::text AS cost FROM "StockLocationBalance" lb JOIN "MedicineBatch" b ON b.id = lb."batchId" AND b."tenantId" = lb."tenantId"
+        WHERE lb."tenantId" = ${t}::uuid AND lb."facilityId" = ${f}::uuid`,
+      this.prisma.$queryRaw<{ location: string; wardIssues: string; procedures: string; departmentUse: string }[]>`
+        SELECT s.name AS location,
+          COALESCE((SELECT SUM(i.quantity * b."purchasePrice") FROM "StockLocationIssue" i JOIN "MedicineBatch" b ON b.id = i."batchId" AND b."tenantId" = i."tenantId" WHERE i."locationId" = s.id AND i."tenantId" = s."tenantId" AND i."createdAt" >= ${r.start} AND i."createdAt" < ${r.end}), 0)::numeric(14,2)::text AS "wardIssues",
+          COALESCE((SELECT SUM(c."totalCost") FROM "StockConsumption" c WHERE c."locationId" = s.id AND c."tenantId" = s."tenantId" AND c.kind = 'PROCEDURE' AND c."createdAt" >= ${r.start} AND c."createdAt" < ${r.end}), 0)::numeric(14,2)::text AS procedures,
+          COALESCE((SELECT SUM(c."totalCost") FROM "StockConsumption" c WHERE c."locationId" = s.id AND c."tenantId" = s."tenantId" AND c.kind = 'DEPARTMENT_USE' AND c."createdAt" >= ${r.start} AND c."createdAt" < ${r.end}), 0)::numeric(14,2)::text AS "departmentUse"
+        FROM "StockLocation" s WHERE s."tenantId" = ${t}::uuid AND s."facilityId" = ${f}::uuid ORDER BY s.name`,
+      this.prisma.$queryRaw<{ procedure: string; units: number; cost: string }[]>`
+        SELECT p.name AS procedure, SUM(c.quantity)::int AS units, SUM(c."totalCost")::numeric(14,2)::text AS cost FROM "StockConsumption" c JOIN "Procedure" p ON p.id = c."procedureId" AND p."tenantId" = c."tenantId"
+        WHERE c."tenantId" = ${t}::uuid AND c."facilityId" = ${f}::uuid AND c."createdAt" >= ${r.start} AND c."createdAt" < ${r.end} AND c.kind = 'PROCEDURE' GROUP BY p.name ORDER BY SUM(c."totalCost") DESC LIMIT 20`,
+    ]);
+    const D = (v: string | undefined) => new Decimal(v ?? "0");
+    const pick = (type: string, direction: string) => main.find((m) => m.type === type && m.direction === direction);
+    const sold = { units: (pick("SALE", "OUT")?.units ?? 0) - (pick("PATIENT_RETURN", "IN")?.units ?? 0), cost: D(pick("SALE", "OUT")?.cost).minus(D(pick("PATIENT_RETURN", "IN")?.cost)) };
+    const procedures = uses.find((u) => u.kind === "PROCEDURE");
+    const dept = uses.find((u) => u.kind === "DEPARTMENT_USE");
+    const damaged = { units: pick("DAMAGE", "OUT")?.units ?? 0, cost: D(pick("DAMAGE", "OUT")?.cost) };
+    const addedBy = { units: pick("ADJUSTMENT", "IN")?.units ?? 0, cost: D(pick("ADJUSTMENT", "IN")?.cost) };
+    const removedBy = { units: pick("ADJUSTMENT", "OUT")?.units ?? 0, cost: D(pick("ADJUSTMENT", "OUT")?.cost) };
+    const returned = { units: pick("PURCHASE_RETURN", "OUT")?.units ?? 0, cost: D(pick("PURCHASE_RETURN", "OUT")?.cost) };
+    const used = sold.cost.plus(D(issues[0]?.cost)).plus(D(procedures?.cost)).plus(D(dept?.cost));
+    return {
+      from: r.from, to: r.to,
+      received: { units: bought[0]?.units ?? 0, cost: fmt(D(bought[0]?.cost)), rejectedUnits: bought[0]?.rejected ?? 0 },
+      soldToPatients: { units: sold.units, cost: fmt(sold.cost) },
+      wardIssues: { units: issues[0]?.units ?? 0, cost: fmt(D(issues[0]?.cost)) },
+      procedures: { units: procedures?.units ?? 0, cost: fmt(D(procedures?.cost)) },
+      departmentUse: { units: dept?.units ?? 0, cost: fmt(D(dept?.cost)) },
+      totalConsumptionCost: fmt(used),
+      writtenOffDamaged: { units: damaged.units, cost: fmt(damaged.cost) },
+      stockAddedByAdjustment: { units: addedBy.units, cost: fmt(addedBy.cost) },
+      stockRemovedByAdjustment: { units: removedBy.units, cost: fmt(removedBy.cost) },
+      returnedToSuppliers: { units: returned.units, cost: fmt(returned.cost) },
+      stockValue: { mainStore: fmt(D(valueMain[0]?.cost)), locations: fmt(D(valueLoc[0]?.cost)), total: fmt(D(valueMain[0]?.cost).plus(D(valueLoc[0]?.cost))) },
+      byLocation: byLocation.map((l) => ({ ...l, total: fmt(D(l.wardIssues).plus(D(l.procedures)).plus(D(l.departmentUse))) })),
+      byProcedure,
     };
   }
 

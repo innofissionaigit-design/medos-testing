@@ -8,6 +8,7 @@ import { IdempotencyService } from "../../common/idempotency.service";
 import { PrismaService, type Db } from "../../common/prisma.service";
 import type { RequestContext } from "../../common/request-context";
 import { NumberingService } from "../numbering/numbering.service";
+import { CostLedgerService, movementLines } from "../procurement/cost-ledger.service";
 import { StockService } from "./stock.service";
 
 const uuid = z.string().uuid();
@@ -46,6 +47,28 @@ export const wardIssueSchema = z.object({
   locationId: uuid, batchId: uuid, quantity: z.number().int().min(1).max(10_000), remarks: z.string().trim().max(240).optional(),
 }).strict();
 
+/**
+ * Stock used up in a place without being billed per unit (docs/procurement.md): an OT consumable for a patient's procedure, or a department's own use. The stock leaves
+ * the location's ledger and the batch's purchase price is posted as the cost.
+ */
+export const consumeSchema = z.object({
+  locationId: uuid, batchId: uuid, quantity: z.number().int().min(1).max(10_000),
+  kind: z.enum(["PROCEDURE", "DEPARTMENT_USE"]), procedureId: uuid.optional(), reason: z.string().trim().max(240).optional(),
+  /** Also charge the patient's admission for what was used, at the batch's selling price (as a ward-store issue does). Only for a procedure. */
+  billToPatient: z.boolean().optional(),
+}).strict().superRefine((v, c) => {
+  if (v.billToPatient && v.kind !== "PROCEDURE") c.addIssue({ code: "custom", path: ["billToPatient"], message: "Only stock used for a procedure can be billed to a patient" });
+  if (v.kind === "PROCEDURE" && !v.procedureId) c.addIssue({ code: "custom", path: ["procedureId"], message: "Choose the procedure the stock was used for" });
+  if (v.kind === "DEPARTMENT_USE") {
+    if (v.procedureId) c.addIssue({ code: "custom", path: ["procedureId"], message: "Department use is not for a procedure" });
+    if ((v.reason ?? "").length < 5) c.addIssue({ code: "custom", path: ["reason"], message: "Say what the stock was used for" });
+  }
+});
+export const consumptionListSchema = z.object({
+  locationId: uuid.optional(), kind: z.enum(["PROCEDURE", "DEPARTMENT_USE"]).optional(), procedureId: uuid.optional(),
+  page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(25),
+}).strict();
+
 const codeFrom = (name: string): string => {
   const base = name.toUpperCase().replace(/[^A-Z0-9]+/g, "").slice(0, 8);
   return (base.length >= 2 ? base : `LOC${base}`).slice(0, 8);
@@ -62,7 +85,7 @@ const round2 = (d: Decimal) => d.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
 export class StockLocationsService {
   constructor(
     private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly numbering: NumberingService,
-    private readonly stock: StockService, private readonly idempotency: IdempotencyService,
+    private readonly stock: StockService, private readonly idempotency: IdempotencyService, private readonly costLedger: CostLedgerService,
   ) {}
 
   // ───── locations ─────
@@ -134,7 +157,12 @@ export class StockLocationsService {
 
   async transfer(ctx: RequestContext, input: z.infer<typeof transferSchema>, key: string | undefined) {
     if (!key) throw new DomainError("VALIDATION_FAILED", "An Idempotency-Key header is required for stock transfers", 400);
-    return this.idempotency.run(ctx.tenantId, "STOCK_TRANSFER", key, input, async (tx) => {
+    return this.idempotency.run(ctx.tenantId, "STOCK_TRANSFER", key, input, (tx) => this.transferInTx(tx, ctx, input));
+  }
+
+  /** The transfer itself, inside the caller's transaction (a store request is fulfilled with it). */
+  async transferInTx(tx: Db, ctx: RequestContext, input: z.infer<typeof transferSchema>) {
+    {
       const fromId = input.fromLocationId ?? null, toId = input.toLocationId ?? null;
       const twoStep = input.twoStep === true;
       const places = new Map<string, { id: string; name: string; status: string }>();
@@ -186,7 +214,15 @@ export class StockLocationsService {
         metadata: { transferNumber, from: fromName, to: toName, batches: items.length, units: items.reduce((n, i) => n + i.quantity, 0), reason: input.reason, twoStep },
       });
       return (await this.views(tx, ctx, { id: row.id })).items[0]!;
-    });
+    }
+  }
+
+  /** A difference found by a stock count, posted to a location's ledger (the same locking and checks as any other movement). */
+  async postCountDifference(tx: Db, ctx: RequestContext, m: { locationId: string; batchId: string; medicineId: string; batchNo: string; direction: "IN" | "OUT"; quantity: number; countId: string; place: string }) {
+    const row = await tx.stockLocationBalance.findFirst({ where: { tenantId: ctx.tenantId, locationId: m.locationId, batchId: m.batchId }, select: { quantity: true } });
+    if (!row && m.direction === "IN") await tx.stockLocationBalance.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, locationId: m.locationId, batchId: m.batchId, medicineId: m.medicineId, quantity: 0 } });
+    const held = await this.lockLocationRows(tx, ctx, [m.locationId], [m.batchId]);
+    await this.moveInLocation(tx, ctx, { ...m, current: held.get(`${m.locationId}:${m.batchId}`) ?? 0 });
   }
 
   /** The other place confirms that the stock arrived: it now counts there. */
@@ -262,11 +298,20 @@ export class StockLocationsService {
   }
 
   /** One movement in a location: the balance row is already locked by the caller; its quantity is `current`. Caused by a transfer, or by an issue to a patient. */
-  private async moveInLocation(tx: Db, ctx: RequestContext, m: { locationId: string; batchId: string; medicineId: string; batchNo: string; direction: "IN" | "OUT"; quantity: number; transferId?: string; issueId?: string; current: number; place: string }) {
+  private async moveInLocation(tx: Db, ctx: RequestContext, m: { locationId: string; batchId: string; medicineId: string; batchNo: string; direction: "IN" | "OUT"; quantity: number; transferId?: string; issueId?: string; consumptionId?: string; countId?: string; current: number; place: string }) {
     const next = m.direction === "IN" ? m.current + m.quantity : m.current - m.quantity;
     if (next < 0) throw new DomainError("INSUFFICIENT_STOCK", `Only ${m.current} unit${m.current === 1 ? "" : "s"} of batch ${m.batchNo} ${m.current === 1 ? "is" : "are"} in ${m.place}`, 409, { available: m.current, requested: m.quantity });
     await tx.stockLocationBalance.updateMany({ where: { tenantId: ctx.tenantId, locationId: m.locationId, batchId: m.batchId }, data: { quantity: next } });
-    await tx.stockLocationLedger.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, locationId: m.locationId, batchId: m.batchId, medicineId: m.medicineId, direction: m.direction, quantity: m.quantity, balanceAfter: next, transferId: m.transferId ?? null, issueId: m.issueId ?? null, userId: ctx.userId } });
+    const row = await tx.stockLocationLedger.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, locationId: m.locationId, batchId: m.batchId, medicineId: m.medicineId, direction: m.direction, quantity: m.quantity, balanceAfter: next, transferId: m.transferId ?? null, issueId: m.issueId ?? null, consumptionId: m.consumptionId ?? null, countId: m.countId ?? null, userId: ctx.userId }, select: { id: true } });
+    // The cost ledger: medicines issued to a patient from a ward store, and stock found or lost in a count there (transfers keep the total; consumption is posted where it is recorded).
+    if (m.issueId || m.countId) {
+      const b = await tx.medicineBatch.findFirstOrThrow({ where: { id: m.batchId, tenantId: ctx.tenantId }, select: { purchasePrice: true } });
+      const cost = round2(new Decimal(b.purchasePrice.toString()).times(m.quantity));
+      await this.costLedger.post(tx, { tenantId: ctx.tenantId, facilityId: ctx.facilityId, userId: ctx.userId }, {
+        sourceKey: `LOC_MOVE:${row.id}`, sourceType: "StockLocationLedger", sourceId: row.id, date: new Date(), narration: m.issueId ? `Medicines issued to a patient from ${m.place}` : `Stock count difference in ${m.place}`,
+        lines: movementLines(m.issueId ? "SOLD" : "ADJUSTED", m.direction, cost, m.place, m.place),
+      });
+    }
   }
 
   async listTransfers(ctx: RequestContext, q: z.infer<typeof transferListSchema>) {
@@ -301,6 +346,83 @@ export class StockLocationsService {
         items: r.items.map((i) => ({ batchId: i.batchId, medicine: i.batch.medicine.brandName, generic: i.batch.medicine.genericName, strength: i.batch.medicine.strength, batchNo: i.batch.batchNo, expiryDate: i.batch.expiryDate.toISOString().slice(0, 10), quantity: i.quantity })),
       })),
     };
+  }
+
+  // ───── consumption (OT and department use) ─────
+
+  /**
+   * Records stock used at a location. An active location, an unexpired and unblocked batch, and (for a procedure) a procedure of this facility that is planned or performed
+   * and not yet finalised are required. The cost is the batch's purchase price, kept with the record. A retry with the same Idempotency-Key does not use the stock twice.
+   */
+  async consume(ctx: RequestContext, input: z.infer<typeof consumeSchema>, key: string | undefined) {
+    if (!key) throw new DomainError("VALIDATION_FAILED", "An Idempotency-Key header is required to record consumption", 400);
+    return this.idempotency.run(ctx.tenantId, "STOCK_CONSUME", key, input, async (tx) => {
+      const loc = await tx.stockLocation.findFirst({ where: { id: input.locationId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, name: true, status: true } });
+      if (!loc) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      if (loc.status !== "ACTIVE") throw new DomainError("INVALID_STATE", `${loc.name} is not in use`, 409);
+      let proc: { admissionId: string; patientId: string } | null = null;
+      if (input.procedureId) {
+        const p = await tx.procedure.findFirst({ where: { id: input.procedureId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, status: true, admissionId: true, patientId: true } });
+        if (p) proc = { admissionId: p.admissionId, patientId: p.patientId };
+        if (!p) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+        if (p.status !== "PLANNED" && p.status !== "PERFORMED") throw new DomainError("INVALID_STATE", `This procedure is ${p.status.toLowerCase()}: stock can no longer be recorded against it`, 409);
+      }
+      const b = await tx.medicineBatch.findFirst({ where: { id: input.batchId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, medicineId: true, batchNo: true, expiryDate: true, status: true, purchasePrice: true, sellingPrice: true, medicine: { select: { brandName: true, strength: true } } } });
+      if (!b) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      const today = await this.stock.today(tx, ctx);
+      if (b.status !== "ACTIVE") throw new DomainError("INVALID_STATE", `Batch ${b.batchNo} is blocked and cannot be used`, 409);
+      if (b.expiryDate < today) throw new DomainError("INVALID_STATE", `Batch ${b.batchNo} has expired and cannot be used`, 409);
+      const held = await this.lockLocationRows(tx, ctx, [loc.id], [b.id]);
+      const consumptionId = randomUUID();
+      let chargeId: string | null = null;
+      if (input.billToPatient && proc) {
+        const adm = await tx.admission.findFirst({ where: { id: proc.admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, select: { id: true, status: true, finalInvoiceId: true } });
+        if (!adm || adm.status !== "ADMITTED") throw new DomainError("INVALID_STATE", "This patient is not admitted, so the stock cannot be billed to them", 409);
+        if (adm.finalInvoiceId) throw new DomainError("INVALID_STATE", "The final bill has already been issued; nothing can be added to this admission", 409);
+        const label = `${b.medicine.brandName} ${b.medicine.strength ?? ""}`.trim();
+        const charge = await tx.charge.create({
+          data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: proc.patientId, admissionId: adm.id, type: "MEDICINE", description: `${label} x${input.quantity} (${loc.name}, procedure)`, quantity: String(input.quantity), unitPrice: round2(new Decimal(b.sellingPrice.toString())).toFixed(2), taxPercent: "0", sourceKey: `CONSUMPTION:${consumptionId}`, chargedById: ctx.userId },
+          select: { id: true },
+        });
+        chargeId = charge.id;
+      }
+      await this.moveInLocation(tx, ctx, { locationId: loc.id, batchId: b.id, medicineId: b.medicineId, batchNo: b.batchNo, direction: "OUT", quantity: input.quantity, consumptionId, current: held.get(`${loc.id}:${b.id}`) ?? 0, place: loc.name });
+      const unitCost = round2(new Decimal(b.purchasePrice.toString()));
+      const totalCost = round2(unitCost.times(input.quantity));
+      await tx.stockConsumption.create({ data: { id: consumptionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, locationId: loc.id, batchId: b.id, medicineId: b.medicineId, quantity: input.quantity, kind: input.kind, procedureId: input.procedureId ?? null, chargeId, reason: input.reason || null, unitCost: unitCost.toFixed(2), totalCost: totalCost.toFixed(2), consumedById: ctx.userId } });
+      await this.costLedger.post(tx, { tenantId: ctx.tenantId, facilityId: ctx.facilityId, userId: ctx.userId }, {
+        sourceKey: `CONSUMPTION:${consumptionId}`, sourceType: "StockConsumption", sourceId: consumptionId, date: new Date(), narration: `Stock used: ${b.medicine.brandName} x${input.quantity} (${loc.name})`,
+        lines: [{ account: "CONSUMPTION_EXPENSE", costCentre: loc.name, debit: totalCost }, { account: "INVENTORY", costCentre: loc.name, credit: totalCost }],
+      });
+      await this.audit.record(tx, actorOf(ctx), { action: "STOCK_CONSUMED", entityType: "StockConsumption", entityId: consumptionId, metadata: { locationId: loc.id, batchId: b.id, quantity: input.quantity, kind: input.kind, cost: totalCost.toFixed(2), ...(input.procedureId ? { procedureId: input.procedureId } : {}), ...(chargeId ? { chargeId } : {}) } });
+      return (await this.consumptionViews(tx, ctx, { id: consumptionId }))[0]!;
+    });
+  }
+
+  /** The procedures stock can still be recorded against: planned or performed, not yet finalised. A name and a place in the admission list only. */
+  async openProcedures(ctx: RequestContext) {
+    const rows = await this.prisma.procedure.findMany({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: { in: ["PLANNED", "PERFORMED"] } }, orderBy: [{ plannedAt: "desc" }, { id: "desc" }], take: 100,
+      select: { id: true, name: true, status: true, scheduledAt: true, admission: { select: { admissionNumber: true } } },
+    });
+    return rows.map((r) => ({ id: r.id, name: r.name, status: r.status, scheduledAt: r.scheduledAt, admissionNumber: r.admission.admissionNumber }));
+  }
+
+  async listConsumption(ctx: RequestContext, q: z.infer<typeof consumptionListSchema>) {
+    return this.consumptionViews(this.prisma, ctx, q);
+  }
+
+  private async consumptionViews(db: Db | PrismaService, ctx: RequestContext, f: { id?: string; locationId?: string | undefined; kind?: "PROCEDURE" | "DEPARTMENT_USE" | undefined; procedureId?: string | undefined; page?: number; pageSize?: number }) {
+    const rows = await db.stockConsumption.findMany({
+      where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, ...(f.id ? { id: f.id } : {}), ...(f.locationId ? { locationId: f.locationId } : {}), ...(f.kind ? { kind: f.kind } : {}), ...(f.procedureId ? { procedureId: f.procedureId } : {}) },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }], skip: ((f.page ?? 1) - 1) * (f.pageSize ?? 25), take: f.pageSize ?? 25,
+      select: { id: true, quantity: true, kind: true, reason: true, unitCost: true, totalCost: true, chargeId: true, createdAt: true, consumedById: true, location: { select: { id: true, name: true } }, procedure: { select: { id: true, name: true } }, batch: { select: { batchNo: true, medicine: { select: { brandName: true, strength: true } } } } },
+    });
+    const users = new Map((await db.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set(rows.map((r) => r.consumedById))] } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
+    return rows.map((r) => ({
+      id: r.id, at: r.createdAt, location: r.location.name, locationId: r.location.id, medicine: `${r.batch.medicine.brandName} ${r.batch.medicine.strength ?? ""}`.trim(), batchNo: r.batch.batchNo, quantity: r.quantity,
+      kind: r.kind, procedure: r.procedure?.name ?? null, procedureId: r.procedure?.id ?? null, reason: r.reason, billedToPatient: r.chargeId !== null, unitCost: r.unitCost.toFixed(2), totalCost: r.totalCost.toFixed(2), by: users.get(r.consumedById) ?? null,
+    }));
   }
 
   // ───── ward store use by nurses ─────

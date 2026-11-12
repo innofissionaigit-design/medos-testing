@@ -2,12 +2,12 @@
 
 /// Per-facility configuration: feature flags, discharge policy, print settings. Validated per key by the application.
 model Setting {
-  tenantId   String   @db.Uuid
-  facilityId String   @db.Uuid
-  key        String
-  value      Json
-  updatedById String  @db.Uuid
-  updatedAt  DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  key         String
+  value       Json
+  updatedById String   @db.Uuid
+  updatedAt   DateTime @default(now()) @updatedAt @db.Timestamptz(3)
 
   facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
 
@@ -21,7 +21,11 @@ enum ClearanceStep {
   NURSING
   CHARGES_REVIEWED
   PHARMACY
+  LAB_RADIOLOGY
+  OT_PROCEDURE
+  INSURANCE
   BILLING
+  FINANCIAL_RELEASE
 }
 
 enum ClearanceStatus {
@@ -35,6 +39,55 @@ enum DischargeType {
   REFERRED
   ABSCONDED
   DEATH
+}
+
+/// One immutable row per verification of a signed (or amended) discharge summary: a second doctor has checked that version.
+/// A newer version (an amendment) has no row of its own, so it has to be verified again.
+/// How the patient physically left the ward (docs/discharge-stages.md, physical exit).
+enum DepartureMode {
+  WALKED
+  WHEELCHAIR
+  STRETCHER
+  AMBULANCE
+  BODY_RELEASED
+}
+
+/// The actual departure of a discharged patient, confirmed by the ward nurse or patient transport. One per admission, never changed.
+model AdmissionDeparture {
+  id            String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String        @db.Uuid
+  facilityId    String        @db.Uuid
+  admissionId   String        @db.Uuid
+  departedAt    DateTime      @db.Timestamptz(3)
+  mode          DepartureMode
+  escortedBy    String?
+  note          String?
+  confirmedById String        @db.Uuid
+  confirmedAt   DateTime      @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId])
+  @@unique([tenantId, facilityId, admissionId])
+}
+
+model DischargeSummaryVerification {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String   @db.Uuid
+  facilityId   String   @db.Uuid
+  admissionId  String   @db.Uuid
+  documentId   String   @db.Uuid
+  version      Int
+  verifiedById String   @db.Uuid
+  note         String?
+  at           DateTime @default(now()) @db.Timestamptz(3)
+
+  admission Admission        @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  document  ClinicalDocument @relation(fields: [tenantId, documentId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([documentId, version])
 }
 
 /// One immutable row per cleared (or waived, with reason) step; a step that has no row is still pending.
@@ -53,4 +106,93 @@ model DischargeClearance {
 
   @@unique([tenantId, id])
   @@unique([admissionId, step])
+}
+
+/// Bed turnover after a discharge (docs/discharge-stages.md): the bed is vacated, housekeeping starts cleaning, and marks it ready for the next patient.
+/// One per discharged admission. Each time is set once, in order, and never changed (database trigger).
+model BedTurnover {
+  id                  String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String    @db.Uuid
+  facilityId          String    @db.Uuid
+  bedId               String    @db.Uuid
+  admissionId         String    @db.Uuid
+  vacatedAt           DateTime  @db.Timestamptz(3)
+  cleaningStartedAt   DateTime? @db.Timestamptz(3)
+  cleaningStartedById String?   @db.Uuid
+  readyAt             DateTime? @db.Timestamptz(3)
+  readyById           String?   @db.Uuid
+  /// The hospital puts a bed straight back to available after a discharge (no cleaning step): ready at the moment it was vacated.
+  autoReady           Boolean   @default(false)
+
+  bed       Bed       @relation(fields: [tenantId, facilityId, bedId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId])
+  @@unique([tenantId, facilityId, admissionId])
+  @@index([tenantId, facilityId, readyAt])
+  @@index([tenantId, bedId])
+}
+
+/// Post-discharge (docs/discharge-stages.md): the Medical Records Department confirms the record of a discharged stay is complete. One per admission, never changed.
+model MedicalRecordCompletion {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String   @db.Uuid
+  facilityId    String   @db.Uuid
+  admissionId   String   @db.Uuid
+  completedById String   @db.Uuid
+  note          String?
+  completedAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId])
+  @@unique([tenantId, facilityId, admissionId])
+}
+
+/// ICD-10 code of a final diagnosis, assigned by the Medical Records Department when the record is signed off. Exactly one primary per admission; never changed.
+model MedicalRecordCode {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  admissionId String   @db.Uuid
+  diagnosis   String
+  icd10       String
+  primary     Boolean  @default(false)
+  codedById   String   @db.Uuid
+  codedAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId, icd10])
+  @@index([tenantId, icd10])
+}
+
+/// Where the paper record of a discharged stay is: received in MRD, filed, issued to someone, returned.
+enum RecordFileAction {
+  RECEIVED
+  FILED
+  ISSUED
+  RETURNED
+}
+
+/// One movement of the paper record (docs/discharge-stages.md, post-discharge). Append-only: the latest movement is where the file is.
+model MedicalRecordFileMovement {
+  id          String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String           @db.Uuid
+  facilityId  String           @db.Uuid
+  admissionId String           @db.Uuid
+  action      RecordFileAction
+  location    String?
+  issuedTo    String?
+  note        String?
+  byId        String           @db.Uuid
+  at          DateTime         @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, admissionId, at])
 }

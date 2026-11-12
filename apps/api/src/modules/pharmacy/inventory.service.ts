@@ -10,6 +10,8 @@ import { dateOnly } from "../../common/time";
 import { fmt, round2 } from "../billing/billing.domain";
 import { amount, percent } from "../billing/money.schema";
 import { NumberingService } from "../numbering/numbering.service";
+import { CostLedgerService } from "../procurement/cost-ledger.service";
+import { SettingsService } from "../settings/settings.service";
 import { StockService } from "./stock.service";
 
 const uuid = z.string().uuid();
@@ -35,10 +37,19 @@ export const adjustSchema = z.object({
   reason: z.string().trim().min(5).max(240),
 }).strict().superRefine((v, c) => { if (v.kind === "DAMAGE" && v.direction === "IN") c.addIssue({ code: "custom", path: ["direction"], message: "Damaged stock can only be removed" }); });
 
+/**
+ * A goods receipt. `quantity` is what the quality and quantity check accepted into stock; `rejectedQuantity` is what was turned away (damaged, short-dated, wrong item),
+ * with its reason. Against a purchase order (`purchaseOrderId`), each line is matched to an order line and may not exceed what is still expected or the order's rate.
+ */
 export const purchaseSchema = z.object({
-  supplierId: uuid, supplierInvoiceNo: z.string().trim().min(1).max(40), supplierInvoiceDate: isoDay, notes: z.string().trim().max(500).optional(),
-  items: z.array(z.object({ medicineId: uuid, batchNo, expiryDate: isoDay, quantity: qty, gstPercent: percent.optional(), ...pricing }).strict().superRefine(checkPrices)).min(1).max(50),
-}).strict();
+  supplierId: uuid, supplierInvoiceNo: z.string().trim().min(1).max(40), supplierInvoiceDate: isoDay, notes: z.string().trim().max(500).optional(), purchaseOrderId: uuid.optional(),
+  items: z.array(z.object({
+    medicineId: uuid, batchNo, expiryDate: isoDay, quantity: qty, gstPercent: percent.optional(), ...pricing,
+    poItemId: uuid.optional(), rejectedQuantity: z.number().int().min(0).max(1_000_000).optional(), rejectReason: z.string().trim().max(240).optional(),
+  }).strict().superRefine(checkPrices).superRefine((v, c) => { if ((v.rejectedQuantity ?? 0) > 0 && (v.rejectReason ?? "").length < 5) c.addIssue({ code: "custom", path: ["rejectReason"], message: "Give the reason the goods were rejected" }); })).min(0).max(50),
+  /** Goods of which nothing was accepted (a line with some accepted units records its rejection on the line itself). `unitPrice` is what the supplier billed. */
+  rejections: z.array(z.object({ medicineId: uuid, quantity: qty, unitPrice: amount(), gstPercent: percent.optional(), reason: z.string().trim().min(5).max(240), poItemId: uuid.optional() }).strict()).max(50).optional(),
+}).strict().refine((v) => v.items.length + (v.rejections?.length ?? 0) > 0, { path: ["items"], message: "Enter at least one item, or the goods that were rejected" });
 
 export const purchaseReturnSchema = z.object({
   reason: z.string().trim().min(5).max(240),
@@ -75,7 +86,7 @@ export const toBatchView = (b: BatchRow, today: Date) => ({
 export class InventoryService {
   constructor(
     private readonly prisma: PrismaService, private readonly audit: AuditService, private readonly stock: StockService,
-    private readonly numbering: NumberingService, private readonly idempotency: IdempotencyService,
+    private readonly numbering: NumberingService, private readonly idempotency: IdempotencyService, private readonly settings: SettingsService, private readonly costLedger: CostLedgerService,
   ) {}
 
   // ───── batches ─────
@@ -194,7 +205,38 @@ export class InventoryService {
         const supplier = await tx.supplier.findFirst({ where: { id: input.supplierId, tenantId: ctx.tenantId, status: "ACTIVE" } });
         if (!supplier) throw new DomainError("VALIDATION_FAILED", "Supplier not found or inactive", 400, [{ path: "supplierId", message: "Unknown supplier" }]);
         const today = await this.stock.today(tx, ctx);
-        const medicines = await tx.medicine.findMany({ where: { id: { in: [...new Set(input.items.map((i) => i.medicineId))] }, tenantId: ctx.tenantId, status: "ACTIVE" } });
+        if (!input.purchaseOrderId && (await this.settings.get(tx, ctx.tenantId, ctx.facilityId, "PURCHASE_REQUIRE_PO"))) throw new DomainError("PURCHASE_ORDER_REQUIRED", "Goods can be received only against an issued purchase order", 409);
+        // Against an order: the order is locked, its supplier and status checked, and every line matched, within what is still expected and at no more than the order's rate.
+        const poLine = new Map<number, { id: string; quantity: number; receivedQuantity: number; rate: Decimal }>();
+        let orderNumber: string | null = null;
+        let orderLines: { id: string; medicineId: string; quantity: number; receivedQuantity: number; rate: Prisma.Decimal }[] = [];
+        if (input.purchaseOrderId) {
+          const locked = await tx.$queryRaw<{ id: string }[]>`SELECT id FROM "PurchaseOrder" WHERE id = ${input.purchaseOrderId}::uuid AND "tenantId" = ${ctx.tenantId}::uuid AND "facilityId" = ${ctx.facilityId}::uuid FOR UPDATE`;
+          if (locked.length === 0) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+          const po = await tx.purchaseOrder.findFirstOrThrow({ where: { id: input.purchaseOrderId, tenantId: ctx.tenantId } });
+          if (po.supplierId !== supplier.id) throw new DomainError("VALIDATION_FAILED", "This order was placed with a different supplier", 400, [{ path: "supplierId", message: "Not the order's supplier" }]);
+          if (!["ISSUED", "PARTIALLY_RECEIVED"].includes(po.status)) throw new DomainError("INVALID_STATE", `This order is ${po.status.toLowerCase().replace("_", " ")}: goods cannot be received against it`, 409);
+          orderNumber = po.poNumber;
+          orderLines = await tx.purchaseOrderItem.findMany({ where: { tenantId: ctx.tenantId, orderId: po.id }, select: { id: true, medicineId: true, quantity: true, receivedQuantity: true, rate: true } });
+          const accepting = new Map<string, number>();
+          for (const [n, it] of input.items.entries()) {
+            const line = it.poItemId ? orderLines.find((l) => l.id === it.poItemId) : orderLines.find((l) => l.medicineId === it.medicineId);
+            if (!line || line.medicineId !== it.medicineId) throw new DomainError("VALIDATION_FAILED", "A line is not on the purchase order", 400, [{ path: `items.${n}.medicineId`, message: "Not on the order" }]);
+            if (it.purchasePrice.gt(line.rate.toString())) throw new DomainError("PRICE_ABOVE_ORDER", `The price ${fmt(it.purchasePrice)} is above the order's rate ${fmt(line.rate)}: have the order amended or ask the supplier for a corrected invoice`, 409);
+            const total = (accepting.get(line.id) ?? 0) + it.quantity;
+            accepting.set(line.id, total);
+            if (total > line.quantity - line.receivedQuantity) throw new DomainError("OVER_RECEIPT", `Only ${line.quantity - line.receivedQuantity} unit(s) of this item are still expected on the order`, 409, { expected: line.quantity - line.receivedQuantity });
+            poLine.set(n, { id: line.id, quantity: line.quantity, receivedQuantity: line.receivedQuantity, rate: new Decimal(line.rate.toString()) });
+          }
+        }
+        const rejections = input.rejections ?? [];
+        for (const [n, r] of rejections.entries()) {
+          if (orderLines.length > 0) {
+            const line = r.poItemId ? orderLines.find((l) => l.id === r.poItemId) : orderLines.find((l) => l.medicineId === r.medicineId);
+            if (!line || line.medicineId !== r.medicineId) throw new DomainError("VALIDATION_FAILED", "A rejected line is not on the purchase order", 400, [{ path: `rejections.${n}.medicineId`, message: "Not on the order" }]);
+          }
+        }
+        const medicines = await tx.medicine.findMany({ where: { id: { in: [...new Set([...input.items.map((i) => i.medicineId), ...rejections.map((r) => r.medicineId)])] }, tenantId: ctx.tenantId, status: "ACTIVE" } });
         const byId = new Map(medicines.map((m) => [m.id, m]));
         const lines = input.items.map((it, i) => {
           const med = byId.get(it.medicineId);
@@ -204,11 +246,18 @@ export class InventoryService {
           const net = round2(it.purchasePrice.times(it.quantity));
           return { ...it, gst, net, tax: round2(net.times(gst).div(100)) };
         });
+        const rejectedLines = rejections.map((r, i) => {
+          const med = byId.get(r.medicineId);
+          if (!med) throw new DomainError("VALIDATION_FAILED", "A medicine does not exist or is inactive", 400, [{ path: `rejections.${i}.medicineId`, message: "Unknown medicine" }]);
+          const gst = r.gstPercent ?? new Decimal(med.gstPercent.toString());
+          const net = round2(r.unitPrice.times(r.quantity));
+          return { ...r, gst, value: net.plus(round2(net.times(gst).div(100))) };
+        });
         const subtotal = lines.reduce((a, l) => a.plus(l.net), new Decimal(0));
         const taxTotal = lines.reduce((a, l) => a.plus(l.tax), new Decimal(0));
         const purchaseNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "PURCHASE");
         const purchase = await tx.purchase.create({
-          data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, purchaseNumber, supplierId: supplier.id, supplierInvoiceNo: input.supplierInvoiceNo, supplierInvoiceDate: input.supplierInvoiceDate, subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2), total: subtotal.plus(taxTotal).toFixed(2), notes: input.notes ?? null, receivedById: ctx.userId },
+          data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, purchaseNumber, supplierId: supplier.id, supplierInvoiceNo: input.supplierInvoiceNo, supplierInvoiceDate: input.supplierInvoiceDate, subtotal: subtotal.toFixed(2), taxTotal: taxTotal.toFixed(2), total: subtotal.plus(taxTotal).toFixed(2), notes: input.notes ?? null, purchaseOrderId: input.purchaseOrderId ?? null, receivedById: ctx.userId },
         });
         // Deterministic order => deterministic lock order when several receipts touch the same batches.
         const ordered = [...lines.entries()].sort(([, a], [, b]) => (a.medicineId + a.batchNo).localeCompare(b.medicineId + b.batchNo));
@@ -217,10 +266,36 @@ export class InventoryService {
           const b = await this.upsertBatch(tx, ctx, l.medicineId, l.batchNo, l.expiryDate, l);
           await this.stock.move(tx, ctx, { batchId: b.id, medicineId: l.medicineId, type: "PURCHASE", direction: "IN", quantity: l.quantity, sourceType: "PURCHASE", sourceId: purchase.id });
           await tx.medicineBatch.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: b.id } }, data: { receivedQuantity: { increment: l.quantity } } });
-          itemRows.push({ tenantId: ctx.tenantId, purchaseId: purchase.id, lineNo: idx + 1, medicineId: l.medicineId, batchId: b.id, quantity: l.quantity, purchasePrice: l.purchasePrice.toFixed(2), mrp: l.mrp.toFixed(2), sellingPrice: l.sellingPrice.toFixed(2), gstPercent: l.gst.toFixed(2), lineTotal: l.net.plus(l.tax).toFixed(2) });
+          itemRows.push({ tenantId: ctx.tenantId, purchaseId: purchase.id, lineNo: idx + 1, medicineId: l.medicineId, batchId: b.id, quantity: l.quantity, purchasePrice: l.purchasePrice.toFixed(2), mrp: l.mrp.toFixed(2), sellingPrice: l.sellingPrice.toFixed(2), gstPercent: l.gst.toFixed(2), lineTotal: l.net.plus(l.tax).toFixed(2), poItemId: poLine.get(idx)?.id ?? null, rejectedQuantity: l.rejectedQuantity ?? 0, rejectReason: (l.rejectedQuantity ?? 0) > 0 ? l.rejectReason ?? null : null });
+          if (poLine.has(idx)) await tx.purchaseOrderItem.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: poLine.get(idx)!.id } }, data: { receivedQuantity: { increment: l.quantity } } });
         }
         await tx.purchaseItem.createMany({ data: itemRows });
-        await this.audit.record(tx, actorOf(ctx), { action: "PURCHASE_RECEIVED", entityType: "Purchase", entityId: purchase.id, metadata: { purchaseNumber, supplierId: supplier.id, items: lines.length, total: fmt(subtotal.plus(taxTotal)) } });
+        if (rejectedLines.length > 0) await tx.purchaseRejection.createMany({ data: rejectedLines.map((r, n) => ({ tenantId: ctx.tenantId, purchaseId: purchase.id, lineNo: n + 1, medicineId: r.medicineId, poItemId: r.poItemId ?? null, quantity: r.quantity, unitPrice: r.unitPrice.toFixed(2), gstPercent: r.gst.toFixed(2), reason: r.reason })) });
+        let orderStatus: string | null = null;
+        if (input.purchaseOrderId && itemRows.length > 0) {
+          const after = await tx.purchaseOrderItem.findMany({ where: { tenantId: ctx.tenantId, orderId: input.purchaseOrderId }, select: { quantity: true, receivedQuantity: true } });
+          orderStatus = after.every((x) => x.receivedQuantity >= x.quantity) ? "RECEIVED" : "PARTIALLY_RECEIVED";
+          await tx.purchaseOrder.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: input.purchaseOrderId } }, data: { status: orderStatus as "RECEIVED" | "PARTIALLY_RECEIVED" } });
+        }
+        // What the supplier is asked to credit for everything turned away: part-rejected lines and wholly rejected ones, with their GST.
+        const partValue = lines.reduce((a, l) => { const q = l.rejectedQuantity ?? 0; if (q === 0) return a; const net = round2(l.purchasePrice.times(q)); return a.plus(net).plus(round2(net.times(l.gst).div(100))); }, new Decimal(0));
+        const turnedAway = partValue.plus(rejectedLines.reduce((a, r) => a.plus(r.value), new Decimal(0)));
+        const rejected = lines.reduce((n, l) => n + (l.rejectedQuantity ?? 0), 0) + rejectedLines.reduce((n, r) => n + r.quantity, 0);
+        if (rejected > 0) {
+          await this.audit.record(tx, actorOf(ctx), { action: "PURCHASE_GOODS_REJECTED", entityType: "Purchase", entityId: purchase.id, metadata: { purchaseNumber, units: rejected, lines: lines.filter((l) => (l.rejectedQuantity ?? 0) > 0).length + rejectedLines.length } });
+          if (turnedAway.gt(0)) {
+            const noteNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "DEBIT_NOTE");
+            const reasons = [...lines.filter((l) => (l.rejectedQuantity ?? 0) > 0).map((l) => l.rejectReason ?? ""), ...rejectedLines.map((r) => r.reason)].filter(Boolean);
+            const note = await tx.supplierDebitNote.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, noteNumber, purchaseId: purchase.id, supplierId: supplier.id, amount: turnedAway.toFixed(2), reason: `Rejected at the quality check on ${purchaseNumber}: ${reasons.join("; ")}`.slice(0, 480), createdById: ctx.userId }, select: { id: true } });
+            await this.audit.record(tx, actorOf(ctx), { action: "DEBIT_NOTE_RAISED", entityType: "SupplierDebitNote", entityId: note.id, metadata: { noteNumber, purchaseNumber, amount: fmt(turnedAway) } });
+          }
+        }
+        // The cost ledger: the accepted goods come into stock at their price before GST, the GST is held apart, and the supplier is owed the invoice.
+        await this.costLedger.post(tx, { tenantId: ctx.tenantId, facilityId: ctx.facilityId, userId: ctx.userId }, {
+          sourceKey: `RECEIPT:${purchase.id}`, sourceType: "Purchase", sourceId: purchase.id, date: new Date(), narration: `Goods received ${purchaseNumber}`,
+          lines: [{ account: "INVENTORY", costCentre: "Main store", debit: subtotal }, { account: "GST_INPUT", debit: taxTotal }, { account: "SUPPLIER_PAYABLE", credit: subtotal.plus(taxTotal) }],
+        });
+        await this.audit.record(tx, actorOf(ctx), { action: "PURCHASE_RECEIVED", entityType: "Purchase", entityId: purchase.id, metadata: { purchaseNumber, supplierId: supplier.id, items: lines.length, total: fmt(subtotal.plus(taxTotal)), ...(orderNumber ? { purchaseOrder: orderNumber, orderStatus } : {}) } });
         return this.purchaseView(tx, ctx, purchase.id);
       });
     } catch (e) {
@@ -255,7 +330,7 @@ export class InventoryService {
       const merged = new Map<string, number>();
       for (const i of input.items) merged.set(i.purchaseItemId, (merged.get(i.purchaseItemId) ?? 0) + i.quantity);
       const returnNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "PURCHASE_RETURN");
-      const rows: { purchaseItemId: string; quantity: number; amount: Decimal }[] = [];
+      const rows: { purchaseItemId: string; quantity: number; net: Decimal; amount: Decimal }[] = [];
       for (const [itemId, quantity] of [...merged.entries()].sort(([a], [b]) => a.localeCompare(b))) {
         const item = purchase.items.find((p) => p.id === itemId);
         if (!item) throw new DomainError("VALIDATION_FAILED", "An item does not belong to this purchase", 400, [{ path: "items", message: "Unknown purchase item" }]);
@@ -263,7 +338,7 @@ export class InventoryService {
         if (cap.count !== 1) throw new DomainError("INVALID_AMOUNT", `Only ${item.quantity - item.returnedQuantity} unit(s) of this item can still be returned`, 409);
         await this.stock.move(tx, ctx, { batchId: item.batchId, medicineId: item.medicineId, type: "PURCHASE_RETURN", direction: "OUT", quantity, sourceType: "PURCHASE_RETURN", sourceId: purchaseId });
         const net = round2(new Decimal(item.purchasePrice.toString()).times(quantity));
-        rows.push({ purchaseItemId: itemId, quantity, amount: net.plus(round2(net.times(item.gstPercent.toString()).div(100))) });
+        rows.push({ purchaseItemId: itemId, quantity, net, amount: net.plus(round2(net.times(item.gstPercent.toString()).div(100))) });
       }
       const total = rows.reduce((a, r) => a.plus(r.amount), new Decimal(0));
       const ret = await tx.purchaseReturn.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, returnNumber, purchaseId, reason: input.reason, total: total.toFixed(2), createdById: ctx.userId } });
@@ -271,6 +346,11 @@ export class InventoryService {
       const after = await tx.purchaseItem.findMany({ where: { tenantId: ctx.tenantId, purchaseId } });
       const status = after.every((i) => i.returnedQuantity === i.quantity) ? "RETURNED" : "PARTIALLY_RETURNED";
       await tx.purchase.updateMany({ where: { id: purchaseId, tenantId: ctx.tenantId }, data: { status } });
+      const returnedNet = rows.reduce((a, r) => a.plus(r.net), new Decimal(0));
+      await this.costLedger.post(tx, { tenantId: ctx.tenantId, facilityId: ctx.facilityId, userId: ctx.userId }, {
+        sourceKey: `PURCHASE_RETURN:${ret.id}`, sourceType: "PurchaseReturn", sourceId: ret.id, date: new Date(), narration: `Goods returned to the supplier ${returnNumber}`,
+        lines: [{ account: "SUPPLIER_PAYABLE", debit: total }, { account: "INVENTORY", costCentre: "Main store", credit: returnedNet }, { account: "GST_INPUT", credit: total.minus(returnedNet) }],
+      });
       await this.audit.record(tx, actorOf(ctx), { action: "PURCHASE_RETURNED", entityType: "Purchase", entityId: purchaseId, metadata: { returnNumber, total: fmt(total), reason: input.reason, status } });
       return { returnNumber, total: fmt(total), purchase: await this.purchaseView(tx, ctx, purchaseId) };
     });
@@ -304,15 +384,17 @@ export class InventoryService {
   private async purchaseView(db: Db, ctx: RequestContext, id: string) {
     const p = await db.purchase.findFirstOrThrow({
       where: { id, tenantId: ctx.tenantId },
-      include: { supplier: { select: { name: true } }, items: { orderBy: { lineNo: "asc" }, include: { medicine: { select: { brandName: true, strength: true } } } }, returns: { select: { returnNumber: true, total: true, reason: true, createdAt: true } } },
+      include: { supplier: { select: { name: true } }, order: { select: { poNumber: true } }, rejections: { orderBy: { lineNo: "asc" } }, debitNotes: { select: { id: true, noteNumber: true, amount: true, status: true } }, items: { orderBy: { lineNo: "asc" }, include: { medicine: { select: { brandName: true, strength: true } } } }, returns: { select: { returnNumber: true, total: true, reason: true, createdAt: true } } },
     });
     const batches = await db.medicineBatch.findMany({ where: { tenantId: ctx.tenantId, id: { in: p.items.map((i) => i.batchId) } }, select: { id: true, batchNo: true, expiryDate: true } });
     const byBatch = new Map(batches.map((b) => [b.id, b]));
     return {
-      id: p.id, purchaseNumber: p.purchaseNumber, supplierName: p.supplier.name, supplierInvoiceNo: p.supplierInvoiceNo, supplierInvoiceDate: day(p.supplierInvoiceDate), status: p.status,
+      id: p.id, purchaseNumber: p.purchaseNumber, supplierName: p.supplier.name, supplierInvoiceNo: p.supplierInvoiceNo, supplierInvoiceDate: day(p.supplierInvoiceDate), status: p.status, purchaseOrder: p.order?.poNumber ?? null,
       subtotal: fmt(p.subtotal), taxTotal: fmt(p.taxTotal), total: fmt(p.total), receivedAt: p.receivedAt, notes: p.notes,
-      items: p.items.map((i) => ({ id: i.id, lineNo: i.lineNo, medicineName: [i.medicine.brandName, i.medicine.strength].filter(Boolean).join(" "), batchNo: byBatch.get(i.batchId)?.batchNo ?? null, expiryDate: byBatch.get(i.batchId) ? day(byBatch.get(i.batchId)!.expiryDate) : null, quantity: i.quantity, returnedQuantity: i.returnedQuantity, purchasePrice: fmt(i.purchasePrice), mrp: fmt(i.mrp), sellingPrice: fmt(i.sellingPrice), gstPercent: fmt(i.gstPercent), lineTotal: fmt(i.lineTotal) })),
+      items: p.items.map((i) => ({ id: i.id, lineNo: i.lineNo, medicineName: [i.medicine.brandName, i.medicine.strength].filter(Boolean).join(" "), batchNo: byBatch.get(i.batchId)?.batchNo ?? null, expiryDate: byBatch.get(i.batchId) ? day(byBatch.get(i.batchId)!.expiryDate) : null, quantity: i.quantity, rejectedQuantity: i.rejectedQuantity, rejectReason: i.rejectReason, returnedQuantity: i.returnedQuantity, purchasePrice: fmt(i.purchasePrice), mrp: fmt(i.mrp), sellingPrice: fmt(i.sellingPrice), gstPercent: fmt(i.gstPercent), lineTotal: fmt(i.lineTotal) })),
       returns: p.returns.map((r) => ({ returnNumber: r.returnNumber, total: fmt(r.total), reason: r.reason, createdAt: r.createdAt })),
+      rejections: p.rejections.map((r) => ({ lineNo: r.lineNo, medicineId: r.medicineId, quantity: r.quantity, unitPrice: fmt(r.unitPrice), reason: r.reason })),
+      debitNotes: p.debitNotes.map((d) => ({ id: d.id, noteNumber: d.noteNumber, amount: fmt(d.amount), status: d.status })),
     };
   }
 }

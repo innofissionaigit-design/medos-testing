@@ -1,14 +1,20 @@
 import { expect, test, type Page } from "@playwright/test";
 import { loginAs, registerPatient } from "./helpers";
 
-/** Mandatory IPD workflow (CLAUDE.md §37) driven through the real browser UI, API and database. */
-async function clearStep(page: Page, label: RegExp) {
+/**
+ * Mandatory IPD workflow (CLAUDE.md §37) driven through the real browser UI, API and database, through every discharge stage
+ * (docs/discharge-stages.md): the doctor's decision, nursing, charges, summary, pharmacy, final bill and payment, discharge, physical exit
+ * (which frees the bed), bed turnover by housekeeping, and the Medical Records sign-off with ICD-10 coding.
+ */
+const stage = (page: Page, name: string) => page.getByRole("row").filter({ hasText: name }).first();
+
+async function openDischarge(page: Page, url: string) {
+  await page.goto(url);
   await page.getByRole("tab", { name: "Discharge" }).click();
-  const row = page.locator("div", { has: page.getByText(label) }).filter({ has: page.getByRole("button", { name: "Clear" }) }).last();
-  await row.getByRole("button", { name: "Clear" }).click();
+  await expect(page.getByRole("row").filter({ hasText: "Discharge decision" }).first()).toBeVisible();
 }
 
-test("IPD: admit → bed → order → medication given → note → clearances → summary → final bill → payment → discharge", async ({ page }) => {
+test("IPD: admit → medication given → note → every discharge stage → departure frees the bed → housekeeping → MRD sign-off", async ({ page }) => {
   // The consultant we admit under (only the treating consultant can sign the discharge summary).
   await loginAs(page, "doctor1");
   const doctorName = ((await page.locator("header").getByText(/^Dr\./).first().textContent()) ?? "").trim();
@@ -29,9 +35,8 @@ test("IPD: admit → bed → order → medication given → note → clearances 
   await expect(page).toHaveURL(/\/ipd\/[0-9a-f-]{36}/);
   const admissionUrl = page.url();
   await expect(page.getByRole("heading", { name: `${p.first} ${p.last}` })).toBeVisible();
-  await expect(page.getByText("current")).toBeVisible();
 
-  // Doctor orders and signs a stat dose.
+  // Doctor orders and signs a stat dose, then records the discharge decision.
   await loginAs(page, "doctor1");
   await page.goto(admissionUrl);
   await page.getByRole("tab", { name: "Medication orders" }).click();
@@ -44,13 +49,11 @@ test("IPD: admit → bed → order → medication given → note → clearances 
   await page.getByRole("button", { name: "Sign orders" }).click();
   await page.getByRole("button", { name: "Yes, sign" }).click();
   await expect(page.getByText(/^RX-/)).toBeVisible();
-  // Medical fitness must be cleared by the doctor before any other step.
   await page.getByRole("tab", { name: "Discharge" }).click();
-  const fitStep = page.locator("div.flex.items-start", { has: page.getByText("Medically fit") });
-  await fitStep.getByRole("button", { name: "Clear" }).click();
-  await expect(fitStep.getByText("cleared")).toBeVisible();
+  await stage(page, "Discharge decision").getByRole("button", { name: "Clear" }).click();
+  await expect(stage(page, "Discharge decision")).toContainText("Clinically fit / discharge advised");
 
-  // Nurse writes a note, schedules the dose and records that it was given.
+  // Nurse writes a note, records the dose as given, and clears nursing with a handover note.
   await loginAs(page, "nurse1");
   await page.goto(admissionUrl);
   await page.getByRole("tab", { name: "Nursing and medication" }).click();
@@ -61,45 +64,37 @@ test("IPD: admit → bed → order → medication given → note → clearances 
   await page.getByRole("button", { name: "Given", exact: true }).first().click();
   await expect(page.getByText("given", { exact: true }).first()).toBeVisible();
   await page.getByRole("tab", { name: "Discharge" }).click();
-  const nurseStep = page.locator("div.flex.items-start", { has: page.getByText("Nursing", { exact: true }) });
-  await nurseStep.getByRole("button", { name: "Clear" }).click();
-  await expect(nurseStep.getByText("cleared")).toBeVisible();
+  await page.getByLabel("Handover note").fill("Handed over to the day in-charge");
+  await stage(page, "Nursing clearance").getByRole("button", { name: "Clear" }).click();
+  await expect(stage(page, "Nursing clearance")).toContainText("Medication, clinical documentation and handover complete");
 
-  // Doctor: charge, fitness, charges reviewed, summary.
+  // Doctor: a charge from the price list, charges reviewed, and the discharge summary signed.
   await loginAs(page, "doctor1");
   await page.goto(admissionUrl);
-  // Doctors charge from the price list; free-price charges need billing permission.
   const service = page.getByLabel("Service");
   await service.selectOption({ label: ((await service.locator("option", { hasText: "Dressing (small)" }).textContent()) ?? "").trim() });
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await expect(page.getByRole("cell", { name: "Dressing (small)" })).toBeVisible();
   await page.getByRole("tab", { name: "Discharge" }).click();
-  await expect(page.getByText("Before discharge:")).toBeVisible();
-  await page.getByRole("row").first().isVisible().catch(() => undefined);
-  for (const name of [/Charges reviewed/]) {
-    const step = page.locator("div.flex.items-start", { has: page.getByText(name) });
-    await step.getByRole("button", { name: "Clear" }).click();
-    await expect(step.getByText("cleared")).toBeVisible();
-  }
+  await stage(page, "Charges review").getByRole("button", { name: "Clear" }).click();
+  await expect(stage(page, "Charges review")).toContainText("All charges posted and reviewed");
   await page.getByLabel("Final diagnoses (one per line)").fill("Lower respiratory tract infection");
   await page.getByLabel("Hospital course").fill("Treated with IV ceftriaxone; fever settled within 48 hours.");
   await page.getByLabel("Condition at discharge").fill("Stable");
   await page.getByRole("button", { name: "Sign summary" }).click();
   await page.getByRole("button", { name: "Yes, sign" }).click();
-  await expect(page.getByText(/signed by/)).toBeVisible();
+  await expect(page.getByText(/signed by/).first()).toBeVisible();
 
   // Pharmacy clearance.
   await loginAs(page, "pharmacist1");
-  await page.goto(admissionUrl);
-  await page.getByRole("tab", { name: "Discharge" }).click();
-  const ph = page.locator("div.flex.items-start", { has: page.getByText("Pharmacy") });
-  await ph.getByRole("button", { name: "Clear" }).click();
-  await expect(ph.getByText("cleared")).toBeVisible();
+  await openDischarge(page, admissionUrl);
+  const ph = stage(page, "Pharmacy clearance");
+  if (await ph.getByRole("button", { name: "Clear" }).isVisible()) await ph.getByRole("button", { name: "Clear" }).click();
+  await expect(ph).toContainText("Issues, returns and eligible credits reconciled");
 
   // Cashier raises the final bill and takes payment.
   await loginAs(page, "cashier1");
-  await page.goto(admissionUrl);
-  await page.getByRole("tab", { name: "Discharge" }).click();
+  await openDischarge(page, admissionUrl);
   await page.getByRole("button", { name: "Generate final bill" }).click();
   await page.getByRole("link", { name: "Open final bill" }).click();
   await expect(page).toHaveURL(/\/billing\//);
@@ -108,15 +103,42 @@ test("IPD: admit → bed → order → medication given → note → clearances 
   await page.getByRole("button", { name: "Receive payment" }).click();
   await expect(page.getByText("BALANCE DUE").locator("xpath=following-sibling::dd")).toContainText("0.00");
 
-  // Doctor completes the discharge; the bed is released for cleaning.
+  // Doctor: every stage is settled, and the discharge is completed. The bed stays with the patient until they leave.
   await loginAs(page, "doctor1");
-  await page.goto(admissionUrl);
-  await page.getByRole("tab", { name: "Discharge" }).click();
+  await openDischarge(page, admissionUrl);
+  await expect(stage(page, "Final billing")).toContainText("Final bill, deposits, credits and patient liability reconciled");
+  await expect(stage(page, "Financial release")).toContainText("Cleared");
+  for (const name of ["Laboratory / radiology", "OT / procedure", "Insurance"]) await expect(stage(page, name)).toContainText("cleared");
   await page.getByRole("button", { name: "Discharge patient" }).click();
   await page.getByRole("button", { name: /^Yes, discharge/ }).click();
   await expect(page.getByText(/This admission is discharged/)).toBeVisible();
+  await expect(stage(page, "Bed turnover")).toContainText("Bed kept until the patient leaves");
+  await expect(stage(page, "Physical exit")).toContainText("Departure not yet confirmed");
 
-  await loginAs(page, "reception1");
-  await page.goto("/ipd");
-  await expect(page.getByText("cleaning", { exact: true }).first()).toBeVisible();
+  // Nurse sees the patient out: the departure is confirmed and the bed goes for cleaning.
+  await loginAs(page, "nurse1");
+  await openDischarge(page, admissionUrl);
+  await page.getByLabel("Escorted by").fill("Family");
+  await page.getByRole("button", { name: "Confirm departure" }).click();
+  await expect(stage(page, "Physical exit")).toContainText("Actual departure confirmed");
+  await expect(stage(page, "Bed turnover")).toContainText("Vacated: cleaning not started");
+
+  // Housekeeping turns the bed around (beds only, no patients).
+  await loginAs(page, "housekeeping1");
+  await page.goto("/housekeeping");
+  await page.getByRole("button", { name: "Start cleaning" }).first().click();
+  await page.getByRole("button", { name: "Mark ready" }).first().click();
+  await expect(page.getByText("Made ready in the last 24 hours")).toBeVisible();
+
+  // Medical Records codes the diagnosis and signs the record off; nothing is owed, so the stay is closed.
+  await loginAs(page, "mrd1");
+  await openDischarge(page, admissionUrl);
+  await expect(stage(page, "Bed turnover")).toContainText("Ready for the next patient");
+  await page.getByRole("button", { name: "Mark records complete…" }).click();
+  const coding = page.getByTestId("coding-form");
+  await expect(coding.getByLabel("Diagnosis 1", { exact: true })).toHaveValue("Lower respiratory tract infection");
+  await coding.getByLabel("ICD-10 code 1", { exact: true }).fill("J22");
+  await coding.getByRole("button", { name: "Complete the record" }).click();
+  await expect(stage(page, "Post-discharge")).toContainText("Records complete; claims and receivables closed");
+  await expect(stage(page, "Post-discharge")).toContainText("J22 Lower respiratory tract infection (primary)");
 });

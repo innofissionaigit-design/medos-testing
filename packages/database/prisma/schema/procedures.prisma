@@ -1,0 +1,74 @@
+// ───────────────────────── operation theatre and procedures (docs/procedures.md) ─────────────────────────
+
+enum ProcedureStatus {
+  PLANNED
+  PERFORMED
+  FINALISED
+  CANCELLED
+}
+
+enum ProcedureItemKind {
+  IMPLANT
+  CONSUMABLE
+}
+
+/// A procedure planned for an admitted patient (an operation, a minor procedure). It is planned by the doctor, performed and finalised by the OT / procedure
+/// coordinator. The procedure is a price-list item (serviceId); performing it posts its charge to the admission. Once FINALISED (or CANCELLED) it never changes.
+model Procedure {
+  consumptions  StockConsumption[]
+  id            String             @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String             @db.Uuid
+  facilityId    String             @db.Uuid
+  admissionId   String             @db.Uuid
+  patientId     String             @db.Uuid
+  /// The price-list item this procedure is charged as (a service of category PROCEDURE).
+  serviceId     String             @db.Uuid
+  /// The service's name when it was planned, so the record reads the same if the price list changes.
+  name          String
+  scheduledAt   DateTime?          @db.Timestamptz(3)
+  surgeonId     String?            @db.Uuid
+  status        ProcedureStatus    @default(PLANNED)
+  notes         String?
+  plannedById   String             @db.Uuid
+  plannedAt     DateTime           @default(now()) @db.Timestamptz(3)
+  performedById String?            @db.Uuid
+  performedAt   DateTime?          @db.Timestamptz(3)
+  finalisedById String?            @db.Uuid
+  finalisedAt   DateTime?          @db.Timestamptz(3)
+  cancelledById String?            @db.Uuid
+  cancelledAt   DateTime?          @db.Timestamptz(3)
+  cancelReason  String?
+  /// The procedure's own charge on the admission, posted when it is performed.
+  chargeId      String?            @db.Uuid
+
+  admission Admission       @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  items     ProcedureItem[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, admissionId, status])
+}
+
+/// An implant or a consumable used in a procedure. It is a price-list item (serviceId), so its price is the hospital's, and recording it posts its charge.
+/// An implant carries its serial or lot number. A removed item keeps its row (removedAt) and its charge is voided.
+model ProcedureItem {
+  id           String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String            @db.Uuid
+  procedureId  String            @db.Uuid
+  kind         ProcedureItemKind
+  serviceId    String            @db.Uuid
+  name         String
+  quantity     Int
+  /// The implant's serial or lot number (required for an implant, optional for a consumable).
+  serialNo     String?
+  chargeId     String            @db.Uuid
+  recordedById String            @db.Uuid
+  recordedAt   DateTime          @default(now()) @db.Timestamptz(3)
+  removedAt    DateTime?         @db.Timestamptz(3)
+  removedById  String?           @db.Uuid
+  removeReason String?
+
+  procedure Procedure @relation(fields: [tenantId, procedureId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, procedureId])
+}

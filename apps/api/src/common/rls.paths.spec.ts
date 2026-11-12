@@ -160,6 +160,9 @@ describe("row-level security: tenant context, and the explicit paths that have n
   // ───────────────────────── reminder worker ─────────────────────────
   it("the reminder worker lists hospitals through the narrow function and serves each under its own scope", async () => {
     const worker = t.app.get(RemindersService);
+    // The test database is shared by every suite and is never wiped between runs, so reminders that other suites or earlier runs left
+    // pending can have become due by now. This test is about enforcement, not about what else is in the database: clear those first.
+    await t.prisma.appointmentReminder.updateMany({ where: { status: "PENDING", sendAt: { lte: new Date() } }, data: { status: "CANCELLED" } });
     const counts = await worker.runDue();
     assert.deepEqual(counts, { sent: 0, skipped: 0, retried: 0, failed: 0 }, "runs under enforcement with nothing due and no refusal");
     const due = await tenantScope.system("test", () => app.$queryRaw<{ t: string }[]>`SELECT medos_tenants_with_due_reminders(${new Date("2100-01-01")}::timestamptz)::text AS t`);

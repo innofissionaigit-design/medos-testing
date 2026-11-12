@@ -1,0 +1,213 @@
+// Post-discharge patient journey (docs/aftercare.md): the follow-up the patient is due after a stay, the calls made to bring them back,
+// the review visit, what the patient says about their care, and complaints followed to a resolution.
+
+enum AftercareStatus {
+  PENDING
+  BOOKED
+  COMPLETED
+  CLOSED
+}
+
+enum ContactOutcome {
+  BOOKED
+  CALL_AGAIN
+  NO_ANSWER
+  WRONG_NUMBER
+  DECLINED
+  ALREADY_VISITED
+}
+
+enum FeedbackChannel {
+  PHONE
+  IN_PERSON
+  FORM
+}
+
+enum ComplaintStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+enum ComplaintSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+/// The review visit a patient is due after a stay. One per admission, made when the doctor completes the discharge.
+model AftercareTask {
+  id               String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String          @db.Uuid
+  facilityId       String          @db.Uuid
+  patientId        String          @db.Uuid
+  admissionId      String          @db.Uuid
+  dueDate          DateTime        @db.Date
+  adviceNote       String?
+  status           AftercareStatus @default(PENDING)
+  assignedToId     String?         @db.Uuid
+  appointmentId    String?         @db.Uuid
+  attempts         Int             @default(0)
+  /// When the next call is planned (a call-back the patient asked for, or the next try).
+  nextCallAt       DateTime?       @db.Timestamptz(3)
+  reminderSentAt   DateTime?       @db.Timestamptz(3)
+  reminderAttempts Int             @default(0)
+  reminderNextAt   DateTime?       @db.Timestamptz(3)
+  reminderError    String?
+  /// A call queue claim: who is about to call, and until when nobody else is given this patient.
+  claimedUntil     DateTime?       @db.Timestamptz(3)
+  closeReason      String?
+  closedById       String?         @db.Uuid
+  closedAt         DateTime?       @db.Timestamptz(3)
+  completedAt      DateTime?       @db.Timestamptz(3)
+  createdAt        DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime        @updatedAt @db.Timestamptz(3)
+
+  facility         Facility          @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient          Patient           @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  admission        Admission         @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  appointment      Appointment?      @relation(fields: [tenantId, appointmentId], references: [tenantId, id], onDelete: Restrict)
+  contacts         ContactAttempt[]
+  feedbackRequests FeedbackRequest[]
+  feedback         PatientFeedback[]
+  complaints       Complaint[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, admissionId])
+  @@index([tenantId, facilityId, status, dueDate])
+  @@index([tenantId, patientId])
+}
+
+/// One call (or try) to a patient about their review. Never edited.
+model ContactAttempt {
+  id              String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String         @db.Uuid
+  taskId          String         @db.Uuid
+  outcome         ContactOutcome
+  note            String?
+  nextCallAt      DateTime?      @db.Timestamptz(3)
+  durationSeconds Int?
+  byId            String         @db.Uuid
+  at              DateTime       @default(now()) @db.Timestamptz(3)
+
+  task AftercareTask @relation(fields: [tenantId, taskId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, taskId, at])
+}
+
+/// What a patient said about their care: a rating out of 5 and a comment. Never edited.
+model PatientFeedback {
+  id           String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String          @db.Uuid
+  facilityId   String          @db.Uuid
+  patientId    String          @db.Uuid
+  admissionId  String?         @db.Uuid
+  taskId       String?         @db.Uuid
+  rating       Int
+  comment      String?
+  channel      FeedbackChannel
+  recordedById String          @db.Uuid
+  viaLink      Boolean         @default(false)
+  recordedAt   DateTime        @default(now()) @db.Timestamptz(3)
+
+  facility   Facility       @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient    Patient        @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  admission  Admission?     @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  task       AftercareTask? @relation(fields: [tenantId, taskId], references: [tenantId, id], onDelete: Restrict)
+  complaints Complaint[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, recordedAt(sort: Desc)])
+  @@index([tenantId, patientId])
+}
+
+/// A patient's complaint, followed by an owner to a written resolution. Never deleted; every change is in its history.
+model Complaint {
+  id               String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String            @db.Uuid
+  facilityId       String            @db.Uuid
+  complaintNumber  String
+  patientId        String?           @db.Uuid
+  feedbackId       String?           @db.Uuid
+  taskId           String?           @db.Uuid
+  category         String
+  severity         ComplaintSeverity @default(MEDIUM)
+  description      String
+  status           ComplaintStatus   @default(OPEN)
+  ownerId          String?           @db.Uuid
+  resolution       String?
+  resolvedById     String?           @db.Uuid
+  resolvedAt       DateTime?         @db.Timestamptz(3)
+  closedAt         DateTime?         @db.Timestamptz(3)
+  dueAt            DateTime          @db.Timestamptz(3)
+  escalatedAt      DateTime?         @db.Timestamptz(3)
+  escalatedToId    String?           @db.Uuid
+  escalationReason String?
+  createdById      String            @db.Uuid
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime          @updatedAt @db.Timestamptz(3)
+
+  facility Facility         @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  patient  Patient?         @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+  feedback PatientFeedback? @relation(fields: [tenantId, feedbackId], references: [tenantId, id], onDelete: Restrict)
+  task     AftercareTask?   @relation(fields: [tenantId, taskId], references: [tenantId, id], onDelete: Restrict)
+  notes    ComplaintNote[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, complaintNumber])
+  @@index([tenantId, facilityId, status, createdAt(sort: Desc)])
+}
+
+/// The history of a complaint: each note, hand-over and change of status, with who and when. Never edited.
+model ComplaintNote {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  complaintId String   @db.Uuid
+  kind        String
+  note        String
+  byId        String   @db.Uuid
+  at          DateTime @default(now()) @db.Timestamptz(3)
+
+  complaint Complaint @relation(fields: [tenantId, complaintId], references: [tenantId, id], onDelete: Restrict)
+
+  @@index([tenantId, complaintId, at])
+}
+
+/// The secret link a patient uses to give feedback without signing in. Only the hash of the link is kept. Used once.
+model FeedbackRequest {
+  id          String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String    @db.Uuid
+  facilityId  String    @db.Uuid
+  taskId      String    @db.Uuid
+  tokenHash   String    @unique
+  expiresAt   DateTime  @db.Timestamptz(3)
+  /// When the link was texted to the patient (not set if it was only shown to staff).
+  sentAt      DateTime? @db.Timestamptz(3)
+  usedAt      DateTime? @db.Timestamptz(3)
+  feedbackId  String?   @db.Uuid
+  createdById String    @db.Uuid
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  task AftercareTask @relation(fields: [tenantId, taskId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, taskId])
+}
+
+/// What a caller says on each kind of call (docs/aftercare.md). A hospital edits its own; where it has not, the built-in wording is used. {patient}, {doctor}, {due}, {hospital} are filled in.
+model AftercareScript {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  kind        String
+  body        String
+  updatedById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, facilityId, kind])
+}

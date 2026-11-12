@@ -24,69 +24,83 @@ model Tenant {
   createdAt DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt DateTime     @updatedAt @db.Timestamptz(3)
 
-  facilities       Facility[]
-  users            User[]
-  roles            Role[]
-  auditEvents      AuditEvent[]
-  numberSequences  NumberSequence[]
-  numberConfigs    NumberSequenceConfig[]
-  departments      Department[]
-  practitioners    Practitioner[]
-  medicines        Medicine[]
-  suppliers        Supplier[]
-}
-
-model Facility {
-  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId   String       @db.Uuid
-  name       String
-  code       String
-  address    String?
-  city       String?
-  district   String?
-  state      String?
-  postalCode String?
-  phone      String?
-  email      String?
-  gstin      String?
-  timezone   String       @default("Asia/Kolkata")
-  status     ActiveStatus @default(ACTIVE)
-  createdAt  DateTime     @default(now()) @db.Timestamptz(3)
-  updatedAt  DateTime     @updatedAt @db.Timestamptz(3)
-
-  tenant          Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  userFacilities  UserFacility[]
-  apiClients      ApiClient[]
-  shareRules      DoctorShareRule[]
-  shareEntries    DoctorShareEntry[]
-  notifications   Notification[]
-  emailOutbox     EmailOutbox[]
-  stockLocations  StockLocation[]
-  doctorPayouts   DoctorPayout[]
-  labDefinitions  LabTestDefinition[]
-  stockTransfers  StockTransfer[]
-  prescriptionTemplates PrescriptionTemplate[]
-  prescriptionScans PrescriptionScan[]
-  ocrConfig       OcrConfig?
-  registrations   PatientRegistration[]
+  facilities      Facility[]
+  users           User[]
+  roles           Role[]
+  auditEvents     AuditEvent[]
   numberSequences NumberSequence[]
   numberConfigs   NumberSequenceConfig[]
   departments     Department[]
   practitioners   Practitioner[]
-  patients        Patient[]
-  encounters      Encounter[]
-  schedules       PractitionerSchedule[]
-  appointments    Appointment[]
-  queueEntries    QueueEntry[]
-  services        Service[]
-  invoices        Invoice[]
-  cashierShifts   CashierShift[]
-  batches         MedicineBatch[]
-  purchases       Purchase[]
-  dispenses       Dispense[]
-  wards           Ward[]
-  admissions      Admission[]
-  settings        Setting[]
+  medicines       Medicine[]
+  suppliers       Supplier[]
+}
+
+model Facility {
+  supplierPayments SupplierPayment[]
+  debitNotes       SupplierDebitNote[]
+  stockCounts      StockCount[]
+  stockRequests    StockRequest[]
+  aftercareTasks   AftercareTask[]
+  patientFeedback  PatientFeedback[]
+  complaints       Complaint[]
+  purchaseOrders   PurchaseOrder[]
+  purchaseIndents  PurchaseIndent[]
+  id               String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String              @db.Uuid
+  name             String
+  code             String
+  address          String?
+  city             String?
+  district         String?
+  state            String?
+  postalCode       String?
+  phone            String?
+  email            String?
+  gstin            String?
+  timezone         String              @default("Asia/Kolkata")
+  status           ActiveStatus        @default(ACTIVE)
+  createdAt        DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime            @updatedAt @db.Timestamptz(3)
+
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  userFacilities        UserFacility[]
+  apiClients            ApiClient[]
+  shareRules            DoctorShareRule[]
+  shareEntries          DoctorShareEntry[]
+  notifications         Notification[]
+  emailOutbox           EmailOutbox[]
+  stockLocations        StockLocation[]
+  doctorPayouts         DoctorPayout[]
+  labDefinitions        LabTestDefinition[]
+  stockTransfers        StockTransfer[]
+  prescriptionTemplates PrescriptionTemplate[]
+  prescriptionScans     PrescriptionScan[]
+  ocrConfig             OcrConfig?
+  registrations         PatientRegistration[]
+  numberSequences       NumberSequence[]
+  numberConfigs         NumberSequenceConfig[]
+  departments           Department[]
+  practitioners         Practitioner[]
+  patients              Patient[]
+  encounters            Encounter[]
+  schedules             PractitionerSchedule[]
+  appointments          Appointment[]
+  queueEntries          QueueEntry[]
+  services              Service[]
+  invoices              Invoice[]
+  cashierShifts         CashierShift[]
+  batches               MedicineBatch[]
+  purchases             Purchase[]
+  dispenses             Dispense[]
+  wards                 Ward[]
+  admissions            Admission[]
+  settings              Setting[]
+
+  housekeepingRequests HousekeepingRequest[]
+  supplierPaymentRuns  SupplierPaymentRun[]
+  journalEntries       JournalEntry[]
+  aftercareScripts     AftercareScript[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, code])
@@ -111,16 +125,16 @@ model User {
   createdAt         DateTime     @default(now()) @db.Timestamptz(3)
   updatedAt         DateTime     @updatedAt @db.Timestamptz(3)
 
-  tenant     Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  facilities UserFacility[]
-  roles      UserRole[]
-  tokens     RefreshToken[]
-  practitioners Practitioner[]
-  departments   UserDepartment[]
-  apiClient     ApiClient?
+  tenant                Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  facilities            UserFacility[]
+  roles                 UserRole[]
+  tokens                RefreshToken[]
+  practitioners         Practitioner[]
+  departments           UserDepartment[]
+  apiClient             ApiClient?
   prescriptionTemplates PrescriptionTemplate[]
-  employees     Employee[]
-  notifications Notification[]
+  employees             Employee[]
+  notifications         Notification[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, username])
@@ -285,9 +299,9 @@ model ApiClient {
   revokedById  String?         @db.Uuid
   revokeReason String?
 
-  user     User     @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
-  role     Role     @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
-  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+  user     User             @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+  role     Role             @relation(fields: [tenantId, roleId], references: [tenantId, id], onDelete: Restrict)
+  facility Facility         @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
   webhook  WebhookEndpoint?
 
   @@unique([tenantId, id])

@@ -35,7 +35,7 @@ Encrypted file format (`MEDOSBK1`): any changed, truncated, extended or reordere
 
 A nightly dump can lose up to a day. PITR keeps every change (WAL) so the database can be rebuilt to any moment, e.g. just before a wrong bulk update.
 
-**Rehearse it any time, safely:** `db-backup pitr-rehearsal` builds a throwaway cluster in a temp folder on port 54400 (never your real database), turns on archiving, takes a base backup, writes data, "makes a mistake" (drops the table), then recovers to the moment before it and checks the rows. Test: `pitr.spec.ts`. Last result: passed (about 50 s).
+**Rehearse it any time, safely:** `db-backup pitr-rehearsal` builds a throwaway cluster in a temp folder on a free port the system picks (or the one you give with `--port`; if that port is taken it says so at once; never your real database), turns on archiving, takes a base backup, writes data, "makes a mistake" (drops the table), then recovers to the moment before it and checks the rows. Test: `pitr.spec.ts`. Last result: passed (about 50 s).
 
 **Docker stack (switched on by default).** `docker-compose.yml` starts the database with `wal_level=replica`, `archive_mode=on`, `archive_timeout=60` and an archive command that copies each WAL file to the `medos-wal-archive` volume (never overwriting a file, and failing so PostgreSQL retries when the copy fails). A one-off job (`wal-archive-init`) gives that volume and `medos-base-backups` to the postgres user before the database starts; without it every archive attempt would fail and the WAL would pile up on the data disk. Take a base backup (the starting point a recovery replays the archive from) regularly, for example daily:
 ```

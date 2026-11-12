@@ -21,7 +21,7 @@ import type { PrintHeader } from "./html";
 import { FORM_TEXT, type FormLang } from "./admission-form-text";
 import { toPdf } from "./pdf";
 
-type DocType = "INVOICE" | "RECEIPT" | "ADVANCE_RECEIPT" | "PRESCRIPTION" | "DISCHARGE_SUMMARY" | "PATIENT_LABEL" | "ADMISSION_FORM" | "PAYOUT_VOUCHER" | "LAB_REPORT" | "LAB_LABEL" | "RAD_REPORT" | "CLAIM_FORM" | "PAYSLIP";
+type DocType = "INVOICE" | "RECEIPT" | "ADVANCE_RECEIPT" | "PRESCRIPTION" | "DISCHARGE_SUMMARY" | "PATIENT_LABEL" | "ADMISSION_FORM" | "PAYOUT_VOUCHER" | "LAB_REPORT" | "LAB_LABEL" | "RAD_REPORT" | "CLAIM_FORM" | "PAYSLIP" | "PURCHASE_ORDER" | "GOODS_RECEIPT" | "DEBIT_NOTE";
 export type PrintFormat = "html" | "pdf";
 export interface Rendered { contentType: string; body: string | Buffer; fileName: string }
 
@@ -401,6 +401,78 @@ export class PrintService {
         { t: "title", text: `Insurance claim ${c.claimNumber}` },
         { t: "kv", rows: [["Patient", c.patient.name], ["MRN", c.patient.mrn], ["Insurer", c.policy.insurer.name], ["Policy no.", c.policy.policyNumber], ["Member id", c.policy.memberId], ["Policy holder", c.policy.holderName], ["Valid", `${c.policy.validFrom} to ${c.policy.validTo}`], ["Type", c.type], ["Status", c.status], ["Diagnosis", c.diagnosis], ["Invoice", c.invoice?.invoiceNumber ?? ""], ["Pre-authorised", c.preauthApproved ?? ""], ["Claimed", c.claimedAmount ?? ""], ...(c.copay?.patientShare ? [["Patient pays", c.copay.patientShare] as [string, string]] : []), ["Approved", c.approvedAmount ?? ""], ["Received", c.settledAmount ?? ""]] },
         { t: "table", head: [{ label: "When" }, { label: "Step" }, { label: "Amount", numeric: true }, { label: "Note" }, { label: "By" }], rows: c.events.map((x) => [e.at(x.at), `${x.from ?? ""} ${x.from ? "→ " : ""}${x.to}`.trim(), x.amount ?? "", x.note ?? "", x.by ?? ""]) },
+      ],
+    }));
+  }
+
+  /** A purchase order for the supplier (docs/procurement.md): what is ordered, at what rate, and who approved it. */
+  async purchaseOrder(ctx: RequestContext, orderId: string, format: PrintFormat = "html"): Promise<Rendered> {
+    const o = await this.prisma.purchaseOrder.findFirst({
+      where: { id: orderId, tenantId: ctx.tenantId, facilityId: ctx.facilityId },
+      include: { supplier: true, indent: { select: { indentNumber: true } }, items: { orderBy: { lineNo: "asc" }, include: { medicine: { select: { brandName: true, strength: true } } } } },
+    });
+    if (!o) throw notFound();
+    const users = new Map((await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: [o.createdById, ...(o.approvedById ? [o.approvedById] : []), ...(o.secondApprovedById ? [o.secondApprovedById] : []), ...(o.issuedById ? [o.issuedById] : [])] } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
+    const e = await this.env(ctx);
+    return this.finish(ctx, "PURCHASE_ORDER", "PurchaseOrder", o.id, format, (dup) => ({
+      title: `Purchase order ${o.poNumber}`, fileBase: `purchase-order-${slug(o.poNumber)}`, header: e.header, printedBy: e.printedBy, printedAt: e.now,
+      banner: o.status === "DRAFT" ? "DRAFT: NOT YET ISSUED" : o.status === "CANCELLED" ? "CANCELLED" : dup,
+      blocks: [
+        { t: "title", text: `Purchase order ${o.poNumber}` },
+        { t: "kv", rows: [["Supplier", o.supplier.name], ["Supplier GSTIN", o.supplier.gstin], ["Supplier phone", o.supplier.phone], ["Order date", e.day(o.createdAt)], ["Expected on", o.expectedOn ? e.day(o.expectedOn) : null], ["Indent", o.indent?.indentNumber], ["Status", o.status.toLowerCase().replace(/_/g, " ")]] },
+        { t: "table", head: [{ label: "#" }, { label: "Item" }, { label: "Qty", numeric: true }, { label: "Rate", numeric: true }, { label: "GST %", numeric: true }, { label: "Amount", numeric: true }], rows: o.items.map((x) => [String(x.lineNo), [x.medicine.brandName, x.medicine.strength].filter(Boolean).join(" "), String(x.quantity), x.rate.toString(), x.gstPercent.toString(), x.lineTotal.toString()]) },
+        { t: "kv", rows: [["Subtotal", o.subtotal.toString()], ["GST", o.taxTotal.toString()], ["Order total", o.total.toString()]] },
+        ...(o.notes ? [{ t: "note" as const, text: o.notes }] : []),
+        { t: "note", text: "Goods are accepted at no more than the rates above, and only after a check of the quantity and quality on delivery. Quote the order number on the invoice." },
+        { t: "signature", lines: ["______________________________", `Prepared by: ${users.get(o.createdById) ?? ""}`] },
+        ...(o.approvedById ? [{ t: "signature" as const, lines: ["______________________________", `Approved by: ${users.get(o.approvedById) ?? ""}${o.secondApprovedById ? ` and ${users.get(o.secondApprovedById) ?? ""}` : ""}`] }] : []),
+      ],
+    }));
+  }
+
+  /** The goods receipt note (docs/procurement.md): what arrived against the supplier's invoice, what the check accepted into stock, what it turned away and why. */
+  async goodsReceipt(ctx: RequestContext, purchaseId: string, format: PrintFormat = "html"): Promise<Rendered> {
+    const p = await this.prisma.purchase.findFirst({
+      where: { id: purchaseId, tenantId: ctx.tenantId, facilityId: ctx.facilityId },
+      include: {
+        supplier: true, order: { select: { poNumber: true } }, debitNotes: { select: { noteNumber: true, amount: true } },
+        items: { orderBy: { lineNo: "asc" }, include: { medicine: { select: { brandName: true, strength: true } } } }, rejections: { orderBy: { lineNo: "asc" } },
+      },
+    });
+    if (!p) throw notFound();
+    const batches = new Map((await this.prisma.medicineBatch.findMany({ where: { tenantId: ctx.tenantId, id: { in: p.items.map((i) => i.batchId) } }, select: { id: true, batchNo: true, expiryDate: true } })).map((b) => [b.id, b]));
+    const meds = new Map((await this.prisma.medicine.findMany({ where: { tenantId: ctx.tenantId, id: { in: p.rejections.map((r) => r.medicineId) } }, select: { id: true, brandName: true, strength: true } })).map((m) => [m.id, [m.brandName, m.strength].filter(Boolean).join(" ")]));
+    const by = await this.prisma.user.findFirst({ where: { id: p.receivedById, tenantId: ctx.tenantId }, select: { fullName: true } });
+    const e = await this.env(ctx);
+    return this.finish(ctx, "GOODS_RECEIPT", "Purchase", p.id, format, (dup) => ({
+      title: `Goods receipt ${p.purchaseNumber}`, fileBase: `goods-receipt-${slug(p.purchaseNumber)}`, header: e.header, printedBy: e.printedBy, printedAt: e.now, banner: dup,
+      blocks: [
+        { t: "title", text: `Goods receipt ${p.purchaseNumber}` },
+        { t: "kv", rows: [["Supplier", p.supplier.name], ["Supplier invoice", `${p.supplierInvoiceNo} dated ${e.day(p.supplierInvoiceDate)}`], ["Purchase order", p.order?.poNumber ?? "None (direct delivery)"], ["Received", e.at(p.receivedAt)], ["Received by", by?.fullName]] },
+        { t: "heading", text: "Accepted into stock" },
+        { t: "table", head: [{ label: "#" }, { label: "Item" }, { label: "Batch" }, { label: "Expiry" }, { label: "Accepted", numeric: true }, { label: "Rejected", numeric: true }, { label: "Rate", numeric: true }, { label: "Amount", numeric: true }], rows: p.items.map((x) => [String(x.lineNo), [x.medicine.brandName, x.medicine.strength].filter(Boolean).join(" "), batches.get(x.batchId)?.batchNo ?? "", batches.get(x.batchId) ? e.day(batches.get(x.batchId)!.expiryDate) : "", String(x.quantity), String(x.rejectedQuantity), x.purchasePrice.toString(), x.lineTotal.toString()]) },
+        ...(p.items.some((x) => x.rejectedQuantity > 0) ? [{ t: "table" as const, head: [{ label: "Rejected from" }, { label: "Units", numeric: true }, { label: "Why" }], rows: p.items.filter((x) => x.rejectedQuantity > 0).map((x) => [[x.medicine.brandName, x.medicine.strength].filter(Boolean).join(" "), String(x.rejectedQuantity), x.rejectReason ?? ""]) }] : []),
+        ...(p.rejections.length > 0 ? [{ t: "heading" as const, text: "Rejected in full" }, { t: "table" as const, head: [{ label: "Item" }, { label: "Units", numeric: true }, { label: "Rate", numeric: true }, { label: "Why" }], rows: p.rejections.map((r) => [meds.get(r.medicineId) ?? "", String(r.quantity), r.unitPrice.toString(), r.reason]) }] : []),
+        { t: "kv", rows: [["Invoice value accepted", p.subtotal.toString()], ["GST", p.taxTotal.toString()], ["Total", p.total.toString()], ...p.debitNotes.map((d): [string, string] => [`Credit asked: ${d.noteNumber}`, d.amount.toString()])] },
+        { t: "signature", lines: ["______________________________", "Checked and received by (store): signature"] },
+        { t: "signature", lines: ["______________________________", "Supplier's representative: signature"] },
+      ],
+    }));
+  }
+
+  /** The debit note sent to the supplier for goods turned away. */
+  async debitNote(ctx: RequestContext, noteId: string, format: PrintFormat = "html"): Promise<Rendered> {
+    const n = await this.prisma.supplierDebitNote.findFirst({ where: { id: noteId, tenantId: ctx.tenantId, facilityId: ctx.facilityId }, include: { supplier: true, purchase: { select: { purchaseNumber: true, supplierInvoiceNo: true } } } });
+    if (!n) throw notFound();
+    const e = await this.env(ctx);
+    return this.finish(ctx, "DEBIT_NOTE", "SupplierDebitNote", n.id, format, (dup) => ({
+      title: `Debit note ${n.noteNumber}`, fileBase: `debit-note-${slug(n.noteNumber)}`, header: e.header, printedBy: e.printedBy, printedAt: e.now, banner: dup,
+      blocks: [
+        { t: "title", text: `Debit note ${n.noteNumber}` },
+        { t: "kv", rows: [["Supplier", n.supplier.name], ["Supplier GSTIN", n.supplier.gstin], ["Against invoice", n.purchase.supplierInvoiceNo], ["Our goods receipt", n.purchase.purchaseNumber], ["Date", e.day(n.createdAt)], ["Status", n.status === "CREDITED" ? `Credited ${e.day(n.creditedAt)} (ref ${n.creditReference ?? ""})` : "Credit asked"]] },
+        { t: "table", head: [{ label: "Reason" }, { label: "Amount to be credited", numeric: true }], rows: [[n.reason, n.amount.toString()]] },
+        { t: "note", text: "Please credit the amount above against our account, or replace the goods, and quote this debit note number." },
+        { t: "signature", lines: ["______________________________", `Raised by: ${e.printedBy}`] },
       ],
     }));
   }

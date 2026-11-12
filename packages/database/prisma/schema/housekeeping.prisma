@@ -1,0 +1,77 @@
+// ───────────────────────── housekeeping requests and medical-record retention (docs/housekeeping.md, docs/record-retention.md) ─────────────────────────
+
+enum HousekeepingKind {
+  CLEANING
+  MAINTENANCE
+  WASTE
+  LINEN
+  OTHER
+}
+
+enum HousekeepingPriority {
+  ROUTINE
+  URGENT
+}
+
+enum HousekeepingStatus {
+  OPEN
+  IN_PROGRESS
+  DONE
+  CANCELLED
+}
+
+/// A request to housekeeping or maintenance for any area (not only a vacated bed): cleaning a corridor, a spill, a broken tap. Housekeeping never sees patients, so a request
+/// names a place and a job, never a patient. Each step is recorded once, in order, and a finished request never changes (database trigger).
+model HousekeepingRequest {
+  id            String               @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String               @db.Uuid
+  facilityId    String               @db.Uuid
+  kind          HousekeepingKind
+  priority      HousekeepingPriority @default(ROUTINE)
+  location      String
+  description   String?
+  status        HousekeepingStatus   @default(OPEN)
+  requestedById String               @db.Uuid
+  requestedAt   DateTime             @default(now()) @db.Timestamptz(3)
+  startedById   String?              @db.Uuid
+  startedAt     DateTime?            @db.Timestamptz(3)
+  doneById      String?              @db.Uuid
+  doneAt        DateTime?            @db.Timestamptz(3)
+  doneNote      String?
+  cancelledById String?              @db.Uuid
+  cancelledAt   DateTime?            @db.Timestamptz(3)
+  cancelReason  String?
+
+  facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, status, requestedAt])
+  @@index([tenantId, requestedById, requestedAt])
+}
+
+enum RetentionDecision {
+  /// Keep the record longer than the normal period (a legal hold, an ongoing case, a research need), until a date or without an end.
+  HOLD
+  /// The retention period is over and the hospital's records committee agrees the record may be archived or destroyed under its policy. MedOS itself never deletes anything.
+  CLEAR_FOR_ARCHIVE
+}
+
+/// A decision of the Medical Records Department about a record whose retention period is over (docs/record-retention.md). Append-only: the latest decision for a visit stands.
+model RecordRetentionReview {
+  id          String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String            @db.Uuid
+  facilityId  String            @db.Uuid
+  encounterId String            @db.Uuid
+  decision    RetentionDecision
+  /// For HOLD: the date the hold ends; empty means no end date (legal hold until released by a new decision).
+  retainUntil DateTime?         @db.Date
+  note        String
+  decidedById String            @db.Uuid
+  decidedAt   DateTime          @default(now()) @db.Timestamptz(3)
+
+  encounter Encounter @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, encounterId, decidedAt])
+  @@index([tenantId, facilityId, decidedAt])
+}

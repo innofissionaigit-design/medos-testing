@@ -66,6 +66,27 @@ export class PrintController {
     sendRendered(res, await this.print.admissionForm(ctx, id(admissionId), q.format, q.lang), q.download === "1");
   }
 
+  @RequireAnyPermission("PURCHASE_ORDER", "PURCHASE_READ", "PURCHASE_APPROVE")
+  @Get("purchase-orders/:id")
+  async purchaseOrder(@Ctx() ctx: RequestContext, @Param("id") orderId: string, @Query() query: unknown, @Res() res: Response) {
+    const q = parse(formatQuery, query);
+    sendRendered(res, await this.print.purchaseOrder(ctx, id(orderId), q.format), q.download === "1");
+  }
+
+  @RequireAnyPermission("PHARMACY_PURCHASE", "PURCHASE_READ", "PURCHASE_ORDER")
+  @Get("goods-receipts/:id")
+  async goodsReceipt(@Ctx() ctx: RequestContext, @Param("id") purchaseId: string, @Query() query: unknown, @Res() res: Response) {
+    const q = parse(formatQuery, query);
+    sendRendered(res, await this.print.goodsReceipt(ctx, id(purchaseId), q.format), q.download === "1");
+  }
+
+  @RequireAnyPermission("PHARMACY_PURCHASE", "PURCHASE_READ", "SUPPLIER_PAY")
+  @Get("debit-notes/:id")
+  async debitNote(@Ctx() ctx: RequestContext, @Param("id") noteId: string, @Query() query: unknown, @Res() res: Response) {
+    const q = parse(formatQuery, query);
+    sendRendered(res, await this.print.debitNote(ctx, id(noteId), q.format), q.download === "1");
+  }
+
   @RequireAnyPermission("EARNINGS_CONFIGURE", "REPORT_FINANCE", "REPORT_READ")
   @Get("doctor-payouts/:id")
   async payoutVoucher(@Ctx() ctx: RequestContext, @Param("id") payoutId: string, @Query() query: unknown, @Res() res: Response) {

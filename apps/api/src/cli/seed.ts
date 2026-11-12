@@ -93,8 +93,13 @@ async function main(): Promise<void> {
     await call("PUT", `/practitioners/${pr.id}/schedule`, admin, { windows: [0, 1, 2, 3, 4, 5, 6].map((dayOfWeek) => ({ dayOfWeek, start: "09:00", end: "17:00", slotMinutes: 15 })) });
     doctors.push(pr.id);
   }
+  // The resident medical officer: a registered practitioner (so they may write clinical documents) who covers the whole ward. An empty,
+  // saved schedule (scheduleSet) means nobody can book appointments with them.
+  const rmoName = `Dr. ${pick(FIRST_NAMES_F)} ${pick(LAST_NAMES)} (RMO)`;
+  const rmoUserId = await mkUser("rmo1", rmoName, "RMO");
+  await prisma.practitioner.create({ data: { tenantId: prov.tenantId, facilityId: prov.facilityId, userId: rmoUserId, displayName: rmoName, specialty: "Resident Medical Officer", scheduleSet: true } });
   for (let i = 0; i < COUNTS.nurses; i++) await mkUser(`nurse${i + 1}`, `Nurse ${pick(FIRST_NAMES_F)} ${pick(LAST_NAMES)}`, "NURSE");
-  for (const [u, n, r] of [["reception1", "Reception One", "RECEPTIONIST"], ["reception2", "Reception Two", "RECEPTIONIST"], ["cashier1", "Cashier One", "CASHIER"], ["cashier2", "Cashier Two", "CASHIER"], ["pharmacist1", "Pharmacist One", "PHARMACIST"], ["manager1", "Manager One", "MANAGER"]] as const) await mkUser(u, n, r);
+  for (const [u, n, r] of [["reception1", "Reception One", "RECEPTIONIST"], ["reception2", "Reception Two", "RECEPTIONIST"], ["cashier1", "Cashier One", "CASHIER"], ["cashier2", "Cashier Two", "CASHIER"], ["pharmacist1", "Pharmacist One", "PHARMACIST"], ["manager1", "Manager One", "MANAGER"], ["labtech1", "Lab Technician One", "LAB_TECHNICIAN"], ["pathologist1", "Dr. Pathologist One", "PATHOLOGIST"], ["radiographer1", "Radiographer One", "RADIOGRAPHER"], ["radiologist1", "Dr. Radiologist One", "RADIOLOGIST"], ["otcoord1", "OT Coordinator One", "OT_COORDINATOR"], ["tpa1", "TPA Desk One", "CLAIMS_OFFICER"], ["transport1", "Patient Transport One", "PATIENT_TRANSPORT"], ["housekeeping1", "Housekeeping One", "HOUSEKEEPING"], ["mrd1", "Medical Records One", "MEDICAL_RECORDS"], ["procurement1", "Procurement One", "PROCUREMENT"], ["coordinator1", "Care Coordinator One", "CARE_COORDINATOR"], ["relations1", "Patient Relations One", "PATIENT_RELATIONS"]] as const) await mkUser(u, n, r);
   const [reception, cashier, pharmacist] = await Promise.all([login("reception1"), login("cashier1"), login("pharmacist1")]);
 
   step(`registering ${COUNTS.patients} patients`);
@@ -155,7 +160,7 @@ async function main(): Promise<void> {
 
   step(`billing: ${COUNTS.invoices} invoices`);
   const services: string[] = [];
-  for (const [c, n, price, cat] of [["CONS", "OPD consultation", "500", "CONSULTATION"], ["DRESS", "Dressing (small)", "150", "INJECTION_DRESSING"], ["INJ", "Injection charge", "80", "INJECTION_DRESSING"], ["ECG", "ECG", "300", "PROCEDURE"]] as const) {
+  for (const [c, n, price, cat] of [["CONS", "OPD consultation", "500", "CONSULTATION"], ["DRESS", "Dressing (small)", "150", "INJECTION_DRESSING"], ["INJ", "Injection charge", "80", "INJECTION_DRESSING"], ["ECG", "ECG", "300", "PROCEDURE"], ["APPEN", "Appendectomy", "15000", "PROCEDURE"], ["HERNIA", "Hernia repair", "18000", "PROCEDURE"], ["ARTHRO", "Knee arthroscopy", "22000", "PROCEDURE"], ["IMPLT", "Orthopaedic plate and screws (implant)", "8500", "OTHER"], ["IMPMS", "Surgical mesh (implant)", "3500", "OTHER"], ["CONKT", "Surgical consumables kit", "1800", "OTHER"], ["CONSU", "Suture pack", "600", "OTHER"]] as const) {
     services.push((await call("POST", "/services", admin, { code: c, name: n, category: cat, price, taxPercent: 0 }))["id"] as string);
   }
   // The hospital's lab-test and investigation list, which feeds the Lab test dropdown of the prescription and the Cashier's test billing (synthetic prices).
@@ -176,7 +181,7 @@ async function main(): Promise<void> {
   }
 
   await app.close();
-  process.stdout.write(`\nSeed complete. Tenant code: ${code}\nLogin as admin, doctor1..doctor${COUNTS.doctors}, nurse1..nurse${COUNTS.nurses}, reception1, cashier1, pharmacist1, manager1.\n`);
+  process.stdout.write(`\nSeed complete. Tenant code: ${code}\nLogin as admin, doctor1..doctor${COUNTS.doctors}, nurse1..nurse${COUNTS.nurses}, rmo1, reception1, cashier1, pharmacist1, manager1, labtech1, pathologist1, radiographer1, radiologist1, otcoord1, tpa1, transport1, housekeeping1, mrd1, procurement1.\n`);
   process.stdout.write(generated ? `Password (generated, shown once): ${password}\n` : "Password: the value of SEED_PASSWORD\n");
 }
 

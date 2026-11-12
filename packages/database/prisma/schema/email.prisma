@@ -19,30 +19,30 @@ enum EmailSuppressionReason {
 }
 
 model EmailOutbox {
-  id              String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId        String      @db.Uuid
-  facilityId      String      @db.Uuid
-  templateKey     String
-  language        String
+  id                String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String      @db.Uuid
+  facilityId        String      @db.Uuid
+  templateKey       String
+  language          String
   /// The patient it is about, when there is one (a test email has none).
-  patientId       String?     @db.Uuid
-  toAddress       String
-  subject         String
-  bodyText        String
-  status          EmailStatus @default(PENDING)
-  attempts        Int         @default(0)
-  nextAttemptAt   DateTime    @default(now()) @db.Timestamptz(3)
+  patientId         String?     @db.Uuid
+  toAddress         String
+  subject           String
+  bodyText          String
+  status            EmailStatus @default(PENDING)
+  attempts          Int         @default(0)
+  nextAttemptAt     DateTime    @default(now()) @db.Timestamptz(3)
   /// A short, safe reason (never the provider's raw reply).
-  lastError       String?
+  lastError         String?
   providerMessageId String?
-  sentAt          DateTime?   @db.Timestamptz(3)
-  entityType      String?
-  entityId        String?     @db.Uuid
+  sentAt            DateTime?   @db.Timestamptz(3)
+  entityType        String?
+  entityId          String?     @db.Uuid
   /// Stops the same event emailing the same address twice (for example "APPOINTMENT_BOOKED:<appointment id>").
-  dedupeKey       String?
-  createdById     String?     @db.Uuid
-  createdAt       DateTime    @default(now()) @db.Timestamptz(3)
-  updatedAt       DateTime    @updatedAt @db.Timestamptz(3)
+  dedupeKey         String?
+  createdById       String?     @db.Uuid
+  createdAt         DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime    @updatedAt @db.Timestamptz(3)
 
   facility Facility @relation(fields: [tenantId, facilityId], references: [tenantId, id], onDelete: Restrict)
 

@@ -304,15 +304,30 @@ export class DispensingService {
     });
   }
 
-  /** Return of medicines that were charged to an admission: restock, then void and re-post the (still unbilled) charge for what remains. */
+  /**
+   * Return of medicines that were charged to an admission: restock, then
+   *  - if the charge is still unbilled, void it and re-post the charge for what remains;
+   *  - if it is already on an invoice (the final bill), keep the charge and raise a credit note on that invoice for the value returned.
+   */
   private async returnChargedItems(tx: Db, ctx: RequestContext, d: Prisma.DispenseGetPayload<{ include: { items: true } }>, input: z.infer<typeof dispenseReturnSchema>, dispenseId: string) {
     const merged = new Map<string, number>();
     for (const i of input.items) merged.set(i.dispenseItemId, (merged.get(i.dispenseItemId) ?? 0) + i.quantity);
+    const credits = new Map<string, Decimal>(); // invoice id -> value of medicines returned after they were billed
     for (const [itemId, quantity] of [...merged.entries()].sort(([a], [b]) => a.localeCompare(b))) {
       const item = d.items.find((x) => x.id === itemId);
       if (!item) throw new DomainError("VALIDATION_FAILED", "An item does not belong to this dispense", 400, [{ path: "items", message: "Unknown dispense item" }]);
       const live = await tx.charge.findFirst({ where: { tenantId: ctx.tenantId, sourceKey: { startsWith: `DISPENSE_ITEM:${itemId}` }, status: "PENDING" } });
-      if (!live) throw new DomainError("INVALID_STATE", "These medicines are already on an invoice. Raise a credit note through billing.", 409);
+      if (!live) {
+        // Already billed: the return is credited on the invoice that holds the charge (the final bill), never by editing the bill.
+        const billed = await tx.charge.findFirst({ where: { tenantId: ctx.tenantId, sourceKey: { startsWith: `DISPENSE_ITEM:${itemId}` }, status: "BILLED", invoiceId: { not: null } }, orderBy: { chargedAt: "asc" } });
+        if (!billed?.invoiceId) throw new DomainError("INVALID_STATE", "These medicines have no live charge to return against. Ask the pharmacist to re-post the missing charge first.", 409);
+        const capB = await tx.dispenseItem.updateMany({ where: { id: itemId, tenantId: ctx.tenantId, returnedQuantity: { lte: item.quantity - quantity } }, data: { returnedQuantity: { increment: quantity } } });
+        if (capB.count !== 1) throw new DomainError("INVALID_AMOUNT", `Only ${item.quantity - item.returnedQuantity} unit(s) of this item can still be returned`, 409);
+        await this.stock.move(tx, ctx, { batchId: item.batchId, medicineId: item.medicineId, type: "PATIENT_RETURN", direction: "IN", quantity, sourceType: "DISPENSE_RETURN", sourceId: dispenseId, reason: input.reason });
+        credits.set(billed.invoiceId, (credits.get(billed.invoiceId) ?? new Decimal(0)).plus(round2(new Decimal(billed.unitPrice.toString()).times(quantity))));
+        continue;
+      }
+      if (quantity > Number(live.quantity)) throw new DomainError("INVALID_STATE", `Only ${live.quantity} unit(s) are still unbilled. Return those first, or ask billing for a credit note for the rest.`, 409);
       const cap = await tx.dispenseItem.updateMany({ where: { id: itemId, tenantId: ctx.tenantId, returnedQuantity: { lte: item.quantity - quantity } }, data: { returnedQuantity: { increment: quantity } } });
       if (cap.count !== 1) throw new DomainError("INVALID_AMOUNT", `Only ${item.quantity - item.returnedQuantity} unit(s) of this item can still be returned`, 409);
       await this.stock.move(tx, ctx, { batchId: item.batchId, medicineId: item.medicineId, type: "PATIENT_RETURN", direction: "IN", quantity, sourceType: "DISPENSE_RETURN", sourceId: dispenseId, reason: input.reason });
@@ -322,11 +337,17 @@ export class DispensingService {
         await tx.charge.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: d.patientId, admissionId: live.admissionId, type: "MEDICINE", description: live.description, quantity: remaining.toString(), unitPrice: live.unitPrice.toFixed(2), taxPercent: "0", sourceKey: `DISPENSE_ITEM:${itemId}:R${item.returnedQuantity + quantity}`, chargedById: ctx.userId } });
       }
     }
+    const creditNotes: string[] = []; let credited = new Decimal(0);
+    for (const [invoiceId, value] of [...credits.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+      const inv = await this.ledger.lock(tx, ctx, invoiceId);
+      const c = await this.ledger.credit(tx, ctx, inv, { amount: value, reason: `Pharmacy return: ${input.reason}` }, { allowFull: true });
+      creditNotes.push(c.row.creditNoteNumber); credited = credited.plus(value);
+    }
     const after = await tx.dispenseItem.findMany({ where: { tenantId: ctx.tenantId, dispenseId } });
     const status = after.every((i) => i.returnedQuantity === i.quantity) ? "RETURNED" : "PARTIALLY_RETURNED";
     await tx.dispense.updateMany({ where: { id: dispenseId, tenantId: ctx.tenantId }, data: { status } });
-    await this.audit.record(tx, actorOf(ctx), { action: "PHARMACY_RETURN", entityType: "Dispense", entityId: dispenseId, metadata: { reason: input.reason, status, chargedToAdmission: true } });
-    return { creditNoteNumber: null, creditedAmount: "0.00", dispense: await this.view(tx, ctx, dispenseId) };
+    await this.audit.record(tx, actorOf(ctx), { action: "PHARMACY_RETURN", entityType: "Dispense", entityId: dispenseId, metadata: { reason: input.reason, status, chargedToAdmission: true, ...(creditNotes.length ? { creditNotes, value: fmt(credited) } : {}) } });
+    return { creditNoteNumber: creditNotes[0] ?? null, creditedAmount: fmt(credited), dispense: await this.view(tx, ctx, dispenseId) };
   }
 
   async get(ctx: RequestContext, id: string) {
