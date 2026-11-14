@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { loginAs, registerPatient } from "./helpers";
+import { chooseDoctor, loginAs, mobile, registerPatient } from "./helpers";
 
 /** Mandatory OPD workflow (CLAUDE.md §36) driven through the real browser UI, API and database. */
 test("OPD: register → check in → queue → consult → sign → dispense → pay", async ({ page }) => {
@@ -13,8 +13,7 @@ test("OPD: register → check in → queue → consult → sign → dispense →
   const p = await registerPatient(page);
   await page.getByRole("button", { name: "Start OPD visit" }).click();
   const start = page.getByRole("dialog", { name: "Start an OPD visit" });
-  const label = (await start.locator("option", { hasText: doctorName }).first().textContent()) ?? "";
-  await start.getByLabel("Doctor").selectOption({ label });
+  await chooseDoctor(start, doctorName);
   await start.getByRole("button", { name: "Check in and add to queue" }).click();
   await expect(page).toHaveURL(/\/queue/);
   await expect(page.getByRole("row", { name: new RegExp(p.first) })).toBeVisible();
@@ -100,6 +99,7 @@ test("registering a patient who looks like an existing one shows the possible du
   const dialog = page.getByRole("dialog", { name: "Register new patient" });
   await dialog.getByLabel("First name").fill(p.first);
   await dialog.getByLabel("Last name").fill(p.last);
+  await dialog.getByLabel("Mobile").fill(mobile());
   await dialog.getByLabel("Age in years").fill("37");
   await dialog.getByRole("button", { name: "Register", exact: true }).click();
   await expect(page.getByRole("dialog", { name: "This patient may already be registered" })).toBeVisible();

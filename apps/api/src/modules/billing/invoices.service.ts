@@ -131,7 +131,7 @@ export class InvoicesService {
         if (!enc) throw new DomainError("VALIDATION_FAILED", "The visit does not belong to this patient at this facility", 400);
       }
       const opts = await this.invoiceOptions(tx, ctx);
-      const resolved = await this.resolveLines(tx, ctx, input.lines, opts.taxSplit);
+      const resolved = await this.resolveLines(tx, ctx, input.lines, opts.taxSplit, input.kind);
       const totals = computeTotals(resolved.map((l) => l.amounts), { roundToRupee: opts.roundsToRupee });
       const inv = await tx.invoice.create({
         data: {
@@ -153,7 +153,7 @@ export class InvoicesService {
       const inv = await this.ledger.lock(tx, ctx, id);
       if (inv.status !== "DRAFT") throw new DomainError("INVOICE_ALREADY_ISSUED", "An issued invoice cannot be edited. Use a credit note, refund or cancellation.", 409);
       if (inv.version !== input.version) throw new DomainError("STALE_VERSION", "This invoice was changed by someone else. Reload and try again.", 409, { currentVersion: inv.version });
-      const resolved = await this.resolveLines(tx, ctx, input.lines, inv.taxSplit);
+      const resolved = await this.resolveLines(tx, ctx, input.lines, inv.taxSplit, inv.kind);
       const totals = computeTotals(resolved.map((l) => l.amounts), { roundToRupee: inv.roundsToRupee });
       await tx.invoiceLine.deleteMany({ where: { tenantId: ctx.tenantId, invoiceId: id } });
       await this.writeLines(tx, ctx, id, resolved);
@@ -319,7 +319,8 @@ export class InvoicesService {
     return toInvoiceView(i);
   }
 
-  private async resolveLines(tx: Db, ctx: RequestContext, inputs: LineInput[], split: boolean): Promise<ResolvedLine[]> {
+  /** `kind` keeps the two desks apart: an OPD bill takes no inpatient-only service (a surgery, say) and an IPD bill takes no outpatient-only one. */
+  private async resolveLines(tx: Db, ctx: RequestContext, inputs: LineInput[], split: boolean, kind: string): Promise<ResolvedLine[]> {
     const serviceIds = [...new Set(inputs.flatMap((l) => ("serviceId" in l ? [l.serviceId] : [])))];
     const services = serviceIds.length
       ? await tx.service.findMany({ where: { id: { in: serviceIds }, tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE" } })
@@ -335,6 +336,9 @@ export class InvoicesService {
       if ("serviceId" in l) {
         const s = byId.get(l.serviceId);
         if (!s) throw new DomainError("VALIDATION_FAILED", "A selected service does not exist or is inactive", 400, [{ path: `lines.${i}.serviceId`, message: "Unknown or inactive service" }]);
+        if ((kind === "OPD" && s.availableFor === "IPD") || (kind === "IPD" && s.availableFor === "OPD")) {
+          throw new DomainError("VALIDATION_FAILED", `${s.name} is ${kind === "OPD" ? "an inpatient (IPD)" : "an outpatient (OPD)"} service and cannot be on ${kind === "OPD" ? "an OPD" : "an IPD"} bill`, 400, [{ path: `lines.${i}.serviceId`, message: kind === "OPD" ? "Inpatient service" : "Outpatient service" }]);
+        }
         serviceId = s.id; hsnSac = s.sacCode; description = s.name; unitPrice = new Decimal(s.price.toString()); taxPercent = new Decimal(s.taxPercent.toString());
       } else {
         description = l.description; unitPrice = l.unitPrice; taxPercent = l.taxPercent;

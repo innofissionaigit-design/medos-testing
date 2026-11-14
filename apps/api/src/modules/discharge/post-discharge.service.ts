@@ -5,7 +5,7 @@ import type { RequestContext } from "../../common/request-context";
 import { admissionScope } from "../../common/data-scope";
 import { SettingsService } from "../settings/settings.service";
 import { Decimal } from "@medos/shared";
-import { fmt } from "../billing/billing.domain";
+import { balanceDue, fmt } from "../billing/billing.domain";
 import { postDischargeOf } from "./post-discharge.domain";
 
 export const postDischargeListSchema = z.object({
@@ -39,7 +39,7 @@ export class PostDischargeService {
     const [summaries, drafts, claims, invoices, requireVerified] = await Promise.all([
       this.prisma.clinicalDocument.findMany({ where: { tenantId: T, encounterId: { in: enc }, kind: "DISCHARGE_SUMMARY" }, select: { id: true, encounterId: true, status: true, currentVersion: true } }),
       this.prisma.clinicalDocument.groupBy({ by: ["encounterId"], where: { tenantId: T, encounterId: { in: enc }, status: "DRAFT" }, _count: { _all: true } }),
-      this.prisma.claim.findMany({ where: { tenantId: T, facilityId: ctx.facilityId, encounterId: { in: enc } }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], select: { encounterId: true, claimNumber: true, status: true, approvedAmount: true, preauthApproved: true, settledAmount: true, policy: { select: { insurer: { select: { name: true } } } } } }),
+      this.prisma.claim.findMany({ where: { tenantId: T, facilityId: ctx.facilityId, encounterId: { in: enc }, tier: "PRIMARY" }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], select: { encounterId: true, claimNumber: true, status: true, approvedAmount: true, preauthApproved: true, settledAmount: true, policy: { select: { insurer: { select: { name: true } } } } } }),
       this.prisma.invoice.findMany({ where: { tenantId: T, id: { in: adms.map((a) => a.finalInvoiceId).filter((x): x is string => !!x) } }, select: { id: true, invoiceNumber: true, status: true, total: true, paidTotal: true, refundedTotal: true, creditedTotal: true } }),
       this.settings.get(this.prisma, T, ctx.facilityId, "DISCHARGE_REQUIRE_VERIFIED_SUMMARY"),
     ]);
@@ -47,6 +47,10 @@ export class PostDischargeService {
     const userIds = [...new Set(adms.map((a) => a.recordCompletion?.completedById).filter((x): x is string => !!x))];
     const names = new Map((userIds.length ? await this.prisma.user.findMany({ where: { tenantId: T, id: { in: userIds } }, select: { id: true, fullName: true } }) : []).map((u) => [u.id, u.fullName]));
     const now = new Date();
+    // What each patient still owes on supplementary bills (late charges billed after the final bill).
+    const supp = await this.prisma.supplementaryBill.findMany({ where: { tenantId: T, admissionId: { in: adms.map((x) => x.id) } }, select: { admissionId: true, invoice: { select: { status: true, total: true, paidTotal: true, refundedTotal: true, creditedTotal: true } } } });
+    const suppDue = (admissionId: string): Decimal => supp.filter((b) => b.admissionId === admissionId && b.invoice.status !== "CANCELLED" && b.invoice.status !== "REFUNDED")
+      .reduce((acc, b) => acc.plus(balanceDue({ total: b.invoice.total, paidTotal: b.invoice.paidTotal, refundedTotal: b.invoice.refundedTotal, creditedTotal: b.invoice.creditedTotal })), new Decimal(0));
     const rows = adms.map((a) => {
       const s = summaries.find((x) => x.encounterId === a.encounterId) ?? null;
       const c = claims.find((x) => x.encounterId === a.encounterId) ?? null;
@@ -58,7 +62,7 @@ export class PostDischargeService {
         recordCompletion: a.recordCompletion ? { completedAt: a.recordCompletion.completedAt, byName: names.get(a.recordCompletion.completedById) ?? null, note: a.recordCompletion.note } : null,
         claim: c ? { claimNumber: c.claimNumber, status: c.status, insurer: c.policy.insurer.name, approvedAmount: c.approvedAmount, preauthApproved: c.preauthApproved, settledAmount: c.settledAmount } : null,
         fileMoves: a.recordFileMoves.map((m) => ({ ...m, byName: null })),
-        invoice: invoices.find((x) => x.id === a.finalInvoiceId) ?? null, now,
+        invoice: invoices.find((x) => x.id === a.finalInvoiceId) ?? null, supplementaryDue: suppDue(a.id), now,
       });
       return {
         admissionId: a.id, admissionNumber: a.admissionNumber, patient: [a.patient.firstName, a.patient.lastName].filter(Boolean).join(" "), mrn: a.patient.identifiers[0]?.value ?? null,

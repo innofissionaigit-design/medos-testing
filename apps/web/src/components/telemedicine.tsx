@@ -1,9 +1,10 @@
 "use client";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CANCEL_REASONS, ReasonSelect } from "@/components/reason-select";
 import { api, newKey } from "@/lib/api";
 import { useMe } from "@/lib/me";
-import { Badge, Button, Card, ErrorNote, Input, Notice, Spinner, Table, Td } from "./ui";
+import { Badge, Button, Card, ErrorNote, Notice, Spinner, Table, Td } from "./ui";
 
 interface Row { id: string; patient: string; mrn: string | null; doctor: string; scheduledAt: string; status: string; consented: boolean; doctorJoined: boolean; patientJoined: boolean; patientWaiting: boolean; identityChecked: boolean; feeStatus: string; feeDue: string; canJoin: boolean; windowOpensAt: string }
 const TONE: Record<string, "gray" | "blue" | "green" | "red"> = { SCHEDULED: "gray", IN_PROGRESS: "blue", COMPLETED: "green", CANCELLED: "red" };
@@ -55,7 +56,7 @@ export function VideoConsults() {
                 )}
                 {r.canJoin && r.doctorJoined && <Button loading={join.isPending && join.variables?.id === r.id} onClick={() => join.mutate({ id: r.id })}>Rejoin call</Button>}
                 {r.status === "IN_PROGRESS" && can("TELE_CONDUCT") && <> <Button variant="secondary" onClick={() => end.mutate(r.id)}>End call</Button></>}
-                {r.status === "SCHEDULED" && can("TELE_MANAGE") && <span className="inline-flex items-center gap-1"><Input aria-label="Reason" className="w-40" placeholder="Reason to cancel" value={reason[r.id] ?? ""} onChange={(e) => setReason({ ...reason, [r.id]: e.target.value })} /><Button variant="secondary" disabled={(reason[r.id]?.trim().length ?? 0) < 5} onClick={() => cancel.mutate(r.id)}>Cancel</Button></span>}
+                {r.status === "SCHEDULED" && can("TELE_MANAGE") && <span className="inline-flex items-center gap-1"><ReasonSelect reasons={CANCEL_REASONS.video} label="Reason to cancel" className="w-56 space-y-1" onChange={(v) => setReason((all) => ({ ...all, [r.id]: v }))} /><Button variant="secondary" disabled={(reason[r.id]?.trim().length ?? 0) < 5} onClick={() => cancel.mutate(r.id)}>Cancel</Button></span>}
               </Td>
             </tr>
           ))}

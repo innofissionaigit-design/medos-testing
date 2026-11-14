@@ -67,8 +67,10 @@ export class ChargesService {
     return this.prisma.$transaction(async (tx) => {
       const adm = await tx.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId } });
       if (!adm) throw new DomainError("NOT_FOUND", "Resource not found", 404);
-      if (adm.status !== "ADMITTED") throw new DomainError("INVALID_STATE", "Charges can only be added to a current admission", 409);
-      if (adm.finalInvoiceId) throw new DomainError("INVALID_STATE", "The final bill has already been issued", 409);
+      // A charge that arrives after the final bill (while the patient is still here or waiting to leave) is accepted: the first bill is never touched,
+      // the late charge waits as pending and is billed on its own supplementary bill (docs/discharge-flow.md).
+      const lateOk = !!adm.finalInvoiceId && adm.status === "DISCHARGED";
+      if (adm.status !== "ADMITTED" && !lateOk) throw new DomainError("INVALID_STATE", "Charges can only be added to a current admission", 409);
       let description: string; let unitPrice: Decimal; let taxPercent: Decimal; let serviceId: string | null = null;
       if ("serviceId" in input) {
         const s = await tx.service.findFirst({ where: { id: input.serviceId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, status: "ACTIVE" } });

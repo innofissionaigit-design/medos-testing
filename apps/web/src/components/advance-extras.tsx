@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button, Card, ErrorNote, Field, Input, Modal, Select, Spinner, Table, Td } from "@/components/ui";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 const METHODS = ["CASH", "UPI", "CARD", "BANK_TRANSFER", "OTHER"];
 interface Advance {
@@ -34,7 +35,7 @@ export function AdvanceCard({ patientId }: { patientId: string }) {
                 <Td>{a.receiptNumber}</Td><Td>{dateTime(a.receivedAt)}</Td>
                 <Td>{a.tenders.map((t) => `${label(t.method)} ${money(t.amount)}`).join(" + ")}</Td><Td>{money(a.balance)}</Td>
                 <Td>
-                  <a className="text-sm text-brand-700 hover:underline" href={printUrl(`advance-receipts/${a.id}`)} target="_blank" rel="noreferrer">Print receipt</a>
+                  <PrintLink className="text-sm text-brand-700 hover:underline" href={printUrl(`advance-receipts/${a.id}`)}>Print receipt</PrintLink>
                   {can("PAYMENT_REFUND") && Number(a.balance) > 0 && <Button variant="ghost" onClick={() => setGiving(a)}>Give back…</Button>}
                 </Td>
               </tr>

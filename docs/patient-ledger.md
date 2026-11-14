@@ -1,6 +1,6 @@
 # Patient account statement (ledger)
 
-Patient page → **Account statement (ledger)**; API `GET /patients/:id/ledger` (`INVOICE_READ`). Built on the fly from the ledger tables (never stored), so it always agrees with them. Includes merged duplicate records of the same patient. Facility-scoped.
+Patient page → **Account statement (ledger)**; API `GET /patients/:id/ledger` (`LEDGER_READ`: every role that reads bills except the receptionist). Built on the fly from the ledger tables (never stored), so it always agrees with them. Includes merged duplicate records of the same patient. Facility-scoped.
 
 | Entry | Debit (patient owes more / money paid out) | Credit (money in / charge taken back) |
 |---|---|---|

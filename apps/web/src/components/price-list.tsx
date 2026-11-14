@@ -5,7 +5,7 @@ import { api } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ConfirmButton, ErrorNote, Field, Input, Notice, Select, Spinner, Table, Td, useDebounced } from "./ui";
 
-interface Service { id: string; code: string; name: string; category: string; price: string; taxPercent: string; sacCode: string | null; status: "ACTIVE" | "INACTIVE" }
+interface Service { id: string; code: string; name: string; category: string; availableFor: string; price: string; taxPercent: string; sacCode: string | null; status: "ACTIVE" | "INACTIVE" }
 
 const CATEGORIES: [string, string][] = [
   ["CONSULTATION", "Consultation"], ["ROOM_BED", "Room and bed"], ["PROCEDURE", "Procedure"], ["NURSING", "Nursing"],
@@ -13,10 +13,13 @@ const CATEGORIES: [string, string][] = [
 ];
 const categoryLabel = (c: string) => CATEGORIES.find(([k]) => k === c)?.[1] ?? c;
 const PAGE = 50;
+/** Where a service is billed: the OPD desk, the IPD desk, or both. */
+const SCOPES: [string, string][] = [["OPD", "OPD only"], ["IPD", "IPD only"], ["BOTH", "OPD and IPD"]];
+const scopeLabel = (s: string) => SCOPES.find(([k]) => k === s)?.[1] ?? s;
 const AMOUNT = /^\d{1,8}(\.\d{1,2})?$/;
 
-interface Form { name: string; category: string; price: string; taxPercent: string; sacCode: string }
-const toForm = (s: Service): Form => ({ name: s.name, category: s.category, price: s.price, taxPercent: s.taxPercent, sacCode: s.sacCode ?? "" });
+interface Form { name: string; category: string; availableFor: string; price: string; taxPercent: string; sacCode: string }
+const toForm = (s: Service): Form => ({ name: s.name, category: s.category, availableFor: s.availableFor, price: s.price, taxPercent: s.taxPercent, sacCode: s.sacCode ?? "" });
 const formError = (f: Form): string | null => {
   if (f.name.trim().length < 2) return "Enter the service name";
   if (!AMOUNT.test(f.price.trim())) return "Price must be an amount like 500 or 500.50";
@@ -44,11 +47,11 @@ export function PriceList() {
   });
   const refresh = async () => { await Promise.all(["services-admin", "services", "services-all"].map((k) => qc.invalidateQueries({ queryKey: [k] }))); };
 
-  const empty = { code: "", name: "", category: "CONSULTATION", price: "", taxPercent: "0", sacCode: "" };
+  const empty = { code: "", name: "", category: "CONSULTATION", availableFor: "", price: "", taxPercent: "0", sacCode: "" };
   const [add, setAdd] = useState(empty);
   const addErr = add.code.trim() && add.name.trim() ? formError(add) : null;
   const create = useMutation({
-    mutationFn: () => api.post("/services", { code: add.code.trim(), name: add.name.trim(), category: add.category, price: add.price.trim(), taxPercent: add.taxPercent.trim(), ...(add.sacCode.trim() ? { sacCode: add.sacCode.trim() } : {}) }),
+    mutationFn: () => api.post("/services", { code: add.code.trim(), name: add.name.trim(), category: add.category, ...(add.availableFor ? { availableFor: add.availableFor } : {}), price: add.price.trim(), taxPercent: add.taxPercent.trim(), ...(add.sacCode.trim() ? { sacCode: add.sacCode.trim() } : {}) }),
     onSuccess: async () => { setAdd(empty); await refresh(); },
   });
 
@@ -63,6 +66,7 @@ export function PriceList() {
     const body: Record<string, unknown> = {};
     if (form.name.trim() !== editing.name) body["name"] = form.name.trim();
     if (form.category !== editing.category) body["category"] = form.category;
+    if (form.availableFor !== editing.availableFor) body["availableFor"] = form.availableFor;
     if (Number(form.price) !== Number(editing.price)) body["price"] = form.price.trim();
     if (Number(form.taxPercent) !== Number(editing.taxPercent)) body["taxPercent"] = form.taxPercent.trim();
     if (form.sacCode.trim() !== (editing.sacCode ?? "")) body["sacCode"] = form.sacCode.trim() || null;
@@ -81,6 +85,7 @@ export function PriceList() {
           <Input placeholder="Code, e.g. CONS" aria-label="Code" value={add.code} onChange={(e) => setAdd({ ...add, code: e.target.value })} />
           <Input className="sm:col-span-2" placeholder="Service name" aria-label="Name" value={add.name} onChange={(e) => setAdd({ ...add, name: e.target.value })} />
           <Select aria-label="Category" value={add.category} onChange={(e) => setAdd({ ...add, category: e.target.value })}>{CATEGORIES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}</Select>
+          <Select aria-label="Used at" value={add.availableFor} onChange={(e) => setAdd({ ...add, availableFor: e.target.value })}><option value="">Used at: by category</option>{SCOPES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}</Select>
           <Input placeholder="Price" aria-label="Price" inputMode="decimal" value={add.price} onChange={(e) => setAdd({ ...add, price: e.target.value })} />
           <Input placeholder="Tax %" aria-label="Tax percent" inputMode="decimal" value={add.taxPercent} onChange={(e) => setAdd({ ...add, taxPercent: e.target.value })} />
           <Input placeholder="SAC/HSN (optional)" aria-label="SAC or HSN code" inputMode="numeric" className="sm:col-span-2" value={add.sacCode} onChange={(e) => setAdd({ ...add, sacCode: e.target.value })} />
@@ -98,12 +103,13 @@ export function PriceList() {
         </div>
         <p className="mb-2 text-xs text-slate-500">Changing a price or tax applies to new invoices only. Invoices already issued keep the price they were issued with. A service is switched off, never deleted, so old bills stay complete.</p>
         {list.isLoading ? <Spinner /> : (
-          <Table head={["Code", "Service", "Category", "SAC/HSN", "Price", "Tax %", "", ""]} empty="No services match.">
+          <Table head={["Code", "Service", "Category", "Used at", "SAC/HSN", "Price", "Tax %", "", ""]} empty="No services match.">
             {rows.map((s) => editing?.id === s.id && form ? (
               <tr key={s.id} className="bg-slate-50">
                 <Td>{s.code}</Td>
                 <Td><Input aria-label={`Name of ${s.code}`} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Td>
                 <Td><Select aria-label={`Category of ${s.code}`} value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })}>{CATEGORIES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}</Select></Td>
+                <Td><Select aria-label={`Used at for ${s.code}`} value={form.availableFor} onChange={(e) => setForm({ ...form, availableFor: e.target.value })}>{SCOPES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}</Select></Td>
                 <Td><Input aria-label={`SAC or HSN of ${s.code}`} inputMode="numeric" className="w-24" value={form.sacCode} onChange={(e) => setForm({ ...form, sacCode: e.target.value })} /></Td>
                 <Td><Input aria-label={`Price of ${s.code}`} inputMode="decimal" className="w-24" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></Td>
                 <Td><Input aria-label={`Tax percent of ${s.code}`} inputMode="decimal" className="w-20" value={form.taxPercent} onChange={(e) => setForm({ ...form, taxPercent: e.target.value })} /></Td>
@@ -118,7 +124,7 @@ export function PriceList() {
               </tr>
             ) : (
               <tr key={s.id} className={s.status === "INACTIVE" ? "text-slate-400" : ""}>
-                <Td>{s.code}</Td><Td>{s.name}</Td><Td>{categoryLabel(s.category)}</Td><Td>{s.sacCode ?? "—"}</Td><Td>{money(s.price)}</Td><Td>{s.taxPercent}</Td>
+                <Td>{s.code}</Td><Td>{s.name}</Td><Td>{categoryLabel(s.category)}</Td><Td>{scopeLabel(s.availableFor)}</Td><Td>{s.sacCode ?? "—"}</Td><Td>{money(s.price)}</Td><Td>{s.taxPercent}</Td>
                 <Td>{s.status === "INACTIVE" && <Badge tone="red">Switched off</Badge>}</Td>
                 <Td>
                   <span className="flex gap-2">

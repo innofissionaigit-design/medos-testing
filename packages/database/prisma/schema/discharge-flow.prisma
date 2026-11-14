@@ -1,0 +1,125 @@
+// Discharge flow (docs/discharge-flow.md): the planned going-home date, the reasons a patient is held up, the insurer's separate clock, and the
+// ledger of reminders and escalations already sent. Whether a patient is fit to go is still the doctor's alone (DischargeClearance MEDICALLY_FIT).
+
+/// Why a stage is stuck. A fixed list so the hospital can add up what really causes delays.
+enum DelayReason {
+  WAITING_FOR_INSURANCE
+  FAMILY_ARRANGING_MONEY
+  SUMMARY_NOT_WRITTEN
+  WAITING_FOR_LAB_OR_REPORT
+  WAITING_FOR_MEDICINES
+  WAITING_FOR_DOCTOR
+  WAITING_FOR_TRANSPORT
+  PATIENT_OR_FAMILY_NOT_READY
+  OTHER
+}
+
+enum FlowClock {
+  DISCHARGE
+  INSURER
+}
+
+enum FlowAlertLevel {
+  REMINDER
+  ESCALATION_DEPARTMENT
+  ESCALATION_ADMINISTRATOR
+}
+
+/// The date the ward expects the patient to go home. One per admission; the doctor changes it as the stay changes (every change is audited).
+model DischargePlan {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String   @db.Uuid
+  facilityId    String   @db.Uuid
+  admissionId   String   @db.Uuid
+  expectedDate  DateTime @db.Date
+  note          String?
+  setById       String   @db.Uuid
+  updatedAt     DateTime @default(now()) @updatedAt @db.Timestamptz(3)
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId])
+  @@unique([tenantId, facilityId, admissionId])
+}
+
+/// One immutable row each time somebody says why a stage is stuck. The newest row for a stage is its current reason.
+model DischargeDelay {
+  id          String      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String      @db.Uuid
+  facilityId  String      @db.Uuid
+  admissionId String      @db.Uuid
+  /// A discharge step (NURSING, PHARMACY ...) or SUMMARY, EXIT or INSURER_PAYMENT.
+  stage       String
+  reason      DelayReason
+  note        String?
+  byId        String      @db.Uuid
+  at          DateTime    @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, admissionId, stage, at])
+  @@index([tenantId, facilityId, at])
+}
+
+/// The moment the insurance desk sent the final bill to the insurer: this starts the insurer's clock. Once per admission, never changed.
+model InsurerBillSend {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  admissionId String   @db.Uuid
+  claimId     String   @db.Uuid
+  sentAt      DateTime @db.Timestamptz(3)
+  note        String?
+  byId        String   @db.Uuid
+  at          DateTime @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  claim     Claim     @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId])
+  @@unique([tenantId, facilityId, admissionId])
+}
+
+/// A reminder or escalation that has been sent. The unique key is what makes the background job safe to run twice: a level is sent once per stage.
+model DischargeAlert {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String         @db.Uuid
+  facilityId  String         @db.Uuid
+  admissionId String         @db.Uuid
+  clock       FlowClock
+  level       FlowAlertLevel
+  stage       String
+  recipients  Int
+  sentAt      DateTime       @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([admissionId, clock, level, stage])
+  @@index([tenantId, facilityId, sentAt])
+}
+
+/// A small separate bill for charges that arrived after the final bill was issued (docs/discharge-flow.md). The final bill is never altered:
+/// each late batch becomes its own issued invoice, numbered 1, 2, 3 ... per admission. Append-only.
+model SupplementaryBill {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  admissionId String   @db.Uuid
+  invoiceId   String   @db.Uuid
+  sequence    Int
+  charges     Int
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  admission Admission @relation(fields: [tenantId, facilityId, admissionId], references: [tenantId, facilityId, id], onDelete: Restrict)
+  invoice   Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([invoiceId])
+  @@unique([admissionId, sequence])
+}

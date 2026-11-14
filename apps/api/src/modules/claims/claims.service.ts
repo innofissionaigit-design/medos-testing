@@ -10,7 +10,9 @@ import { balanceDue, fmt } from "../billing/billing.domain";
 import { LedgerService } from "../billing/ledger.service";
 import { amount, percent } from "../billing/money.schema";
 import { NumberingService } from "../numbering/numbering.service";
+import { packageOpenness, topupClaim } from "./insurance-money.domain";
 import { calculateCopay, type CopayRule, FINISHED, hasCopayRule, nextStatus, stepAllowedForType, stepsFrom, type ClaimStatus, type ClaimStep } from "./claims.domain";
+import { assertDocumentsComplete } from "./claim-checklist.service";
 
 const uuid = z.string().uuid();
 const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Use a date like 2026-11-02");
@@ -22,6 +24,8 @@ export const policySchema = z.object({
   insurerId: uuid, policyNumber: z.string().trim().min(3).max(60), memberId: z.string().trim().max(60).optional(), holderName: z.string().trim().max(120).optional(),
   validFrom: day, validTo: day, sumInsured: amount().optional(),
   copayPercent: percent.optional(), deductible: amount().optional(), deductibleUsed: amount().optional(),
+  // The main policy, or a top-up that covers what the main insurer leaves; the room it entitles the patient to and the most it pays per day.
+  tier: z.enum(["PRIMARY", "TOPUP"]).default("PRIMARY"), roomEntitlement: z.string().trim().max(60).optional(), roomRentLimit: amount().optional(),
 }).strict();
 export const policyStatusSchema = z.object({ status: z.enum(["ACTIVE", "INACTIVE"]) }).strict();
 /** Sets a policy's co-pay rule. `copayPercent: null` with no deductible removes the rule. */
@@ -43,8 +47,17 @@ export const removeSchema = z.object({ reason }).strict();
 export const appealSchema = z.object({ reason: z.string().trim().min(10).max(500) }).strict();
 export const appealDecisionSchema = z.object({ decision: z.enum(["OVERTURN", "UPHOLD"]), amount: amount({ positive: true }).optional(), reason: reason.optional() }).strict();
 export const rateSchema = z.object({ price: amount(), status: z.enum(["ACTIVE", "INACTIVE"]).optional() }).strict();
-export const packageSchema = z.object({ code: z.string().trim().min(1).max(30), name: z.string().trim().min(2).max(120), price: amount({ positive: true }) }).strict();
-export const packageUpdateSchema = z.object({ name: z.string().trim().min(2).max(120).optional(), price: amount({ positive: true }).optional(), status: z.enum(["ACTIVE", "INACTIVE"]).optional() }).strict();
+const listOfWords = z.array(z.string().trim().min(2).max(80)).max(30);
+/** Implants and consumables are inside the package price unless the package says otherwise, and then it must say so openly. */
+export const packageSchema = z.object({
+  code: z.string().trim().min(1).max(30), name: z.string().trim().min(2).max(120), price: amount({ positive: true }),
+  includesImplants: z.boolean().default(true), includesConsumables: z.boolean().default(true), inclusions: listOfWords.default([]), exclusions: listOfWords.default([]), exclusionNote: z.string().trim().max(300).optional(),
+}).strict();
+export const packageUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(120).optional(), price: amount({ positive: true }).optional(), status: z.enum(["ACTIVE", "INACTIVE"]).optional(),
+  includesImplants: z.boolean().optional(), includesConsumables: z.boolean().optional(), inclusions: listOfWords.optional(), exclusions: listOfWords.optional(), exclusionNote: z.string().trim().max(300).nullable().optional(),
+}).strict();
+export const topupSchema = z.object({ policyId: uuid }).strict();
 export const tariffSchema = z.object({ packageId: uuid.nullable() }).strict();
 export const addInvoiceSchema = z.object({ invoiceId: uuid }).strict();
 export const rateCheckSchema = z.object({ invoiceId: uuid.optional() }).strict();
@@ -107,11 +120,12 @@ export class ClaimsService {
     });
   }
 
-  private policyView(p: { id: string; policyNumber: string; memberId: string | null; holderName: string | null; validFrom: Date; validTo: Date; sumInsured: Prisma.Decimal | null; copayPercent: Prisma.Decimal | null; deductible: Prisma.Decimal; deductibleUsed: Prisma.Decimal; status: string; insurer: { id: string; name: string; kind: string } }) {
+  private policyView(p: { id: string; policyNumber: string; memberId: string | null; holderName: string | null; validFrom: Date; validTo: Date; sumInsured: Prisma.Decimal | null; copayPercent: Prisma.Decimal | null; deductible: Prisma.Decimal; deductibleUsed: Prisma.Decimal; status: string; tier: string; roomEntitlement: string | null; roomRentLimit: Prisma.Decimal | null; insurer: { id: string; name: string; kind: string } }) {
     const iso = (d: Date) => d.toISOString().slice(0, 10);
     return {
       id: p.id, policyNumber: p.policyNumber, memberId: p.memberId, holderName: p.holderName, validFrom: iso(p.validFrom), validTo: iso(p.validTo), sumInsured: money(p.sumInsured),
       copayPercent: p.copayPercent === null ? null : new Decimal(p.copayPercent.toString()).toFixed(2), deductible: fmt(p.deductible), deductibleUsed: fmt(p.deductibleUsed), hasCopayRule: hasCopayRule(ruleOf(p)),
+      tier: p.tier, roomEntitlement: p.roomEntitlement, roomRentLimit: money(p.roomRentLimit),
       status: p.status, insurer: p.insurer, validToday: p.status === "ACTIVE" && p.validFrom <= today() && p.validTo >= today() };
   }
 
@@ -129,9 +143,14 @@ export class ClaimsService {
       const patient = await tx.patient.findFirst({ where: { id: patientId, tenantId: ctx.tenantId }, select: { id: true } });
       const insurer = await tx.insurer.findFirst({ where: { id: input.insurerId, tenantId: ctx.tenantId, status: "ACTIVE" }, select: { id: true } });
       if (!patient || !insurer) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      // A top-up covers what a main policy leaves, so the patient needs a valid main policy with another insurer.
+      if (input.tier === "TOPUP") {
+        const main = await tx.patientPolicy.findFirst({ where: { tenantId: ctx.tenantId, patientId, tier: "PRIMARY", status: "ACTIVE", insurerId: { not: input.insurerId }, validFrom: { lte: today() }, validTo: { gte: today() } }, select: { id: true } });
+        if (!main) throw new DomainError("INVALID_STATE", "A top-up policy needs a valid main policy with another insurer", 409);
+      }
       try {
         const p = await tx.patientPolicy.create({
-          data: { tenantId: ctx.tenantId, patientId, insurerId: input.insurerId, policyNumber: input.policyNumber, memberId: input.memberId ?? null, holderName: input.holderName ?? null, validFrom: new Date(input.validFrom), validTo: new Date(input.validTo), sumInsured: input.sumInsured?.toFixed(2) ?? null, copayPercent: input.copayPercent?.toFixed(2) ?? null, deductible: (input.deductible ?? new Decimal(0)).toFixed(2), deductibleUsed: (input.deductibleUsed ?? new Decimal(0)).toFixed(2), createdById: ctx.userId },
+          data: { tenantId: ctx.tenantId, patientId, insurerId: input.insurerId, policyNumber: input.policyNumber, memberId: input.memberId ?? null, holderName: input.holderName ?? null, validFrom: new Date(input.validFrom), validTo: new Date(input.validTo), sumInsured: input.sumInsured?.toFixed(2) ?? null, copayPercent: input.copayPercent?.toFixed(2) ?? null, deductible: (input.deductible ?? new Decimal(0)).toFixed(2), deductibleUsed: (input.deductibleUsed ?? new Decimal(0)).toFixed(2), tier: input.tier, roomEntitlement: input.roomEntitlement ?? null, roomRentLimit: input.roomRentLimit?.toFixed(2) ?? null, createdById: ctx.userId },
           include: { insurer: { select: { id: true, name: true, kind: true } } },
         });
         await this.audit.record(tx, actorOf(ctx), { action: "POLICY_ADDED", entityType: "PatientPolicy", entityId: p.id, metadata: { patientId, insurerId: input.insurerId } });
@@ -183,6 +202,7 @@ export class ClaimsService {
       const policy = await tx.patientPolicy.findFirst({ where: { id: input.policyId, tenantId: ctx.tenantId, patientId: input.patientId } });
       if (!policy) throw new DomainError("NOT_FOUND", "Resource not found", 404);
       if (policy.status !== "ACTIVE" || policy.validFrom > today() || policy.validTo < today()) throw new DomainError("INVALID_STATE", "This policy is not valid today", 409);
+      if (policy.tier === "TOPUP") throw new DomainError("INVALID_STATE", "A top-up claim is started from the main insurer's claim", 409);
       if (input.encounterId) {
         const e = await tx.encounter.findFirst({ where: { id: input.encounterId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: input.patientId }, select: { id: true } });
         if (!e) throw new DomainError("NOT_FOUND", "Resource not found", 404);
@@ -193,6 +213,59 @@ export class ClaimsService {
       await this.audit.record(tx, actorOf(ctx), { action: "CLAIM_CREATED", entityType: "Claim", entityId: c.id, metadata: { claimNumber, type: input.type } });
       return { id: c.id, claimNumber };
     });
+  }
+
+  /** Starts the claim of a patient's top-up insurer: it covers what the main insurer leaves on the same invoice, and follows the main claim. */
+  async createTopup(ctx: RequestContext, primaryId: string, input: z.infer<typeof topupSchema>) {
+    return this.prisma.$transaction(async (tx) => {
+      const main = await this.lock(tx, ctx, primaryId);
+      if (main.tier !== "PRIMARY") throw new DomainError("INVALID_STATE", "This is already a top-up claim", 409);
+      if (FINISHED.includes(main.status as ClaimStatus) && main.status !== "SETTLED") throw new DomainError("INVALID_STATE", "The main claim is finished", 409);
+      const policy = await tx.patientPolicy.findFirst({ where: { id: input.policyId, tenantId: ctx.tenantId, patientId: main.patientId } });
+      if (!policy) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      if (policy.tier !== "TOPUP") throw new DomainError("INVALID_STATE", "This is not a top-up policy", 409);
+      if (policy.status !== "ACTIVE" || policy.validFrom > today() || policy.validTo < today()) throw new DomainError("INVALID_STATE", "This policy is not valid today", 409);
+      const mainPolicy = await tx.patientPolicy.findFirstOrThrow({ where: { id: main.policyId, tenantId: ctx.tenantId }, select: { insurerId: true } });
+      if (mainPolicy.insurerId === policy.insurerId) throw new DomainError("INVALID_STATE", "The top-up must be with a different insurer from the main policy", 409);
+      const claimNumber = await this.numbering.next(tx, ctx.tenantId, ctx.facilityId, "CLAIM");
+      try {
+        const c = await tx.claim.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, patientId: main.patientId, policyId: policy.id, encounterId: main.encounterId, claimNumber, type: main.type, diagnosis: main.diagnosis, tier: "TOPUP", primaryClaimId: main.id, createdById: ctx.userId } });
+        await tx.claimEvent.create({ data: { tenantId: ctx.tenantId, claimId: c.id, fromStatus: null, toStatus: "DRAFT", note: `Top-up to claim ${main.claimNumber}`, actorId: ctx.userId } });
+        await this.audit.record(tx, actorOf(ctx), { action: "CLAIM_TOPUP_CREATED", entityType: "Claim", entityId: c.id, metadata: { claimNumber, primaryClaimId: main.id, primaryClaimNumber: main.claimNumber } });
+        return { id: c.id, claimNumber, tier: "TOPUP" as const, primaryClaimId: main.id };
+      } catch (e) {
+        if ((e as { code?: string }).code === "P2002") throw new DomainError("CONFLICT", "This claim already has a top-up claim in progress", 409);
+        throw e;
+      }
+    });
+  }
+
+  /**
+   * What the top-up insurer is asked for: the main invoice less what the main insurer pays (its approved amount once decided, otherwise what it was asked for) and
+   * less the items nobody covers, under the top-up policy's own co-pay rule and sum insured. It covers the main invoice only.
+   */
+  async topupAmount(tx: Db, ctx: RequestContext, main: { id: string; invoiceId: string | null; approvedAmount: Prisma.Decimal | null; claimedAmount: Prisma.Decimal | null }, policy: { copayPercent: Prisma.Decimal | null; deductible: Prisma.Decimal; deductibleUsed: Prisma.Decimal; sumInsured: Prisma.Decimal | null }) {
+    if (!main.invoiceId) throw new DomainError("INVALID_STATE", "Submit the main insurer's claim first: the top-up follows its invoice", 409);
+    const inv = await tx.invoice.findFirstOrThrow({ where: { id: main.invoiceId, tenantId: ctx.tenantId }, select: { total: true, creditedTotal: true } });
+    const base = new Decimal(inv.total.toString()).minus(inv.creditedTotal.toString());
+    const np = await this.nonPayableTotal(tx, ctx, main.id);
+    const mainPays = new Decimal((main.approvedAmount ?? main.claimedAmount ?? 0).toString());
+    const remainder = base.minus(np).minus(mainPays);
+    return { base, mainPays, nonPayable: np, remainder: Decimal.max(0, remainder), ...topupClaim(remainder, ruleOf(policy)) };
+  }
+
+  /** The top-up claim follows the main claim: when the main insurer's approval changes, a top-up still waiting for its insurer is updated to match. */
+  private async syncTopup(tx: Db, ctx: RequestContext, primaryId: string): Promise<void> {
+    const t = await tx.claim.findFirst({ where: { tenantId: ctx.tenantId, primaryClaimId: primaryId, tier: "TOPUP", status: { in: ["SUBMITTED", "QUERY"] } } });
+    if (!t || !t.invoiceId) return;
+    const main = await tx.claim.findFirstOrThrow({ where: { id: primaryId, tenantId: ctx.tenantId } });
+    const policy = await tx.patientPolicy.findFirstOrThrow({ where: { id: t.policyId, tenantId: ctx.tenantId } });
+    const r = await this.topupAmount(tx, ctx, main, policy);
+    if (r.claim.lte(0) || (t.claimedAmount && r.claim.eq(t.claimedAmount.toString()))) return;
+    const before = t.claimedAmount ? new Decimal(t.claimedAmount.toString()) : new Decimal(0);
+    await tx.claim.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: t.id } }, data: { claimedAmount: r.claim.toFixed(2), calculatedAmount: r.claim.toFixed(2), patientShare: r.base.minus(r.mainPays).minus(r.claim).toFixed(2) } });
+    await tx.claimEvent.create({ data: { tenantId: ctx.tenantId, claimId: t.id, fromStatus: t.status, toStatus: t.status, amount: r.claim.toFixed(2), note: `Updated because the main insurer's approval changed: ${fmt(before)} to ${fmt(r.claim)}`, actorId: ctx.userId } });
+    await this.audit.record(tx, actorOf(ctx), { action: "CLAIM_TOPUP_UPDATED", entityType: "Claim", entityId: t.id, metadata: { claimNumber: t.claimNumber, primaryClaimId: primaryId, from: fmt(before), to: fmt(r.claim) } });
   }
 
   async list(ctx: RequestContext, q: z.infer<typeof listClaimsSchema>) {
@@ -227,7 +300,10 @@ export class ClaimsService {
     if (!c) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const users = new Map((await this.prisma.user.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set([...c.events.map((e) => e.actorId), ...c.settlements.map((s) => s.createdById), ...c.enhancements.flatMap((e) => [e.requestedById, ...(e.decidedById ? [e.decidedById] : [])]), ...(c.verifiedById ? [c.verifiedById] : []), ...c.nonPayables.map((n) => n.recordedById), ...c.appeals.flatMap((a) => [a.requestedById, ...(a.decidedById ? [a.decidedById] : [])])])] } }, select: { id: true, fullName: true } })).map((u) => [u.id, u.fullName]));
     const status = c.status as ClaimStatus;
+    const topups = await this.prisma.claim.findMany({ where: { tenantId: ctx.tenantId, primaryClaimId: c.id }, orderBy: { createdAt: "asc" }, select: { id: true, claimNumber: true, status: true, claimedAmount: true, approvedAmount: true, policy: { select: { insurer: { select: { name: true } } } } } });
     return {
+      tier: c.tier, primaryClaimId: c.primaryClaimId,
+      topups: topups.map((t) => ({ id: t.id, claimNumber: t.claimNumber, status: t.status, claimedAmount: money(t.claimedAmount), approvedAmount: money(t.approvedAmount), insurer: t.policy.insurer.name })),
       id: c.id, claimNumber: c.claimNumber, type: c.type, status, diagnosis: c.diagnosis, closeReason: c.closeReason, encounterId: c.encounterId,
       patient: { id: c.patient.id, name: nameOf(c.patient), mrn: c.patient.identifiers[0]?.value ?? null }, policy: this.policyView(c.policy),
       preauthRequested: money(c.preauthRequested), preauthApproved: money(c.preauthApproved), claimedAmount: money(c.claimedAmount), approvedAmount: money(c.approvedAmount), settledAmount: money(c.settledAmount),
@@ -475,6 +551,7 @@ export class ClaimsService {
         }
         await tx.claimEvent.create({ data: { tenantId: ctx.tenantId, claimId: c.id, fromStatus: "REJECTED", toStatus: "APPROVED", amount: input.amount.toFixed(2), note: `Appeal succeeded${input.reason ? `: ${input.reason}` : ""}`, actorId: ctx.userId } });
         await this.audit.record(tx, actorOf(ctx), { action: "CLAIM_APPEAL_OVERTURNED", entityType: "Claim", entityId: c.id, metadata: { claimNumber: c.claimNumber, appealId: a.id, amount: fmt(input.amount) } });
+        await this.syncTopup(tx, ctx, c.id);
         return { id: a.id, status: "OVERTURNED" as const, claimStatus: "APPROVED" as const };
       }
       if (!input.reason) throw new DomainError("VALIDATION_FAILED", "Enter the reason the insurer gave", 400, [{ path: "reason", message: "Required" }]);
@@ -526,17 +603,23 @@ export class ClaimsService {
     const ins = await this.prisma.insurer.findFirst({ where: { id: insurerId, tenantId: ctx.tenantId }, select: { id: true } });
     if (!ins) throw new DomainError("NOT_FOUND", "Resource not found", 404);
     const rows = await this.prisma.insurerPackage.findMany({ where: { tenantId: ctx.tenantId, insurerId }, orderBy: { code: "asc" }, take: 500 });
-    return rows.map((p) => ({ id: p.id, code: p.code, name: p.name, price: fmt(p.price), status: p.status }));
+    return rows.map((p) => this.packageView(p));
+  }
+
+  private packageView(p: { id: string; code: string; name: string; price: Prisma.Decimal; status: string; includesImplants: boolean; includesConsumables: boolean; inclusions: string[]; exclusions: string[]; exclusionNote: string | null }) {
+    return { id: p.id, code: p.code, name: p.name, price: fmt(p.price), status: p.status, includesImplants: p.includesImplants, includesConsumables: p.includesConsumables, inclusions: p.inclusions, exclusions: p.exclusions, exclusionNote: p.exclusionNote };
   }
 
   async addPackage(ctx: RequestContext, insurerId: string, input: z.infer<typeof packageSchema>) {
     return this.prisma.$transaction(async (tx) => {
       const ins = await tx.insurer.findFirst({ where: { id: insurerId, tenantId: ctx.tenantId }, select: { id: true } });
       if (!ins) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+      const open = packageOpenness(input);
+      if (open) throw new DomainError("VALIDATION_FAILED", open, 400, [{ path: "exclusionNote", message: "Say what is left out" }]);
       try {
-        const p = await tx.insurerPackage.create({ data: { tenantId: ctx.tenantId, insurerId, code: input.code, name: input.name, price: input.price.toFixed(2) } });
+        const p = await tx.insurerPackage.create({ data: { tenantId: ctx.tenantId, insurerId, code: input.code, name: input.name, price: input.price.toFixed(2), includesImplants: input.includesImplants, includesConsumables: input.includesConsumables, inclusions: input.inclusions, exclusions: input.exclusions, exclusionNote: input.exclusionNote ?? null } });
         await this.audit.record(tx, actorOf(ctx), { action: "INSURER_PACKAGE_ADDED", entityType: "Insurer", entityId: insurerId, metadata: { packageId: p.id, code: p.code, price: fmt(p.price) } });
-        return { id: p.id, code: p.code, name: p.name, price: fmt(p.price), status: p.status };
+        return this.packageView(p);
       } catch (e) {
         if ((e as { code?: string }).code === "P2002") throw new DomainError("CONFLICT", "This insurer already has a package with this code", 409);
         throw e;
@@ -549,9 +632,13 @@ export class ClaimsService {
     return this.prisma.$transaction(async (tx) => {
       const have = await tx.insurerPackage.findFirst({ where: { id: packageId, insurerId, tenantId: ctx.tenantId } });
       if (!have) throw new DomainError("NOT_FOUND", "Resource not found", 404);
-      const p = await tx.insurerPackage.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: packageId } }, data: { ...(input.name ? { name: input.name } : {}), ...(input.price ? { price: input.price.toFixed(2) } : {}), ...(input.status ? { status: input.status } : {}) } });
+      const next = { includesImplants: input.includesImplants ?? have.includesImplants, includesConsumables: input.includesConsumables ?? have.includesConsumables, exclusionNote: input.exclusionNote === undefined ? have.exclusionNote : input.exclusionNote };
+      const open = packageOpenness(next);
+      if (open) throw new DomainError("VALIDATION_FAILED", open, 400, [{ path: "exclusionNote", message: "Say what is left out" }]);
+      const p = await tx.insurerPackage.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: packageId } }, data: { ...(input.name ? { name: input.name } : {}), ...(input.price ? { price: input.price.toFixed(2) } : {}), ...(input.status ? { status: input.status } : {}),
+        ...(input.includesImplants !== undefined ? { includesImplants: input.includesImplants } : {}), ...(input.includesConsumables !== undefined ? { includesConsumables: input.includesConsumables } : {}), ...(input.inclusions ? { inclusions: input.inclusions } : {}), ...(input.exclusions ? { exclusions: input.exclusions } : {}), ...(input.exclusionNote !== undefined ? { exclusionNote: input.exclusionNote } : {}) } });
       await this.audit.record(tx, actorOf(ctx), { action: "INSURER_PACKAGE_UPDATED", entityType: "Insurer", entityId: insurerId, metadata: { packageId, from: { price: fmt(have.price), status: have.status }, to: { price: fmt(p.price), status: p.status } } });
-      return { id: p.id, code: p.code, name: p.name, price: fmt(p.price), status: p.status };
+      return this.packageView(p);
     });
   }
 
@@ -623,6 +710,16 @@ export class ClaimsService {
       const to = this.step(c, "SUBMIT");
       const waiting = await tx.claimEnhancement.count({ where: { tenantId: ctx.tenantId, claimId: c.id, status: "PENDING" } });
       if (waiting > 0) throw new DomainError("INVALID_STATE", "An enhancement request is still waiting for the insurer; record its decision before submitting", 409);
+      // The insurer's required documents must be attached (or waived by a manager) before the claim is sent (docs/claim-checklist.md).
+      await assertDocumentsComplete(tx, ctx, c);
+      if (c.tier === "TOPUP") {
+        const main = await tx.claim.findFirstOrThrow({ where: { id: c.primaryClaimId!, tenantId: ctx.tenantId } });
+        const top = await tx.patientPolicy.findFirstOrThrow({ where: { id: c.policyId, tenantId: ctx.tenantId } });
+        const r = await this.topupAmount(tx, ctx, main, top);
+        if (r.claim.lte(0)) throw new DomainError("INVALID_STATE", "The main insurer leaves nothing for the top-up to cover", 409);
+        const data = { calculatedAmount: r.claim.toFixed(2), patientShare: r.base.minus(r.mainPays).minus(r.claim).toFixed(2), copayPercentApplied: (top.copayPercent ?? new Decimal(0)).toString(), deductibleApplied: "0.00", amountOverrideReason: null } as Prisma.ClaimUncheckedUpdateInput;
+        return this.attach(tx, ctx, c, to, main.invoiceId!, r.claim, input.note, "CLAIM_SUBMITTED", data, { tier: "TOPUP", mainPays: fmt(r.mainPays) });
+      }
       const inv = await this.invoiceFor(tx, ctx, c.patientId, input.invoiceId, new Decimal(0));
       const extras = await this.extraInvoicesFor(tx, ctx, c, inv.id, input.extraInvoiceIds ?? []);
       const base = [inv, ...extras].reduce((t, i) => t.plus(i.total.toString()).minus(i.creditedTotal.toString()), new Decimal(0));
@@ -742,7 +839,9 @@ export class ClaimsService {
         if (!input.approvedAmount) throw new DomainError("VALIDATION_FAILED", "Enter the amount the insurer approved", 400, [{ path: "approvedAmount", message: "Required" }]);
         const to = this.step(c, "DECIDE", "APPROVED");
         if (input.approvedAmount.gt(c.claimedAmount!.toString())) throw new DomainError("VALIDATION_FAILED", "The insurer cannot approve more than was claimed", 400, [{ path: "approvedAmount", message: "More than claimed" }]);
-        return this.move(tx, ctx, c, to, { approvedAmount: input.approvedAmount.toFixed(2) }, { amount: input.approvedAmount, note: input.reason }, "CLAIM_APPROVED");
+        const out = await this.move(tx, ctx, c, to, { approvedAmount: input.approvedAmount.toFixed(2) }, { amount: input.approvedAmount, note: input.reason }, "CLAIM_APPROVED");
+        await this.syncTopup(tx, ctx, c.id);
+        return out;
       }
       if (!input.reason) throw new DomainError("VALIDATION_FAILED", "Enter the reason the insurer gave", 400, [{ path: "reason", message: "Required" }]);
       const to = this.step(c, "DECIDE", "REJECTED");
@@ -758,9 +857,25 @@ export class ClaimsService {
     if (!key) throw new DomainError("VALIDATION_FAILED", "An Idempotency-Key header is required for settlements", 400);
     return this.idempotency.run(ctx.tenantId, `CLAIM_SETTLE:${id}`, key, input, async (tx) => {
       const c = await this.lock(tx, ctx, id);
+      return this.postSettlement(tx, ctx, c, input, null);
+    });
+  }
+
+  /**
+   * Posts one receipt against one approved claim inside the caller's transaction (also used by an insurer payment that pays several claims). A top-up claim is only
+   * paid once the main insurer's claim is finished.
+   */
+  async postSettlement(tx: Db, ctx: RequestContext, c: Prisma.ClaimGetPayload<object>, input: { amount: Decimal; tdsAmount?: Decimal | undefined; reference: string; receivedOn: string }, paymentId: string | null) {
+    {
       this.step(c, "SETTLE", "APPROVED");
+      if (c.tier === "TOPUP") {
+        const main = await tx.claim.findFirst({ where: { id: c.primaryClaimId!, tenantId: ctx.tenantId }, select: { status: true, claimNumber: true } });
+        if (!main || !["SETTLED", "CLOSED", "REJECTED"].includes(main.status)) throw new DomainError("PRIMARY_NOT_SETTLED", `The main insurer's claim ${main?.claimNumber ?? ""} must be settled first`, 409);
+      }
       const approved = new Decimal(c.approvedAmount!.toString());
-      const left = approved.minus(c.settledAmount.toString());
+      // Money a manager has approved writing off is not coming, so it is not part of what is still to be received.
+      const written = new Decimal((await tx.claimWriteOff.aggregate({ where: { tenantId: ctx.tenantId, claimId: c.id, status: "APPROVED" }, _sum: { amount: true } }))._sum.amount?.toString() ?? 0);
+      const left = approved.minus(c.settledAmount.toString()).minus(written);
       const tds = input.tdsAmount ?? new Decimal(0);
       const both = input.amount.plus(tds);
       if (both.gt(left)) throw new DomainError("PAYMENT_EXCEEDS_BALANCE", `The insurer approved ${fmt(approved)}; only ${fmt(left)} is still to be received`, 409, { outstanding: fmt(left) });
@@ -783,24 +898,38 @@ export class ClaimsService {
       }
       if (cash.gt(0) || tax.gt(0) || !first) throw new DomainError("PAYMENT_EXCEEDS_BALANCE", "The invoices on this claim owe less than this payment", 409);
       const r = first;
-      await tx.claimSettlement.create({ data: { tenantId: ctx.tenantId, claimId: c.id, amount: input.amount.toFixed(2), tdsAmount: tds.toFixed(2), reference: input.reference, receivedOn: new Date(input.receivedOn), receiptId: r.receiptId, createdById: ctx.userId } });
+      await tx.claimSettlement.create({ data: { tenantId: ctx.tenantId, claimId: c.id, amount: input.amount.toFixed(2), tdsAmount: tds.toFixed(2), reference: input.reference, receivedOn: new Date(input.receivedOn), receiptId: r.receiptId, paymentId, createdById: ctx.userId } });
       const total = new Decimal(c.settledAmount.toString()).plus(both);
-      const done = total.eq(approved);
-      const to: ClaimStatus = done ? "SETTLED" : "APPROVED";
-      await tx.claim.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: c.id } }, data: { settledAmount: total.toFixed(2), status: to } });
+      const done = total.plus(written).eq(approved);
+      // A claim with part written off never receives its whole approved amount: once all the rest is in, it closes (SETTLED means every approved rupee arrived).
+      const to: ClaimStatus = done ? (written.gt(0) ? "CLOSED" : "SETTLED") : "APPROVED";
+      await tx.claim.update({ where: { tenantId_id: { tenantId: ctx.tenantId, id: c.id } }, data: { settledAmount: total.toFixed(2), status: to, ...(to === "CLOSED" ? { closeReason: `Received ${fmt(total)}; ${fmt(written)} was written off with a manager's approval` } : {}) } });
       await tx.claimEvent.create({ data: { tenantId: ctx.tenantId, claimId: c.id, fromStatus: "APPROVED", toStatus: to, amount: input.amount.toFixed(2), note: `Received ${input.reference}${tds.gt(0) ? `; tax deducted at source ${fmt(tds)}` : ""}`, actorId: ctx.userId } });
       await this.audit.record(tx, actorOf(ctx), { action: "CLAIM_SETTLEMENT_RECEIVED", entityType: "Claim", entityId: c.id, metadata: { claimNumber: c.claimNumber, amount: fmt(input.amount), ...(tds.gt(0) ? { tds: fmt(tds) } : {}), settled: fmt(total), receiptNumber: r.receiptNumber, status: to } });
-      return { id: c.id, status: to, settledAmount: fmt(total), outstanding: fmt(approved.minus(total)), receiptNumber: r.receiptNumber };
-    });
+      return { id: c.id, status: to, settledAmount: fmt(total), outstanding: fmt(approved.minus(total).minus(written)), receiptNumber: r.receiptNumber };
+    }
   }
 
   /** Closing ends the claim: withdrawn, or written off short of what was approved. The reason is kept. */
   async close(ctx: RequestContext, id: string, input: z.infer<typeof closeSchema>) {
     return this.prisma.$transaction(async (tx) => {
       const c = await this.lock(tx, ctx, id);
+      // An approved claim with money still owed is not simply closed: writing it off needs a manager's approval (docs/insurance-money.md).
+      if (c.status === "APPROVED") {
+        const written = await tx.claimWriteOff.aggregate({ where: { tenantId: ctx.tenantId, claimId: c.id, status: "APPROVED" }, _sum: { amount: true } });
+        const owed = new Decimal(c.approvedAmount!.toString()).minus(c.settledAmount.toString()).minus(written._sum.amount?.toString() ?? 0);
+        if (owed.gt(0)) throw new DomainError("WRITEOFF_REQUIRED", `The insurer still owes ${fmt(owed)}. Write it off with a manager's approval, or record the money received`, 409, { owed: fmt(owed) });
+      }
       const to = this.step(c, "CLOSE");
       return this.move(tx, ctx, c, to, { closeReason: input.reason }, { note: input.reason }, "CLAIM_CLOSED");
     });
+  }
+
+  /** Closes a claim inside the caller's transaction once a manager has approved writing off what was still owed. */
+  async closeWrittenOff(tx: Db, ctx: RequestContext, claimId: string, reasonText: string) {
+    const c = await this.lock(tx, ctx, claimId);
+    const to = this.step(c, "CLOSE");
+    return this.move(tx, ctx, c, to, { closeReason: reasonText }, { note: reasonText }, "CLAIM_CLOSED");
   }
 
   /** Receivable from insurers: approved and not yet received, and what is waiting on a decision, by insurer. */

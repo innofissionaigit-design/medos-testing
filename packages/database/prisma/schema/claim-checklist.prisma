@@ -1,0 +1,31 @@
+/// Documents an insurer asks for before a claim may be sent (docs/claim-checklist.md). `claimType` empty means the document is needed for cashless and reimbursement claims.
+/// A requirement is switched off (`active = false`), never deleted.
+model InsurerRequiredDocument {
+  id          String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String     @db.Uuid
+  insurerId   String     @db.Uuid
+  label       String
+  claimType   ClaimType?
+  active      Boolean    @default(true)
+  createdById String     @db.Uuid
+  createdAt   DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime   @updatedAt @db.Timestamptz(3)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, insurerId, active])
+}
+
+/// A manager's decision that one required document is not needed for one claim, with the reason. Part of the record: never changed or removed.
+model ClaimDocumentWaiver {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String   @db.Uuid
+  facilityId String   @db.Uuid
+  claimId    String   @db.Uuid
+  label      String
+  reason     String
+  waivedById String   @db.Uuid
+  waivedAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId])
+}

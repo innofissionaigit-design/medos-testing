@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Select, Spinner, Table, Td, useDebounced } from "./ui";
+import { PrintLink } from "@/components/print-link";
 
 interface Med { id: string; brandName: string; genericName: string; strength: string | null }
 interface Loc { id: string; name: string; status: string }
@@ -217,7 +218,7 @@ export function PayablesTab() {
                 <Td><b>{r.supplierInvoiceNo}</b><div className="text-xs text-slate-500">{r.purchaseNumber} · {r.supplierInvoiceDate}</div></Td><Td>{r.supplier}</Td>
                 <Td><Badge tone={r.purchaseOrder ? "green" : "gray"}>{r.matched}</Badge></Td>
                 <Td>{money(r.invoiceTotal)}</Td><Td>{money(String(Number(r.returned) + Number(r.credited)))}{Number(r.creditAsked) > 0 && <div className="text-xs text-amber-700">{money(r.creditAsked)} asked</div>}</Td><Td>{money(r.paid)}</Td><Td className="font-medium">{money(r.balance)}</Td>
-                <Td>{can("SUPPLIER_PAY") && Number(r.balance) > 0 && <Button onClick={() => setPaying(r)}>Pay</Button>}<a className="ml-2 text-xs text-brand-700" href={printUrl(`goods-receipts/${r.purchaseId}`)} target="_blank" rel="noreferrer">Goods receipt</a></Td>
+                <Td>{can("SUPPLIER_PAY") && Number(r.balance) > 0 && <Button onClick={() => setPaying(r)}>Pay</Button>}<PrintLink className="ml-2 text-xs text-brand-700" href={printUrl(`goods-receipts/${r.purchaseId}`)}>Goods receipt</PrintLink></Td>
               </tr>
             ))}
           </Table>
@@ -229,7 +230,7 @@ export function PayablesTab() {
           {notes.data?.map((n) => (
             <tr key={n.id}><Td><b>{n.noteNumber}</b><div className="text-xs text-slate-500">{n.reason}</div></Td><Td>{n.supplier}</Td><Td>{n.purchaseNumber}</Td><Td>{money(n.amount)}</Td>
               <Td><Badge tone={TONE[n.status] ?? "gray"}>{label(n.status)}</Badge>{n.creditReference && <div className="text-xs text-slate-500">ref {n.creditReference}</div>}</Td>
-              <Td>{n.status === "RAISED" && (can("SUPPLIER_PAY") || can("PHARMACY_PURCHASE")) && <Button variant="secondary" onClick={() => { const r = window.prompt("The supplier's credit note or reference number"); if (r && r.trim().length >= 3) credit.mutate({ id: n.id, reference: r.trim() }); }}>Supplier agreed the credit</Button>}<a className="ml-2 text-xs text-brand-700" href={printUrl(`debit-notes/${n.id}`)} target="_blank" rel="noreferrer">Print</a></Td></tr>
+              <Td>{n.status === "RAISED" && (can("SUPPLIER_PAY") || can("PHARMACY_PURCHASE")) && <Button variant="secondary" onClick={() => { const r = window.prompt("The supplier's credit note or reference number"); if (r && r.trim().length >= 3) credit.mutate({ id: n.id, reference: r.trim() }); }}>Supplier agreed the credit</Button>}<PrintLink className="ml-2 text-xs text-brand-700" href={printUrl(`debit-notes/${n.id}`)}>Print</PrintLink></Td></tr>
           ))}
         </Table>
       </Card>

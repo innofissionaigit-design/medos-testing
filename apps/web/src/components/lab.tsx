@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, Spinner, Table, Td, Textarea, useDebounced } from "./ui";
+import { PrintLink } from "@/components/print-link";
 
 interface WorkItem { testOrderId: string; test: string; state: string; accessionNumber: string | null; patient: string; mrn: string | null; visitNumber: string | null; critical: boolean }
 interface Param { id: string; name: string; unit: string | null; type: string; rangeText: string; choices?: string[]; decimals?: number }
@@ -77,8 +78,8 @@ function ResultModal({ testOrderId, onClose }: { testOrderId: string; onClose: (
             {!reported && data.sample?.status === "COLLECTED" && can("LAB_RESULT") && <Button variant="secondary" loading={save.isPending} onClick={() => save.mutate()}>Save draft</Button>}
             {!reported && data.sample?.status === "COLLECTED" && can("LAB_VERIFY") && <Button loading={verify.isPending} onClick={() => verify.mutate()}>Verify and release</Button>}
             {reported && can("LAB_VERIFY") && !amending && <Button variant="secondary" onClick={() => { setAmending(true); setVals(Object.fromEntries(latest!.values.map((v) => [v.parameterId, v.value]))); }}>Amend</Button>}
-            {reported && <a className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`lab-reports/${testOrderId}`)} target="_blank" rel="noreferrer">Print report</a>}
-            {data.sample && <a className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`lab-labels/${data.sample.id}`)} target="_blank" rel="noreferrer">Print sample label</a>}
+            {reported && <PrintLink className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`lab-reports/${testOrderId}`)}>Print report</PrintLink>}
+            {data.sample && <PrintLink className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`lab-labels/${data.sample.id}`)}>Print sample label</PrintLink>}
           </div>
           {amending && (
             <div className="space-y-2">
@@ -198,7 +199,7 @@ export function VisitLabResults({ encounterId }: { encounterId: string }) {
           <div key={o.testOrderId}>
             <div className="flex flex-wrap items-center gap-2 text-sm"><span className="font-medium">{o.test}</span><Badge tone={o.state === "REPORTED" ? "green" : "gray"}>{STATE_LABEL[o.state] ?? o.state}</Badge>{o.amended && <Badge tone="amber">amended</Badge>}
               {o.critical && o.resultId && <Button variant="secondary" loading={ack.isPending} onClick={() => ack.mutate(o.resultId!)}>Critical: acknowledge</Button>}
-              {o.state === "REPORTED" && <a className="text-brand-700" href={printUrl(`lab-reports/${o.testOrderId}`)} target="_blank" rel="noreferrer">Print report</a>}</div>
+              {o.state === "REPORTED" && <PrintLink className="text-brand-700" href={printUrl(`lab-reports/${o.testOrderId}`)}>Print report</PrintLink>}</div>
             {o.report && <Table head={["Test", "Result", "Reference", "Flag"]}>{o.report.values.map((v) => <tr key={v.parameterId}><Td>{v.name}</Td><Td className="font-medium">{v.value} {v.unit ?? ""}</Td><Td>{v.rangeText}</Td><Td><Badge tone={FLAG_TONE[v.flag] ?? "gray"}>{v.flag.replace("_", " ").toLowerCase()}</Badge></Td></tr>)}</Table>}
           </div>
         ))}

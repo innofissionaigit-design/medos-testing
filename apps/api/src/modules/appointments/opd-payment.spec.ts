@@ -25,7 +25,7 @@ describe("OPD consultation paid before the visit starts", () => {
 
   before(async () => {
     t = await startApp();
-    a = await t.makeTenant("opdp-a");
+    a = await t.makeTenant("opdp-a", { defaultSettings: true });
     b = await t.makeTenant("opdp-b");
     rec = await t.makeUser(a, ["RECEPTIONIST"]);
     doc1 = await makeDoctor(t, a);
@@ -36,11 +36,16 @@ describe("OPD consultation paid before the visit starts", () => {
   });
   after(async () => { await t.close(); });
 
-  it("is off until the hospital switches it on: visits start as before", async () => {
+  it("is on by default: a new hospital cannot start a visit before the consultation bill is paid; the administrator can switch it off", async () => {
     const p = await registerPatient(t, rec.token);
+    assert.equal((await state(p.id)).body.data.required, true, "no setting was touched");
+    const held = await walk(p.id, doc1);
+    assert.equal(held.status, 409);
+    assert.equal(held.body.error.code, "CONSULTATION_PAYMENT_REQUIRED");
+    assert.equal((await t.api("put", "/settings/OPD_FEE_BEFORE_VISIT", rec.token).send({ value: false })).status, 403, "set by an administrator");
+    assert.equal((await t.api("put", "/settings/OPD_FEE_BEFORE_VISIT", a.admin.token).send({ value: false })).status, 200);
     assert.deepEqual((await state(p.id)).body.data, { required: false, status: "NOT_REQUIRED" });
-    assert.equal((await walk(p.id, doc1)).status, 201);
-    assert.equal((await t.api("put", "/settings/OPD_FEE_BEFORE_VISIT", rec.token).send({ value: true })).status, 403, "set by an administrator");
+    assert.equal((await walk(p.id, doc1)).status, 201, "switched off: visits start as before");
     assert.equal((await t.api("put", "/settings/OPD_FEE_BEFORE_VISIT", a.admin.token).send({ value: true })).status, 200);
   });
 

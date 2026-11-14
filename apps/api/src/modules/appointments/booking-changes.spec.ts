@@ -148,7 +148,7 @@ describe("booking changes: postpone and prepone, duplicate bookings, cancellatio
   describe("cancelling a paid booking, and the patient ledger", () => {
     const takeFee = (id: string) => t.api("post", `/appointments/${id}/booking-fee`, cashier.token).set("Idempotency-Key", key()).send({ tenders: [{ method: "CASH", amount: "300" }] });
     const giveBack = (depositId: string, amount: string) => t.api("post", `/advances/${depositId}/refunds`, cashier.token).set("Idempotency-Key", key()).send({ method: "CASH", amount, reason: "Booking cancelled, fee returned" });
-    const ledger = async (patientId: string, tok = rec.token) => (await t.api("get", `/patients/${patientId}/ledger`, tok)).body.data as { entries: { kind: string; debit: string; credit: string; balance: string; description: string }[]; totals: { debit: string; credit: string; balance: string }; position: string };
+    const ledger = async (patientId: string, tok = cashier.token) => (await t.api("get", `/patients/${patientId}/ledger`, tok)).body.data as { entries: { kind: string; debit: string; credit: string; balance: string; description: string }[]; totals: { debit: string; credit: string; balance: string }; position: string };
     const paidBooking = async (hoursAhead?: number) => {
       const p = await registerPatient(t, rec.token);
       const r = await book(p.id, doc.practitionerId, at(nextDay()));
@@ -227,6 +227,8 @@ describe("booking changes: postpone and prepone, duplicate bookings, cancellatio
       const p = await registerPatient(t, rec.token);
       const nurse = await t.makeUser(a, ["NURSE"]);
       assert.equal((await t.api("get", `/patients/${p.id}/ledger`, nurse.token)).status, 403);
+      assert.equal((await t.api("get", `/patients/${p.id}/ledger`, rec.token)).status, 403, "the receptionist does not see the account statement");
+      assert.equal((await t.api("get", `/patients/${p.id}/ledger`, cashier.token)).status, 200, "the cashier does");
       assert.equal((await t.api("get", `/patients/${p.id}/ledger`, b.admin.token)).status, 404);
       assert.equal((await t.api("get", `/patients/${p.id}/ledger`)).status, 401);
     });

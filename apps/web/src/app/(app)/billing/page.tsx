@@ -7,6 +7,7 @@ import { Gate } from "@/components/gate";
 import { PatientPicker, todayIn, type PickedPatient } from "@/components/pickers";
 import { CashierPrescriptions } from "@/components/cashier-prescriptions";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
+import { needsDesk, useDesk } from "@/lib/desk";
 import { api } from "@/lib/api";
 import { useT, T } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
@@ -20,19 +21,22 @@ type Line = { serviceId?: string; description: string; unitPrice: string; taxPer
 /** `fromPatient`: opened from a patient's page, so the bill page offers the way back (and the OPD visit) afterwards. */
 function NewBill({ initialPatient, fromPatient, onClose }: { initialPatient: PickedPatient | null; fromPatient: boolean; onClose: () => void }) {
   const router = useRouter();
-  const { money, can, me } = useMe();
+  const { money, can, me, features } = useMe();
+  const { desk: chosenDesk } = useDesk();
+  // OPD and IPD bills are kept apart: the price list offered is the one for the kind of bill (the IPD desk makes IPD bills, everyone else OPD bills).
+  const kind: "OPD" | "IPD" = needsDesk(me.roles, features) && chosenDesk === "IPD" ? "IPD" : "OPD";
   const [patient, setPatient] = useState<PickedPatient | null>(initialPatient);
   const [lines, setLines] = useState<Line[]>([]);
   const [q, setQ] = useState("");
-  const services = useQuery({ queryKey: ["services"], queryFn: () => api.page<Service>("/services", { pageSize: 100 }) });
+  const services = useQuery({ queryKey: ["services", kind], queryFn: () => api.page<Service>("/services", { pageSize: 100, scope: kind }) });
   // A bill for a patient who is being seen today is added to that visit: the booking and earnings reports and the doctor's share only count money on a visit's bills.
   const tz = me.facility?.timezone ?? me.tenant.timezone;
   const visits = useQuery({ queryKey: ["bill-visits", patient?.id], queryFn: () => api.page<BillableVisit>(`/patients/${patient!.id}/encounters`, { type: "OPD", pageSize: 10 }), enabled: !!patient });
   const visit = visitForBill(visits.data?.data ?? [], todayIn(tz), tz);
   const create = useMutation({
     mutationFn: () => api.post<{ id: string }>("/invoices", {
-      patientId: patient!.id,
-      ...(visit ? { encounterId: visit.id } : {}),
+      patientId: patient!.id, kind,
+      ...(visit && kind === "OPD" ? { encounterId: visit.id } : {}),
       lines: lines.map((l) => (l.serviceId ? { serviceId: l.serviceId, quantity: l.quantity } : { description: l.description, unitPrice: l.unitPrice, taxPercent: l.taxPercent || "0", quantity: l.quantity })),
     }),
     // From a patient's page (Reception): the bill is issued straight away, so the payment can be taken on the next screen.

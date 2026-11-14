@@ -117,6 +117,24 @@ describe("patient registration, search and duplicate detection", () => {
     assert.equal((await t.api("get", "/patients", rec.token).query({ q: "%" + "_".repeat(2) })).status, 200, "LIKE wildcards are treated literally");
   });
 
+  it("a name search is 'starts with': the text must begin the name, not merely appear in it", async () => {
+    const stem = uniqueWord(8);
+    const begins = await registerPatient(t, rec.token, { firstName: `${stem}ana`, lastName: "Roy" });
+    const inSurname = await registerPatient(t, rec.token, { firstName: "Rina", lastName: `${stem}ghosh` });
+    const inMiddle = await registerPatient(t, rec.token, { firstName: `Xo${stem}`, lastName: "Das" });
+    const search = async (q: string, tok = rec.token) => ((await t.api("get", "/patients", tok).query({ q })).body.data as { id: string }[]).map((x) => x.id);
+
+    const found = await search(stem.slice(0, 5));
+    assert.ok(found.includes(begins.id), "a name that begins with the text is found");
+    assert.ok(!found.includes(inSurname.id), "text at the start of the surname only is not a match");
+    assert.ok(!found.includes(inMiddle.id), "text in the middle of a name is not a match");
+    assert.deepEqual(await search(stem.slice(2, 7)), [], "text from the middle of a name finds nothing");
+    assert.ok((await search(stem.slice(0, 5).toUpperCase())).includes(begins.id), "capitals do not matter");
+    assert.ok((await search(`${stem}ana roy`)).includes(begins.id), "the full name, first name first, also works");
+    assert.deepEqual(await search("roy"), (await search("roy")).filter((id) => id !== begins.id), "the surname alone is not a name start");
+    assert.deepEqual(await search(stem.slice(0, 5), b.admin.token), [], "another hospital finds none of them");
+  });
+
   it("an exact MRN search never also returns patients whose mobile merely contains the MRN's digits", async () => {
     const c = await t.makeTenant("pat-c");
     // A letters-only facility code leaves the MRN's digits as just the zero-padded sequence, e.g. "000001".

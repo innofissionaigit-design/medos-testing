@@ -5,39 +5,23 @@ import { useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { z } from "zod";
 import { Gate } from "@/components/gate";
 import { FeeSection, feePayload, feeProblem, initialChoice, RegistrationDone, type FeeChoice, type FeeConfig, type RegistrationResult } from "@/components/registration-fee";
 import { patientName, type PatientRow } from "@/components/shell";
 import { Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Select, Spinner, Table, Td, useDebounced } from "@/components/ui";
 import { api, ApiError, newKey } from "@/lib/api";
 import { ageText } from "@/lib/format";
+import { patientFormSchema, type PatientForm } from "@/lib/patient-form";
 import { useMe } from "@/lib/me";
 
-const schema = z.object({
-  firstName: z.string().trim().min(1, "Enter the first name"),
-  lastName: z.string().trim().optional(),
-  gender: z.enum(["MALE", "FEMALE", "OTHER", "UNKNOWN"]),
-  ageMode: z.enum(["age", "dob"]),
-  age: z.string().optional(),
-  dob: z.string().optional(),
-  mobile: z.string().trim().optional(),
-  email: z.string().trim().optional().refine((v) => !v || /^[^@\s]+@[^@\s]+[.][^@\s]+$/.test(v), "Enter a valid email address"),
-  addressLine: z.string().trim().optional(),
-  city: z.string().trim().optional(),
-  postalCode: z.string().trim().optional(),
-}).superRefine((v, c) => {
-  if (v.ageMode === "age" && !(Number(v.age) >= 0 && Number(v.age) <= 130 && v.age !== "")) c.addIssue({ code: "custom", path: ["age"], message: "Enter the age in years" });
-  if (v.ageMode === "dob" && !v.dob) c.addIssue({ code: "custom", path: ["dob"], message: "Enter the date of birth" });
-});
-type Form = z.infer<typeof schema>;
+type Form = PatientForm;
 
 interface Candidate { patient: PatientRow; severity: string; reasons: string[]; similarity: number }
 
 function RegisterPatient({ onClose }: { onClose: () => void }) {
   const router = useRouter();
   const { can } = useMe();
-  const { register, handleSubmit, watch, formState: { errors, isSubmitting }, getValues } = useForm<Form>({ resolver: zodResolver(schema), defaultValues: { gender: "FEMALE", ageMode: "age" } });
+  const { register, handleSubmit, watch, formState: { errors, isSubmitting }, getValues } = useForm<Form>({ resolver: zodResolver(patientFormSchema), mode: "onTouched", defaultValues: { gender: "FEMALE", ageMode: "age", firstName: "", lastName: "", mobile: "", age: "", dob: "", email: "", addressLine: "", city: "", postalCode: "" } });
   const [error, setError] = useState<unknown>(null);
   const [dups, setDups] = useState<Candidate[] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -110,22 +94,22 @@ function RegisterPatient({ onClose }: { onClose: () => void }) {
   return (
     <Modal title="Register new patient" onClose={onClose} wide>
       <form onSubmit={handleSubmit((v) => save(v))} className="grid grid-cols-1 gap-3 sm:grid-cols-2" noValidate>
-        <Field label="First name" error={errors.firstName?.message}><Input autoFocus {...register("firstName")} /></Field>
-        <Field label="Last name" error={errors.lastName?.message}><Input {...register("lastName")} /></Field>
-        <Field label="Gender"><Select {...register("gender")}><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="OTHER">Other</option><option value="UNKNOWN">Unknown</option></Select></Field>
-        <Field label="Mobile" hint="10-digit Indian number" error={errors.mobile?.message}><Input inputMode="tel" {...register("mobile")} /></Field>
+        <Field label="First name" hint="Required" error={errors.firstName?.message}><Input autoFocus autoComplete="off" maxLength={60} {...register("firstName")} /></Field>
+        <Field label="Last name" error={errors.lastName?.message}><Input autoComplete="off" maxLength={60} {...register("lastName")} /></Field>
+        <Field label="Gender" error={errors.gender?.message}><Select {...register("gender")}><option value="FEMALE">Female</option><option value="MALE">Male</option><option value="OTHER">Other</option><option value="UNKNOWN">Unknown</option></Select></Field>
+        <Field label="Mobile" hint="Required: 10-digit Indian number" error={errors.mobile?.message}><Input inputMode="tel" autoComplete="off" maxLength={16} {...register("mobile")} /></Field>
         <Field label="Email (optional)" hint="Used only if the patient agrees to be emailed" error={errors.email?.message}><Input type="email" autoComplete="off" {...register("email")} /></Field>
         <div>
           <div className="mb-1 flex gap-3 text-sm font-medium text-slate-700">
             <label className="flex items-center gap-1"><input type="radio" value="age" {...register("ageMode")} /> Age</label>
             <label className="flex items-center gap-1"><input type="radio" value="dob" {...register("ageMode")} /> Date of birth</label>
           </div>
-          {mode === "age" ? <Input inputMode="numeric" placeholder="Years" aria-label="Age in years" {...register("age")} /> : <Input type="date" aria-label="Date of birth" {...register("dob")} />}
+          {mode === "age" ? <Input inputMode="numeric" placeholder="Years" aria-label="Age in years" maxLength={3} {...register("age")} /> : <Input type="date" aria-label="Date of birth" max={new Date().toLocaleDateString("en-CA")} {...register("dob")} />}
           {(errors.age || errors.dob) && <span className="mt-1 block text-xs text-red-600" role="alert">{errors.age?.message ?? errors.dob?.message}</span>}
         </div>
-        <Field label="Address"><Input {...register("addressLine")} /></Field>
-        <Field label="City"><Input {...register("city")} /></Field>
-        <Field label="PIN code"><Input inputMode="numeric" {...register("postalCode")} /></Field>
+        <Field label="Address" error={errors.addressLine?.message}><Input maxLength={200} {...register("addressLine")} /></Field>
+        <Field label="City" error={errors.city?.message}><Input maxLength={80} {...register("city")} /></Field>
+        <Field label="PIN code" error={errors.postalCode?.message}><Input inputMode="numeric" maxLength={6} {...register("postalCode")} /></Field>
         {feeOn && fee.data && feeChoice && <div className="sm:col-span-2"><FeeSection config={fee.data} value={feeChoice} onChange={setChoice} /></div>}
         <div className="sm:col-span-2">
           <ErrorNote error={error instanceof ApiError && error.code === "SHIFT_NOT_OPEN" ? null : error} />

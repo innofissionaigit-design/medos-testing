@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, Spinner, Table, Td, useDebounced } from "./ui";
+import { PrintLink } from "@/components/print-link";
 
 interface Med { id: string; brandName: string; genericName: string; strength: string | null }
 interface Supplier { id: string; name: string; phone: string | null; email: string | null; gstin: string | null; address: string | null; status: string }
@@ -180,7 +181,7 @@ export function PurchasesTab() {
           {list.data?.data.map((p) => (
             <tr key={p.id}>
               <Td>{p.purchaseNumber}<div className="text-xs text-slate-500">{p.items.length} line(s){p.returns.length ? ` · ${p.returns.length} return(s)` : ""}</div></Td><Td>{p.supplierName}</Td><Td>{p.supplierInvoiceNo}<div className="text-xs text-slate-500">{p.supplierInvoiceDate}</div></Td>
-              <Td>{money(p.total)}</Td><Td>{dateTime(p.receivedAt)}</Td><Td><div className="flex items-center gap-2"><a className="text-xs text-brand-700" href={printUrl(`goods-receipts/${p.id}`)} target="_blank" rel="noreferrer">Print</a>{can("PHARMACY_PURCHASE") && <Button variant="ghost" onClick={() => setReturning(p)}>Return…</Button>}</div></Td>
+              <Td>{money(p.total)}</Td><Td>{dateTime(p.receivedAt)}</Td><Td><div className="flex items-center gap-2"><PrintLink className="text-xs text-brand-700" href={printUrl(`goods-receipts/${p.id}`)}>Print</PrintLink>{can("PHARMACY_PURCHASE") && <Button variant="ghost" onClick={() => setReturning(p)}>Return…</Button>}</div></Td>
             </tr>
           ))}
         </Table>

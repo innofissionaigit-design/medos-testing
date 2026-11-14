@@ -6,7 +6,7 @@ import { useMe } from "@/lib/me";
 import { Badge, Button, ErrorNote, Field, Input, Modal, Select, Spinner, Table, Td } from "./ui";
 
 interface Rate { serviceId: string; code: string; name: string; standardPrice: string; price: string; status: string }
-interface Pack { id: string; code: string; name: string; price: string; status: string }
+interface Pack { id: string; code: string; name: string; price: string; status: string; includesImplants?: boolean; includesConsumables?: boolean; exclusionNote?: string | null; inclusions?: string[]; exclusions?: string[] }
 interface ServiceRow { id: string; name: string; price: string }
 
 /** An insurer's price list (docs/claims.md): the rate it pays per service, and its fixed-price packages. */
@@ -18,9 +18,11 @@ export function InsurerPrices({ insurer, onClose }: { insurer: { id: string; nam
   const packs = useQuery({ queryKey: ["insurer-packages", insurer.id], queryFn: () => api.get<Pack[]>(`/claims/insurers/${insurer.id}/packages`) });
   const services = useQuery({ queryKey: ["services"], queryFn: () => api.page<ServiceRow>("/services", { pageSize: 100 }), enabled: manage });
   const [rate, setRate] = useState({ serviceId: "", price: "" });
-  const [pack, setPack] = useState({ code: "", name: "", price: "" });
+  const [pack, setPack] = useState({ code: "", name: "", price: "", includesImplants: true, includesConsumables: true, exclusionNote: "", inclusions: "", exclusions: "" });
+  const words = (v: string) => v.split(",").map((x) => x.trim()).filter((x) => x.length > 1);
+  const leavesOut = !pack.includesImplants || !pack.includesConsumables;
   const saveRate = useMutation({ mutationFn: (a: { serviceId: string; price: string; status?: string }) => api.put(`/claims/insurers/${insurer.id}/rates/${a.serviceId}`, { price: a.price, ...(a.status ? { status: a.status } : {}) }), onSuccess: () => { setRate({ serviceId: "", price: "" }); void qc.invalidateQueries({ queryKey: ["insurer-rates", insurer.id] }); } });
-  const addPack = useMutation({ mutationFn: () => api.post(`/claims/insurers/${insurer.id}/packages`, { code: pack.code.trim(), name: pack.name.trim(), price: pack.price }), onSuccess: () => { setPack({ code: "", name: "", price: "" }); void qc.invalidateQueries({ queryKey: ["insurer-packages", insurer.id] }); } });
+  const addPack = useMutation({ mutationFn: () => api.post(`/claims/insurers/${insurer.id}/packages`, { code: pack.code.trim(), name: pack.name.trim(), price: pack.price, includesImplants: pack.includesImplants, includesConsumables: pack.includesConsumables, inclusions: words(pack.inclusions), exclusions: words(pack.exclusions), ...(pack.exclusionNote.trim() ? { exclusionNote: pack.exclusionNote.trim() } : {}) }), onSuccess: () => { setPack({ code: "", name: "", price: "", includesImplants: true, includesConsumables: true, exclusionNote: "", inclusions: "", exclusions: "" }); void qc.invalidateQueries({ queryKey: ["insurer-packages", insurer.id] }); } });
   const togglePack = useMutation({ mutationFn: (p: Pack) => api.put(`/claims/insurers/${insurer.id}/packages/${p.id}`, { status: p.status === "ACTIVE" ? "INACTIVE" : "ACTIVE" }), onSuccess: () => { void qc.invalidateQueries({ queryKey: ["insurer-packages", insurer.id] }); } });
 
   return (
@@ -50,7 +52,21 @@ export function InsurerPrices({ insurer, onClose }: { insurer: { id: string; nam
               <Field label="Code"><Input className="w-28" value={pack.code} onChange={(e) => setPack({ ...pack, code: e.target.value })} /></Field>
               <Field label="Name"><Input className="w-64" value={pack.name} onChange={(e) => setPack({ ...pack, name: e.target.value })} /></Field>
               <Field label="Price"><Input className="w-32" inputMode="decimal" value={pack.price} onChange={(e) => setPack({ ...pack, price: e.target.value.replace(/[^0-9.]/g, "") })} /></Field>
-              <Button disabled={!pack.code.trim() || pack.name.trim().length < 2 || !pack.price} loading={addPack.isPending} onClick={() => addPack.mutate()}>Add package</Button>
+              <Button disabled={!pack.code.trim() || pack.name.trim().length < 2 || !pack.price || (leavesOut && pack.exclusionNote.trim().length < 10)} loading={addPack.isPending} onClick={() => addPack.mutate()}>Add package</Button>
+            </div>
+          )}
+          {manage && (
+            <div className="space-y-2 rounded-md border border-slate-200 p-2">
+              <p className="text-xs text-slate-600">Implants and consumables are inside the package price unless you say otherwise here. If the package leaves them out, say so openly: it is shown on every claim and estimate.</p>
+              <div className="flex flex-wrap items-center gap-4">
+                <label className="flex items-center gap-1"><input type="checkbox" checked={pack.includesImplants} onChange={(e) => setPack({ ...pack, includesImplants: e.target.checked })} /> Implants are included</label>
+                <label className="flex items-center gap-1"><input type="checkbox" checked={pack.includesConsumables} onChange={(e) => setPack({ ...pack, includesConsumables: e.target.checked })} /> Consumables are included</label>
+              </div>
+              {leavesOut && <Field label="What the package leaves out (required)"><Input value={pack.exclusionNote} maxLength={300} onChange={(e) => setPack({ ...pack, exclusionNote: e.target.value })} /></Field>}
+              <div className="flex flex-wrap gap-2">
+                <Field label="Also included (comma separated)"><Input className="w-64" value={pack.inclusions} onChange={(e) => setPack({ ...pack, inclusions: e.target.value })} /></Field>
+                <Field label="Also excluded (comma separated)"><Input className="w-64" value={pack.exclusions} onChange={(e) => setPack({ ...pack, exclusions: e.target.value })} /></Field>
+              </div>
             </div>
           )}
           {packs.isLoading ? <Spinner /> : (

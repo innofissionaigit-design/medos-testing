@@ -4,7 +4,7 @@ Optional rule for hospitals that collect the consultation fee at Reception: an O
 
 ## Switching it on
 
-Administration → Settings → "OPD visit payment" (`OPD_FEE_BEFORE_VISIT`, off by default). While it is off, visits start as before.
+Administration → Settings → "OPD visit payment" (`OPD_FEE_BEFORE_VISIT`, **on by default**). While it is on, a visit starts only after the consultation bill is paid; an administrator can switch it off, and then visits start as before.
 
 ## At Reception
 

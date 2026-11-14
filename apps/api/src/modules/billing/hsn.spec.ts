@@ -21,7 +21,7 @@ describe("HSN/SAC codes on invoices", () => {
   let pharm: { id: string; token: string };
 
   const mkService = async (o: Record<string, unknown> = {}) => {
-    const r = await t.api("post", "/services", a.admin.token).send({ code: code("SV"), name: `Procedure ${uniqueWord(5)}`, category: "PROCEDURE", price: "300.00", taxPercent: 0, ...o });
+    const r = await t.api("post", "/services", a.admin.token).send({ code: code("SV"), name: `Procedure ${uniqueWord(5)}`, category: "PROCEDURE", price: "300.00", taxPercent: 0, availableFor: "BOTH", ...o });
     assert.equal(r.status, 201, JSON.stringify(r.body));
     return r.body.data as { id: string; name: string; sacCode: string | null };
   };

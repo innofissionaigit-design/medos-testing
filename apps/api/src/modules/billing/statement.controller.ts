@@ -8,7 +8,7 @@ import { StatementService } from "./statement.service";
 export class StatementController {
   constructor(private readonly statements: StatementService) {}
 
-  @RequirePermissions("INVOICE_READ")
+  @RequirePermissions("LEDGER_READ")
   @Get("patients/:id/ledger")
   async ledger(@Ctx() ctx: RequestContext, @Param("id") patientId: string) {
     return { data: await this.statements.forPatient(ctx, id(patientId)) };

@@ -8,6 +8,7 @@ import { StockLocationsTab } from "@/components/stock-locations";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Spinner, Table, Tabs, Td, useDebounced } from "@/components/ui";
 import { api, ApiError, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 interface QItem { suggestedQuantity?: number | null; id: string; lineNo: number; medicineId: string | null; genericName: string; brandName: string | null; strength: string | null; dosage: string; frequency: string; durationDays: number | null; quantity: number | null; dispensedQuantity: number; remaining: number | null; status: string }
 interface QOrder { testsAdvised?: { name: string; category: string; status: string }[]; id: string; orderNumber: string | null; source?: string; handwrittenPages?: { pageNo: number; fileId: string; fileName: string; contentType: string }[]; signedAt: string; patientId: string; patientName: string; mrn: string | null; doctorName: string | null; status: string; allergyWarnings: { allergen: string; matchedItem: string; severity: string }[]; items: QItem[] }
@@ -64,7 +65,7 @@ function Dispense({ order, onClose }: { order: QOrder; onClose: () => void }) {
           {done.dispense.invoiceId && <Notice tone="info">The bill has gone to the Cashier. Ask the patient to pay at the billing counter; the pharmacy does not take payment.</Notice>}
           <div className="flex justify-end gap-2">
             {done.dispense.invoiceId && can("INVOICE_READ") && <Link href={`/billing/${done.dispense.invoiceId}`} className="self-center text-sm text-brand-700 hover:underline">Open bill</Link>}
-            {done.dispense.invoiceId && <a href={printUrl(`invoices/${done.dispense.invoiceId}`)} target="_blank" rel="noreferrer" className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">Print bill</a>}
+            {done.dispense.invoiceId && <PrintLink href={printUrl(`invoices/${done.dispense.invoiceId}`)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">Print bill</PrintLink>}
             <Button variant="secondary" onClick={onClose}>Done</Button>
           </div>
         </div>
@@ -176,7 +177,7 @@ function HandwrittenDispense({ scan, onClose }: { scan: HwScan; onClose: () => v
           {done.dispense.invoiceId && <Notice tone="info">The bill has gone to the Cashier. Ask the patient to pay at the billing counter; the pharmacy does not take payment.</Notice>}
           <div className="flex justify-end gap-2">
             {done.dispense.invoiceId && can("INVOICE_READ") && <Link href={`/billing/${done.dispense.invoiceId}`} className="self-center text-sm text-brand-700 hover:underline">Open bill</Link>}
-            {done.dispense.invoiceId && <a href={printUrl(`invoices/${done.dispense.invoiceId}`)} target="_blank" rel="noreferrer" className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">Print bill</a>}
+            {done.dispense.invoiceId && <PrintLink href={printUrl(`invoices/${done.dispense.invoiceId}`)} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50">Print bill</PrintLink>}
             <Button variant="secondary" onClick={onClose}>Done</Button>
           </div>
         </div>

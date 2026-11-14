@@ -566,13 +566,19 @@ describe("claims: insurers, policies, and a claim from pre-authorisation to sett
   });
 
   it("closing keeps the reason and ends the claim; a closed claim cannot be moved again", async () => {
-    const s = await approved("6000");
-    await settle(s.claimId, "1000");
+    // An approved claim that the insurer still owes money on is not simply closed: writing the balance off needs a manager (docs/insurance-money.md).
+    const owing = await approved("6000");
+    await settle(owing.claimId, "1000");
+    const refused = await post(`/claims/${owing.claimId}/close`, { reason: "Balance written off by the hospital" });
+    assert.equal(refused.status, 409);
+    assert.equal(refused.body.error.code, "WRITEOFF_REQUIRED");
+    // A claim that is withdrawn (nothing owed yet) closes with its reason.
+    const s = await submitted();
     assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "no" })).status, 400);
-    assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "Balance written off by the hospital" }, cashier.token)).status, 403);
-    assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "Balance written off by the hospital" })).status, 200);
+    assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "Withdrawn by the patient" }, cashier.token)).status, 403);
+    assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "Withdrawn by the patient" })).status, 200);
     const c = await view(s.claimId);
-    assert.deepEqual([c.status, c.closeReason, c.settledAmount], ["CLOSED", "Balance written off by the hospital", "1000.00"]);
+    assert.deepEqual([c.status, c.closeReason, c.settledAmount], ["CLOSED", "Withdrawn by the patient", "0.00"]);
     assert.equal((await settle(s.claimId, "100")).status, 409);
     assert.equal((await post(`/claims/${s.claimId}/close`, { reason: "Trying to close again" })).status, 409);
   });
@@ -642,7 +648,8 @@ describe("claims: insurers, policies, and a claim from pre-authorisation to sett
     const other = await registerPatient(t, rec.token);
     await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "Claim" SET "patientId" = '${other.id}'::uuid WHERE id = '${s.claimId}'::uuid`), /moved to another patient/);
     await assert.rejects(t.prisma.$executeRawUnsafe(`INSERT INTO "ClaimSettlement" ("tenantId", "claimId", amount, reference, "receivedOn", "createdById") VALUES ('${a.tenantId}'::uuid, '${s.claimId}'::uuid, 5000.01, 'UTRRAW1', now(), '${officer.id}'::uuid)`), /more than the approved/);
-    await post(`/claims/${s.claimId}/close`, { reason: "Closed for the database check" });
+    // (Closing an approved claim that is still owed money needs a manager's write-off, so this check closes it directly in the database.)
+    await t.prisma.$executeRawUnsafe(`UPDATE "Claim" SET status = 'CLOSED', "closeReason" = 'Closed for the database check' WHERE id = '${s.claimId}'::uuid`);
     await assert.rejects(t.prisma.$executeRawUnsafe(`UPDATE "Claim" SET status = 'APPROVED' WHERE id = '${s.claimId}'::uuid`), /finished claim/);
     await assert.rejects(t.prisma.$executeRawUnsafe(`INSERT INTO "ClaimSettlement" ("tenantId", "claimId", amount, reference, "receivedOn", "createdById") VALUES ('${a.tenantId}'::uuid, '${s.claimId}'::uuid, 1, 'UTRRAW2', now(), '${officer.id}'::uuid)`), /only be received on an approved claim/);
     const pol = await policy(other.id);

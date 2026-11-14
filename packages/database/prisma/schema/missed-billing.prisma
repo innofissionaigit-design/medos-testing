@@ -1,0 +1,23 @@
+/// A billing person's decision on one "done but not billed" flag (docs/missed-billing.md). The flags themselves are worked out from the records each time and never stored;
+/// only the decision is. `flagKey` names the flag (for example `TEST_NOT_BILLED:<test order id>`), so a decided flag stays decided. Part of the record: never changed or removed.
+model MissedBillingReview {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId     String   @db.Uuid
+  facilityId   String   @db.Uuid
+  flagKey      String
+  flagType     String
+  patientId    String   @db.Uuid
+  /// NOT_A_GAP: it was right not to bill. BILLED: it has been billed since (or on another bill). WAIVED: the hospital chose not to bill it.
+  decision     String
+  reason       String
+  /// What the flag put the missed amount at when it was decided; empty when the flag had no amount.
+  amount       Decimal? @db.Decimal(14, 2)
+  reviewedById String   @db.Uuid
+  reviewedAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, facilityId, flagKey])
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, reviewedAt(sort: Desc)])
+}

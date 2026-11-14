@@ -17,6 +17,7 @@ import { blankItem, RxRows, toPayload, type RxItem } from "@/components/rx-edito
 import { api, ApiError, printUrl } from "@/lib/api";
 import { ageText, type AgeValue } from "@/lib/format";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 interface Workspace {
   header: { patientId: string; mrn: string | null; name: string; gender: string; age: AgeValue; bloodGroup: string | null; encounterId: string; encounterNumber: string; visitStatus: string; startedAt: string; practitionerId: string | null; practitionerName: string | null; practitionerSpecialty: string | null; practitionerRegistrationNo: string | null; departmentName: string | null; consultedByVideo?: boolean };
@@ -128,8 +129,8 @@ export default function VisitPage() {
           {h.consultedByVideo && <Badge tone="blue">Consulted by video</Badge>}
           <StatusBadge value={signed ? "SIGNED" : h.visitStatus} />
           {signed && can("CONSULTATION_AMEND") && <Button variant="secondary" onClick={() => setAmending(true)}>Amend…</Button>}
-          {signed && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`prescriptions/${id}`)} target="_blank" rel="noreferrer">Print prescription</a>}
-          {signed && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`prescriptions/${id}`)}?format=pdf&download=1`}>PDF</a>}
+          {signed && <PrintLink className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`prescriptions/${id}`)}>Print prescription</PrintLink>}
+          {signed && <a download className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`prescriptions/${id}`)}?format=pdf&download=1`}>PDF</a>}
         </>}
       />
       {ws.data.allergies.length > 0 && (
@@ -146,7 +147,7 @@ export default function VisitPage() {
           <AiAssist encounterId={id} />
           <Card title="Previous visits">
             {ws.data.previousVisits.length === 0 ? <p className="text-sm text-slate-500">No earlier completed visits.</p> : (
-              <ul className="space-y-2 text-sm">{ws.data.previousVisits.map((v) => <li key={v.id}><div className="font-medium"><Link className="text-brand-700 hover:underline" href={`/visits/${v.id}`}>{dateTime(v.startedAt)}</Link></div><div className="text-slate-500">{v.practitionerName}{v.diagnoses?.length ? ` · ${v.diagnoses.map((d) => d.text).join(", ")}` : ""}</div><a className="text-xs text-brand-700 hover:underline" href={printUrl(`prescriptions/${v.id}`)} target="_blank" rel="noreferrer">Prescription</a></li>)}</ul>
+              <ul className="space-y-2 text-sm">{ws.data.previousVisits.map((v) => <li key={v.id}><div className="font-medium"><Link className="text-brand-700 hover:underline" href={`/visits/${v.id}`}>{dateTime(v.startedAt)}</Link></div><div className="text-slate-500">{v.practitionerName}{v.diagnoses?.length ? ` · ${v.diagnoses.map((d) => d.text).join(", ")}` : ""}</div><PrintLink className="text-xs text-brand-700 hover:underline" href={printUrl(`prescriptions/${v.id}`)}>Prescription</PrintLink></li>)}</ul>
             )}
           </Card>
         </div>
@@ -219,7 +220,7 @@ export default function VisitPage() {
               diagnoses: c?.diagnoses.map((d) => d.text) ?? [], items, note, followUpDays: note.followUp?.afterDays, followUpDate: note.followUp?.date, followUpNotes: note.followUp?.notes,
               signed, signedBy: doc?.signedByName,
             }} />
-            {signed && <div className="mt-3 flex flex-wrap gap-2"><a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`prescriptions/${id}`)} target="_blank" rel="noreferrer">Open prescription</a><a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`prescriptions/${id}`)}?format=pdf&download=1`}>Download PDF</a></div>}
+            {signed && <div className="mt-3 flex flex-wrap gap-2"><PrintLink className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`prescriptions/${id}`)}>Open prescription</PrintLink><a download className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`prescriptions/${id}`)}?format=pdf&download=1`}>Download PDF</a></div>}
           </Card>
 
           {canWrite && can("CONSULTATION_SIGN") && (

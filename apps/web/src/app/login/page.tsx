@@ -4,6 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Button, Card, ErrorNote, Field, Input, Notice } from "@/components/ui";
+import { writeDesk } from "@/lib/desk";
 import { LANGUAGES, useI18n } from "@/lib/i18n";
 
 const schema = z.object({ tenantCode: z.string().trim().min(2, "Enter your hospital code"), identifier: z.string().trim().min(1, "Enter your username"), password: z.string().min(1, "Enter your password") });
@@ -37,6 +38,7 @@ export default function LoginPage() {
     }
     if (json.data.status === "AUTHENTICATED") {
       try { localStorage.setItem("medos.tenant", values.tenantCode); } catch { /* storage unavailable */ }
+      writeDesk(null); // reception is asked, at every sign-in, which desk it is working at
       window.location.assign("/dashboard");
     } else setFacilities(json.data.facilities ?? []);
   }

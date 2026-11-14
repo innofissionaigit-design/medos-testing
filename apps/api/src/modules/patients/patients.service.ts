@@ -163,7 +163,9 @@ export class PatientsService {
     // unrelated patients whose mobile happens to contain its digits.
     if (digits.length >= 3 && !/\p{L}/u.test(text)) or.push({ mobile: { contains: digits } });
     if (digits.length >= 6 && !/\p{L}/u.test(text)) or.push({ abhaLinks: { some: { tenantId: ctx.tenantId, removedAt: null, abhaNumber: { contains: digits } } } });
-    if (/\p{L}/u.test(text) && normalized.length >= 2) or.push({ searchName: { contains: normalized } });
+    // A name is found by what it BEGINS with ("ab" finds Abhijit, not Chakraborty): the full name, first name first, must start with what was typed. searchName is
+    // kept lower-case without punctuation, so this is also case-insensitive, and the text is matched as typed (no wildcards).
+    if (/\p{L}/u.test(text) && normalized.length >= 2) or.push({ searchName: { startsWith: normalized } });
     const where: Prisma.PatientWhereInput = { tenantId: ctx.tenantId, mergedIntoId: null, OR: or, AND: [patientScope(ctx)] };
     const [rows, total] = await Promise.all([
       this.prisma.patient.findMany({ where, include: PATIENT_INCLUDE, orderBy: [{ createdAt: "desc" }], skip: (q.page - 1) * q.pageSize, take: q.pageSize }),

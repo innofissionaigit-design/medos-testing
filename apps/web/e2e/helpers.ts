@@ -1,10 +1,11 @@
-import { expect, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 
 export const TENANT = "demo-hospital";
 export const PASSWORD = "E2e-Passw0rd-2026!";
 
 /** A real sign-in through the login form. */
-export async function loginAs(page: Page, username: string): Promise<void> {
+/** Reception is asked after signing in which desk it works at (OPD or IPD); `desk` answers that question (OPD unless a test works at the IPD desk). */
+export async function loginAs(page: Page, username: string, desk: "OPD" | "IPD" = "OPD"): Promise<void> {
   await page.context().clearCookies();
   await page.goto("/login");
   await page.getByLabel("Hospital code").fill(TENANT);
@@ -12,6 +13,11 @@ export async function loginAs(page: Page, username: string): Promise<void> {
   await page.getByLabel("Password").fill(PASSWORD);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).toHaveURL(/\/dashboard/);
+  if (username.startsWith("reception")) {
+    await expect(page.getByText("Which desk are you working at?")).toBeVisible();
+    await page.getByRole("button", { name: new RegExp(`^${desk}`) }).click();
+    await expect(page.getByRole("button", { name: new RegExp(`${desk} desk`) })).toBeVisible();
+  }
 }
 
 const LETTERS = "bcdfghjklmnprstvwz";
@@ -37,4 +43,21 @@ export async function registerPatient(page: Page): Promise<{ first: string; last
   const mrn = (await page.getByText(/MRN DEMO-\d+/).first().textContent())?.match(/DEMO-\d+/)?.[0] ?? "";
   expect(mrn).toMatch(/^DEMO-\d+$/);
   return { first, last, mrn };
+}
+
+/** Picks a doctor the way the screens now ask for it: first the department, then a doctor of that department. With no name, the first doctor found is used. */
+export async function chooseDoctor(dialog: Locator, doctor?: string): Promise<string> {
+  const dept = dialog.getByLabel("Department");
+  const doctors = dialog.getByLabel("Doctor");
+  const ids = await dept.locator("option").evaluateAll((o) => o.map((x) => (x as HTMLOptionElement).value).filter(Boolean));
+  for (const id of ids) {
+    await dept.selectOption(id);
+    const option = doctor ? doctors.locator("option", { hasText: doctor }) : doctors.locator("option:not([value=''])");
+    if ((await option.count()) > 0) {
+      const label = ((await option.first().textContent()) ?? "").trim();
+      await doctors.selectOption({ label });
+      return label;
+    }
+  }
+  throw new Error("No doctor found" + (doctor ? ` named ${doctor}` : ""));
 }

@@ -5,16 +5,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { ClaimCover, type Appeal, type Enhancement, type NonPayable, type Verification } from "./claim-cover";
+import { ClaimChecklist, RequiredDocuments } from "./claim-checklist";
 import { ClaimDocuments } from "./claim-documents";
+import { ClaimMoney } from "./insurance-money";
 import { InsurerPrices } from "./insurer-prices";
 import { PatientPicker, type PickedPatient } from "./pickers";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, Spinner, Table, Td, Textarea, useDebounced } from "./ui";
+import { PrintLink } from "@/components/print-link";
 
 interface Insurer { id: string; name: string; kind: string; contact: string | null; status: string }
-interface Policy { id: string; policyNumber: string; memberId: string | null; validFrom: string; validTo: string; status: string; validToday: boolean; insurer: { id: string; name: string }; copayPercent?: string | null; deductible?: string; hasCopayRule?: boolean }
+interface Policy { id: string; policyNumber: string; memberId: string | null; validFrom: string; validTo: string; status: string; validToday: boolean; insurer: { id: string; name: string }; copayPercent?: string | null; deductible?: string; hasCopayRule?: boolean; tier?: string; roomEntitlement?: string | null }
 interface CopayPreview { hasRule: boolean; invoiceAmount: string; nonPayable?: string; packagePrice?: string | null; mostToClaim?: string; deductibleApplied?: string; copayPercent?: string; copayAmount?: string; claimAmount?: string; patientShare?: string; cappedBySumInsured?: boolean }
 interface Row { id: string; claimNumber: string; type: string; status: string; claimedAmount: string | null; approvedAmount: string | null; settledAmount: string | null; outstanding: string | null; patient: string; mrn: string | null; insurer: string; policyNumber: string }
 interface Detail {
+  tier?: string; topups?: { id: string }[];
   id: string; claimNumber: string; type: string; status: string; diagnosis: string | null; closeReason: string | null; nextSteps: string[];
   patient: { id: string; name: string; mrn: string | null }; policy: Policy;
   preauthRequested: string | null; preauthApproved: string | null; claimedAmount: string | null; approvedAmount: string | null; settledAmount: string | null; outstanding: string | null;
@@ -77,7 +81,7 @@ export function ClaimModal({ claimId, onClose }: { claimId: string; onClose: () 
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <Badge tone={TONE[c.status] ?? "gray"}>{label(c.status)}</Badge><span>{c.type.toLowerCase()}</span><span className="text-slate-500">· {c.policy.insurer.name} · policy {c.policy.policyNumber}</span>
-          <a className="ml-auto text-brand-700" href={printUrl(`claims/${c.id}`)} target="_blank" rel="noreferrer">Print claim form</a>
+          <PrintLink className="ml-auto text-brand-700" href={printUrl(`claims/${c.id}`)}>Print claim form</PrintLink>
           {manage && c.invoice && <Button variant="secondary" loading={pkg.isPending} onClick={() => pkg.mutate()}>Download claim package</Button>}
         </div>
         <ClaimExchange claimId={c.id} hasInvoice={!!c.invoice} />
@@ -143,6 +147,8 @@ export function ClaimModal({ claimId, onClose }: { claimId: string; onClose: () 
           </div>
         )}
         <ClaimCover claimId={c.id} type={c.type} status={c.status} verification={c.verification} insurerId={c.policy.insurer.id} invoiceId={c.invoice?.id ?? invoiceId} tariff={c.package} enhancements={c.enhancements} nonPayables={c.nonPayables} nonPayableTotal={c.nonPayableTotal} appeals={c.appeals} submitted={!!c.invoice && !!c.claimedAmount} canManage={manage} open={open} />
+        <ClaimMoney claimId={c.id} patientId={c.patient.id} invoiceId={c.invoice?.id ?? null} tier={c.tier ?? "PRIMARY"} status={c.status} canManage={manage} hasPackage={!!c.package} hasTopup={(c.topups?.length ?? 0) > 0} />
+        <ClaimChecklist claimId={c.id} status={c.status} />
         <ClaimDocuments claimId={c.id} open={open} canManage={manage} />
         <Table head={["When", "Step", "Amount", "Note", "By"]}>
           {c.events.map((e, i) => <tr key={i}><Td>{new Date(e.at).toLocaleString()}</Td><Td>{e.from ? `${label(e.from)} → ` : ""}{label(e.to)}</Td><Td>{e.amount ? money(e.amount) : ""}</Td><Td>{e.note}</Td><Td>{e.by}</Td></tr>)}
@@ -162,10 +168,10 @@ function NewClaim({ onClose, onCreated }: { onClose: () => void; onCreated: (id:
   const [policyId, setPolicyId] = useState("");
   const [type, setType] = useState("CASHLESS");
   const [diagnosis, setDiagnosis] = useState("");
-  const [add, setAdd] = useState({ insurerId: "", policyNumber: "", memberId: "", validFrom: today(), validTo: "", copayPercent: "", deductible: "", deductibleUsed: "" });
-  const addPolicy = useMutation({ mutationFn: () => api.post<Policy>(`/patients/${patient!.id}/policies`, { insurerId: add.insurerId, policyNumber: add.policyNumber.trim(), ...(add.memberId ? { memberId: add.memberId } : {}), validFrom: add.validFrom, validTo: add.validTo, ...(add.copayPercent ? { copayPercent: add.copayPercent } : {}), ...(add.deductible ? { deductible: add.deductible } : {}), ...(add.deductibleUsed ? { deductibleUsed: add.deductibleUsed } : {}) }), onSuccess: (p) => { setPolicyId(p.id); void qc.invalidateQueries({ queryKey: ["policies", patient?.id] }); } });
+  const [add, setAdd] = useState({ insurerId: "", policyNumber: "", memberId: "", validFrom: today(), validTo: "", copayPercent: "", deductible: "", deductibleUsed: "", tier: "PRIMARY", roomEntitlement: "", roomRentLimit: "" });
+  const addPolicy = useMutation({ mutationFn: () => api.post<Policy>(`/patients/${patient!.id}/policies`, { insurerId: add.insurerId, policyNumber: add.policyNumber.trim(), ...(add.memberId ? { memberId: add.memberId } : {}), validFrom: add.validFrom, validTo: add.validTo, ...(add.copayPercent ? { copayPercent: add.copayPercent } : {}), ...(add.deductible ? { deductible: add.deductible } : {}), ...(add.deductibleUsed ? { deductibleUsed: add.deductibleUsed } : {}), tier: add.tier, ...(add.roomEntitlement.trim() ? { roomEntitlement: add.roomEntitlement.trim() } : {}), ...(add.roomRentLimit ? { roomRentLimit: add.roomRentLimit } : {}) }), onSuccess: (p) => { setPolicyId(p.id); void qc.invalidateQueries({ queryKey: ["policies", patient?.id] }); } });
   const create = useMutation({ mutationFn: () => api.post<{ id: string }>("/claims", { patientId: patient!.id, policyId, type, ...(diagnosis.trim() ? { diagnosis: diagnosis.trim() } : {}) }), onSuccess: (r) => { void qc.invalidateQueries({ queryKey: ["claims"] }); onCreated(r.id); } });
-  const valid = (policies.data ?? []).filter((p) => p.validToday);
+  const valid = (policies.data ?? []).filter((p) => p.validToday && p.tier !== "TOPUP");
   return (
     <Modal title="New claim" onClose={onClose}>
       <div className="space-y-3">
@@ -184,6 +190,11 @@ function NewClaim({ onClose, onCreated }: { onClose: () => void; onCreated: (id:
                     <Field label="Patient pays % (co-pay)"><Input inputMode="decimal" placeholder="e.g. 10" value={add.copayPercent} onChange={(e) => setAdd({ ...add, copayPercent: e.target.value.replace(/[^0-9.]/g, "") })} /></Field>
                     <Field label="Deductible"><Input inputMode="decimal" placeholder="0" value={add.deductible} onChange={(e) => setAdd({ ...add, deductible: e.target.value.replace(/[^0-9.]/g, "") })} /></Field>
                     <Field label="Deductible already used"><Input inputMode="decimal" placeholder="0" value={add.deductibleUsed} onChange={(e) => setAdd({ ...add, deductibleUsed: e.target.value.replace(/[^0-9.]/g, "") })} /></Field>
+                  </div>
+                  <div className="flex gap-2">
+                    <Field label="Policy kind"><Select value={add.tier} onChange={(e) => setAdd({ ...add, tier: e.target.value })}><option value="PRIMARY">Main policy</option><option value="TOPUP">Top-up (covers what the main insurer leaves)</option></Select></Field>
+                    <Field label="Entitled room"><Input placeholder="e.g. Semi-private" value={add.roomEntitlement} onChange={(e) => setAdd({ ...add, roomEntitlement: e.target.value })} /></Field>
+                    <Field label="Room rent limit per day"><Input inputMode="decimal" placeholder="no limit" value={add.roomRentLimit} onChange={(e) => setAdd({ ...add, roomRentLimit: e.target.value.replace(/[^0-9.]/g, "") })} /></Field>
                   </div>
                   <p className="text-xs text-slate-500">Leave these empty if the policy has no co-pay rule. With them, the amount to claim is worked out for you when you submit.</p>
                   <ErrorNote error={addPolicy.error} />
@@ -245,6 +256,7 @@ export function ClaimsList() {
 export function InsurersTab() {
   const { can } = useMe();
   const [prices, setPrices] = useState<Insurer | null>(null);
+  const [needs, setNeeds] = useState<Insurer | null>(null);
   const qc = useQueryClient();
   const list = useQuery({ queryKey: ["claim-insurers"], queryFn: () => api.get<Insurer[]>("/claims/insurers") });
   const [name, setName] = useState("");
@@ -263,10 +275,11 @@ export function InsurersTab() {
       <ErrorNote error={add.error ?? toggle.error} />
       {list.isLoading ? <Spinner /> : (
         <Table head={["Name", "Kind", "Status", ""]} {...(list.data?.length === 0 ? { empty: "No insurers yet." } : {})}>
-          {list.data?.map((i) => <tr key={i.id}><Td>{i.name}</Td><Td>{label(i.kind)}</Td><Td><Badge tone={i.status === "ACTIVE" ? "green" : "gray"}>{i.status.toLowerCase()}</Badge></Td><Td><div className="flex gap-2"><Button variant="secondary" onClick={() => setPrices(i)}>Rates and packages</Button>{can("CLAIM_MASTERS") && <Button variant="secondary" onClick={() => toggle.mutate(i)}>{i.status === "ACTIVE" ? "Make inactive" : "Make active"}</Button>}</div></Td></tr>)}
+          {list.data?.map((i) => <tr key={i.id}><Td>{i.name}</Td><Td>{label(i.kind)}</Td><Td><Badge tone={i.status === "ACTIVE" ? "green" : "gray"}>{i.status.toLowerCase()}</Badge></Td><Td><div className="flex gap-2"><Button variant="secondary" onClick={() => setPrices(i)}>Rates and packages</Button><Button variant="secondary" onClick={() => setNeeds(i)}>Required documents</Button>{can("CLAIM_MASTERS") && <Button variant="secondary" onClick={() => toggle.mutate(i)}>{i.status === "ACTIVE" ? "Make inactive" : "Make active"}</Button>}</div></Td></tr>)}
         </Table>
       )}
       {prices && <InsurerPrices insurer={prices} onClose={() => setPrices(null)} />}
+      {needs && <RequiredDocuments insurer={needs} onClose={() => setNeeds(null)} />}
     </Card>
   );
 }

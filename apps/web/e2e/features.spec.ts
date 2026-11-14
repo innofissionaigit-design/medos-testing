@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { loginAs, PASSWORD, registerPatient, TENANT } from "./helpers";
+import { chooseDoctor, loginAs, PASSWORD, registerPatient, TENANT } from "./helpers";
 
 const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
 const PDF = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n");
@@ -10,7 +10,7 @@ async function doctorName(page: Page, user: string): Promise<string> {
   return ((await page.locator("header").getByText(/^Dr\./).first().textContent()) ?? "").trim();
 }
 
-test("patient: edit details, upload a photo and a document, remove the document", async ({ page }) => {
+test("patient: edit details", async ({ page }) => {
   await loginAs(page, "reception1");
   const p = await registerPatient(page);
   await page.getByRole("button", { name: "Edit details" }).click();
@@ -22,25 +22,8 @@ test("patient: edit details, upload a photo and a document, remove the document"
   await expect(page.getByText("Howrah")).toBeVisible();
   await expect(page.getByText("O+")).toBeVisible();
 
-  const card = page.locator("section", { has: page.getByRole("heading", { name: "Photo and documents" }) });
-  await card.getByLabel("Upload type").selectOption("PHOTO");
-  await card.getByLabel("Choose file").setInputFiles({ name: "face.png", mimeType: "image/png", buffer: PNG });
-  await expect(page.getByAltText("Patient photo")).toBeVisible();
-
-  await card.getByLabel("Upload type").selectOption("DOCUMENT");
-  await card.getByLabel("Document title").fill("Blood report");
-  await card.getByLabel("Choose file").setInputFiles({ name: "report.pdf", mimeType: "application/pdf", buffer: PDF });
-  await expect(card.getByRole("link", { name: "Blood report" })).toBeVisible();
-
-  // a wrong file type is refused before it is sent
-  await card.getByLabel("Choose file").setInputFiles({ name: "run.exe", mimeType: "application/x-msdownload", buffer: Buffer.from("MZ") });
-  await expect(card.getByText("Choose a PNG or JPEG image, or a PDF.")).toBeVisible();
-
-  await card.getByRole("button", { name: "remove" }).last().click();
-  const rm = page.getByRole("dialog");
-  await rm.getByLabel("Reason").fill("Uploaded to the wrong patient");
-  await rm.getByRole("button", { name: "Remove" }).click();
-  await expect(card.getByRole("link", { name: "Blood report" })).toHaveCount(0);
+  // The "Photo and documents" card is no longer on the patient page.
+  await expect(page.getByRole("heading", { name: "Photo and documents" })).toHaveCount(0);
   expect(p.mrn).toBeTruthy();
 });
 
@@ -102,7 +85,7 @@ test("consultation: a signed note is amended with a reason and the history shows
   const p = await registerPatient(page);
   await page.getByRole("button", { name: "Start OPD visit" }).click();
   const start = page.getByRole("dialog", { name: "Start an OPD visit" });
-  await start.getByLabel("Doctor").selectOption({ label: ((await start.locator("option", { hasText: doc }).first().textContent()) ?? "").trim() });
+  await chooseDoctor(start, doc);
   await start.getByRole("button", { name: "Check in and add to queue" }).click();
   await expect(page).toHaveURL(/\/queue/);
 
@@ -139,7 +122,7 @@ test("appointments: book then reschedule to another time", async ({ page }) => {
   const book = page.getByRole("dialog", { name: "Book appointment" });
   await book.getByLabel("Patient").fill(p.first);
   await book.getByText(p.mrn).click();
-  await book.getByLabel("Doctor").selectOption({ index: 1 });
+  await chooseDoctor(book);
   await book.getByLabel("Date").fill(futureDay(2));
   await book.locator("button:not([disabled])").filter({ hasText: /\d:\d\d/ }).first().click();
   await book.getByRole("button", { name: "Book", exact: true }).click();

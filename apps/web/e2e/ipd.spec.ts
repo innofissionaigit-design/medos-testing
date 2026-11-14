@@ -20,7 +20,7 @@ test("IPD: admit → medication given → note → every discharge stage → dep
   const doctorName = ((await page.locator("header").getByText(/^Dr\./).first().textContent()) ?? "").trim();
 
   // Reception registers and admits.
-  await loginAs(page, "reception1");
+  await loginAs(page, "reception1", "IPD");
   const p = await registerPatient(page);
   await page.goto("/ipd");
   await page.getByRole("button", { name: "Admit patient" }).click();

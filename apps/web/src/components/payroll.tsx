@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Spinner, Table, Td } from "./ui";
+import { PrintLink } from "@/components/print-link";
 
 interface Structure { id: string; effectiveFrom: string; basic: string; hra: string; otherAllowance: string; gross: string }
 interface Employee { id: string; employeeCode: string; fullName: string; designation: string; department: string | null; joinedOn: string; status: string; bankAccount: string | null; current: Structure | null }
@@ -85,7 +86,7 @@ function RunModal({ runId, onClose }: { runId: string; onClose: () => void }) {
         <Table head={["Employee", "Days lost", "Gross", "PF", "ESI", "Prof. tax", "TDS", "Net", ""]}>
           {r.slips.map((s) => (
             <tr key={s.id}><Td>{s.employee.name}<div className="text-xs text-slate-500">{s.employee.code}</div></Td><Td>{s.lopDays}</Td><Td>{money(s.gross)}</Td><Td>{money(s.pfEmployee)}</Td><Td>{money(s.esiEmployee)}</Td><Td>{money(s.professionalTax)}</Td><Td>{money(s.tds)}</Td><Td className="font-medium">{money(s.net)}</Td>
-              <Td className="whitespace-nowrap">{draft && can("PAYROLL_MANAGE") && <Button variant="secondary" onClick={() => setEditing(s)}>Edit</Button>} <a className="text-brand-700" href={printUrl(`payslips/${s.id}`)} target="_blank" rel="noreferrer">Payslip</a></Td></tr>
+              <Td className="whitespace-nowrap">{draft && can("PAYROLL_MANAGE") && <Button variant="secondary" onClick={() => setEditing(s)}>Edit</Button>} <PrintLink className="text-brand-700" href={printUrl(`payslips/${s.id}`)}>Payslip</PrintLink></Td></tr>
           ))}
         </Table>
         <div className="flex flex-wrap items-end gap-2">
@@ -209,7 +210,7 @@ export function MyPayslips() {
   return (
     <Card title="My payslips">
       <Table head={["Month", "Gross", "Deductions", "Net pay", "Status", ""]}>
-        {q.data.map((p) => <tr key={p.id}><Td>{p.month}</Td><Td>{money(p.gross)}</Td><Td>{money(p.totalDeductions)}</Td><Td className="font-medium">{money(p.net)}</Td><Td><Badge tone={p.runStatus === "PAID" ? "green" : "blue"}>{p.runStatus.toLowerCase()}</Badge></Td><Td><a className="text-brand-700" href={printUrl(`payslips/${p.id}`)} target="_blank" rel="noreferrer">Print</a></Td></tr>)}
+        {q.data.map((p) => <tr key={p.id}><Td>{p.month}</Td><Td>{money(p.gross)}</Td><Td>{money(p.totalDeductions)}</Td><Td className="font-medium">{money(p.net)}</Td><Td><Badge tone={p.runStatus === "PAID" ? "green" : "blue"}>{p.runStatus.toLowerCase()}</Badge></Td><Td><PrintLink className="text-brand-700" href={printUrl(`payslips/${p.id}`)}>Print</PrintLink></Td></tr>)}
       </Table>
     </Card>
   );

@@ -5,6 +5,7 @@ import { MODEL_LABEL, type EarningsModel } from "@/components/doctor-share";
 import { Badge, Button, Card, ErrorNote, Field, Input, KV, Modal, Notice, Select, Spinner, Table, Td } from "@/components/ui";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 type Mode = "PERCENT" | "FIXED" | "MIXED";
 interface Rule { id: string; practitionerId: string | null; doctor: string | null; mode: Mode; percent: string | null; fixedAmount: string | null; effectiveFrom: string; note: string | null; createdBy: string | null }
@@ -197,7 +198,7 @@ function PayoutsCard() {
               <Td>{v.payoutNumber}{v.kind === "REVERSAL" && <div className="text-xs text-amber-800">reverses {v.reverses}</div>}{v.reversedBy && <div className="text-xs text-slate-500">reversed by {v.reversedBy}</div>}</Td>
               <Td>{v.doctor}</Td><Td>{dateTime(v.paidAt)}</Td><Td>{money(v.gross)}</Td><Td>{money(v.tds)} <span className="text-xs text-slate-500">({Number(v.tdsPercent)}%)</span></Td><Td>{money(v.net)}</Td>
               <Td>{v.method.replace("_", " ").toLowerCase()}{v.reference ? <div className="text-xs text-slate-500">{v.reference}</div> : null}</Td>
-              <Td className="space-x-1 whitespace-nowrap"><a className="text-brand-700 hover:underline" href={printUrl(`doctor-payouts/${v.id}`)} target="_blank" rel="noreferrer">Print</a>{v.kind === "PAYMENT" && !v.reversedBy && <Button variant="ghost" onClick={() => setReversing(v)}>Reverse…</Button>}</Td>
+              <Td className="space-x-1 whitespace-nowrap"><PrintLink className="text-brand-700 hover:underline" href={printUrl(`doctor-payouts/${v.id}`)}>Print</PrintLink>{v.kind === "PAYMENT" && !v.reversedBy && <Button variant="ghost" onClick={() => setReversing(v)}>Reverse…</Button>}</Td>
             </tr>
           ))}
         </Table>

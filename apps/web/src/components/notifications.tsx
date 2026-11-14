@@ -18,6 +18,8 @@ const KINDS: Record<string, { text: string; href: string; critical?: boolean }> 
   PHARMACY_BILL_WAITING: { text: "A pharmacy bill is waiting for payment", href: "/billing" },
   BOOKING_FROM_OUTSIDE: { text: "A booking came in from the patient app or another system", href: "/appointments" },
   TELECONSULT_PATIENT_WAITING: { text: "A patient is waiting for the video call", href: "/teleconsult" },
+  DISCHARGE_REMINDER: { text: "A patient is waiting to go home and your step is pending", href: "/ipd" },
+  DISCHARGE_ESCALATION: { text: "A patient has waited too long to go home", href: "/ipd" },
   BOOKING_AUTO_CANCELLED: { text: "A booking was cancelled because its fee was not paid", href: "/appointments" },
 };
 const kindOf = (type: string) => KINDS[type] ?? { text: "New notification", href: "/dashboard" };

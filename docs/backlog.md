@@ -114,3 +114,14 @@ Radiology/PACS/DICOM, pathology, blood bank, dialysis, IVF, dental charting, adv
 - Procurement: full general-ledger accounting (revenue, patient billing, tax returns) beyond the cost ledger; reading a supplier's own statement file to pay against it.
 - Insurance: insurer-specific adapters that read the insurer's reply (eligibility result, decisions, payment advice) automatically; needs each insurer's interface and credentials.
 - After discharge: a phone-system (PBX or cloud-telephony) connection with audio recording; needs a provider account.
+
+## Discharge flow follow-ups (docs/discharge-flow.md)
+
+- Supplementary bills: let ward-store and pharmacy issues, and procedure charges, that arrive after the final bill flow to a supplementary bill (today they are refused); re-file or top up an insurance claim for a supplementary bill.
+- Reminders by SMS, WhatsApp or email in addition to the in-app notification; individual assignment of a checklist item to one named person.
+
+## Insurance money follow-ups (docs/insurance-money.md)
+
+- Working out an insurer's proportionate room-rent deduction (today the desk enters room-rent cuts by hand, as specified).
+- A top-up covering further invoices of the main claim; updating a top-up that is already approved when the main approval later changes.
+- Tying an estimate to the admission and claim that follow it, and printing it on the hospital's letterhead.

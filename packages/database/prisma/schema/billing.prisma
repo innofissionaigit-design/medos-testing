@@ -10,6 +10,13 @@ enum ServiceCategory {
   OTHER
 }
 
+/// Where a service is billed: at the OPD desk, the IPD desk, or both. Surgery, room and nursing charges are inpatient (IPD) by default.
+enum ServiceScope {
+  OPD
+  IPD
+  BOTH
+}
+
 model Service {
   id         String          @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId   String          @db.Uuid
@@ -17,6 +24,7 @@ model Service {
   code       String
   name       String
   category   ServiceCategory
+  availableFor ServiceScope   @default(BOTH)
   price      Decimal         @db.Decimal(12, 2)
   /// GST / tax rate in percent. Tax treatment of each service needs professional review before go-live.
   taxPercent Decimal         @default(0) @db.Decimal(5, 2)
@@ -106,6 +114,7 @@ model Invoice {
   claims         Claim[]
   claimLinks     ClaimInvoice[]
   finalFor       Admission[]            @relation("AdmissionFinalInvoice")
+  supplementaryFor SupplementaryBill?
   shareEntries   DoctorShareEntry[]
 
   @@unique([tenantId, id])

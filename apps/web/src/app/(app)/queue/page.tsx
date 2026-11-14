@@ -5,7 +5,8 @@ import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Gate } from "@/components/gate";
 import { VitalsCard } from "@/components/ipd-extras";
-import { Badge, Button, Card, ErrorNote, Modal, Field, Input, Notice, PageHeader, Spinner, StatusBadge, Table, Td } from "@/components/ui";
+import { Badge, Button, Card, ErrorNote, Modal, Field, Notice, PageHeader, Spinner, StatusBadge, Table, Td } from "@/components/ui";
+import { CANCEL_REASONS, ReasonSelect } from "@/components/reason-select";
 import { api, ApiError } from "@/lib/api";
 import { useMe } from "@/lib/me";
 
@@ -114,7 +115,7 @@ export default function QueuePage() {
       {cancelId && (
         <Modal title="Cancel this visit?" onClose={() => setCancelId(null)}>
           <div className="space-y-3">
-            <Field label="Reason"><Input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. patient left" /></Field>
+            <Field label="Reason"><ReasonSelect reasons={CANCEL_REASONS.visit} onChange={setReason} autoFocus /></Field>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setCancelId(null)}>Keep in queue</Button>
               <Button variant="danger" disabled={reason.trim().length < 3} onClick={() => { act.mutate({ id: cancelId, action: "cancel", body: { reason: reason.trim() } }); setCancelId(null); }}>Cancel visit</Button>

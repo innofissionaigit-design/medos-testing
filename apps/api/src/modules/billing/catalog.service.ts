@@ -8,11 +8,17 @@ import type { RequestContext } from "../../common/request-context";
 import { amount, percent } from "./money.schema";
 
 const CATEGORIES = ["CONSULTATION", "ROOM_BED", "PROCEDURE", "NURSING", "INJECTION_DRESSING", "INVESTIGATION", "OTHER"] as const;
+const SCOPES = ["OPD", "IPD", "BOTH"] as const;
+/** Surgery, room and nursing are inpatient services unless the hospital says otherwise. */
+const INPATIENT_CATEGORIES: readonly string[] = ["PROCEDURE", "ROOM_BED", "NURSING"];
+export const defaultScope = (category: string): (typeof SCOPES)[number] => (INPATIENT_CATEGORIES.includes(category) ? "IPD" : "BOTH");
 
 export const createServiceSchema = z.object({
   code: z.string().trim().toUpperCase().regex(/^[A-Z0-9][A-Z0-9_-]{0,23}$/),
   name: z.string().trim().min(2).max(120),
   category: z.enum(CATEGORIES),
+  /** Left out, it follows the category (see defaultScope). */
+  availableFor: z.enum(SCOPES).optional(),
   price: amount(),
   taxPercent: percent.prefault(0),
   sacCode: z.string().trim().regex(/^\d{4,8}$/, "SAC/HSN code must be 4-8 digits").optional(),
@@ -21,6 +27,7 @@ export const createServiceSchema = z.object({
 export const updateServiceSchema = z.object({
   name: z.string().trim().min(2).max(120),
   category: z.enum(CATEGORIES),
+  availableFor: z.enum(SCOPES),
   price: amount(),
   taxPercent: percent,
   sacCode: z.string().trim().regex(/^\d{4,8}$/, "SAC/HSN code must be 4-8 digits").nullable(),
@@ -30,12 +37,14 @@ export const updateServiceSchema = z.object({
 export const listServicesSchema = z.object({
   q: z.string().trim().max(60).optional(),
   category: z.enum(CATEGORIES).optional(),
+  /** The desk's price list: "OPD" gives the OPD and shared services, "IPD" the IPD and shared ones. */
+  scope: z.enum(["OPD", "IPD"]).optional(),
   includeInactive: z.enum(["true", "false"]).default("false").transform((v) => v === "true"),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(100),
 }).strict();
 
-const SELECT = { id: true, code: true, name: true, category: true, price: true, taxPercent: true, sacCode: true, status: true } satisfies Prisma.ServiceSelect;
+const SELECT = { id: true, code: true, name: true, category: true, availableFor: true, price: true, taxPercent: true, sacCode: true, status: true } satisfies Prisma.ServiceSelect;
 type Row = Prisma.ServiceGetPayload<{ select: typeof SELECT }>;
 export const toServiceView = (s: Row) => ({ ...s, price: s.price.toFixed(2), taxPercent: s.taxPercent.toFixed(2) });
 
@@ -48,6 +57,7 @@ export class CatalogService {
     const where: Prisma.ServiceWhereInput = {
       tenantId: ctx.tenantId, facilityId: ctx.facilityId, ...(showInactive ? {} : { status: "ACTIVE" }),
       ...(q.category ? { category: q.category } : {}),
+      ...(q.scope ? { availableFor: { in: [q.scope, "BOTH"] } } : {}),
       ...(q.q ? { OR: [{ name: { contains: q.q, mode: "insensitive" } }, { code: { contains: q.q.toUpperCase() } }] } : {}),
     };
     const [rows, total] = await Promise.all([
@@ -61,7 +71,7 @@ export class CatalogService {
     return this.prisma.$transaction(async (tx) => {
       const dup = await tx.service.findFirst({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, code: input.code }, select: { id: true } });
       if (dup) throw new DomainError("CONFLICT", "A service with this code already exists. Choose another code, or switch the old one back on.", 409, [{ path: "code", message: "Already used" }]);
-      const s = await tx.service.create({ data: { ...input, tenantId: ctx.tenantId, facilityId: ctx.facilityId, price: input.price.toFixed(2), taxPercent: input.taxPercent.toFixed(2) }, select: SELECT });
+      const s = await tx.service.create({ data: { ...input, availableFor: input.availableFor ?? defaultScope(input.category), tenantId: ctx.tenantId, facilityId: ctx.facilityId, price: input.price.toFixed(2), taxPercent: input.taxPercent.toFixed(2) }, select: SELECT });
       await this.audit.record(tx, actorOf(ctx), { action: "SERVICE_CREATED", entityType: "Service", entityId: s.id, metadata: { code: s.code, price: s.price.toFixed(2), taxPercent: s.taxPercent.toFixed(2) } });
       return toServiceView(s);
     });
@@ -75,6 +85,7 @@ export class CatalogService {
       const data: Prisma.ServiceUpdateInput = {};
       if (input.name !== undefined) data.name = input.name;
       if (input.category !== undefined) data.category = input.category;
+      if (input.availableFor !== undefined) data.availableFor = input.availableFor;
       if (input.status !== undefined) data.status = input.status;
       if (input.price !== undefined) data.price = input.price.toFixed(2);
       if (input.taxPercent !== undefined) data.taxPercent = input.taxPercent.toFixed(2);

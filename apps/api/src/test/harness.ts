@@ -48,7 +48,11 @@ export interface TestApp {
   http: () => ReturnType<typeof request>;
   api: (method: "get" | "post" | "put" | "patch" | "delete", path: string, token?: string) => request.Test;
   close: () => Promise<void>;
-  makeTenant: (label?: string) => Promise<TestTenant>;
+  /**
+   * `defaultSettings: true` leaves the hospital's settings at the product defaults. Without it the test hospital starts with "OPD consultation paid before the visit"
+   * switched OFF, so the many tests that start an OPD visit are not each held up by a consultation bill; the tests of that rule ask for the defaults.
+   */
+  makeTenant: (label?: string, opts?: { defaultSettings?: boolean }) => Promise<TestTenant>;
   makeUser: (t: TestTenant, roleNames: string[], opts?: { facilityIds?: string[]; username?: string }) => Promise<{ id: string; username: string; token: string }>;
   login: (tenantCode: string, username: string, password?: string, facilityId?: string) => Promise<request.Response>;
 }
@@ -85,7 +89,7 @@ export async function startApp(opts: { rateLimit?: boolean } = {}): Promise<Test
     return r.body.data.tokens.accessToken as string;
   };
 
-  const makeTenant: TestApp["makeTenant"] = async (label = "t") => {
+  const makeTenant: TestApp["makeTenant"] = async (label = "t", opts = {}) => {
     const suffix = randomBytes(4).toString("hex");
     const code = `${label}-${suffix}`.toLowerCase();
     const res = await tenants.provision({
@@ -97,6 +101,9 @@ export async function startApp(opts: { rateLimit?: boolean } = {}): Promise<Test
     const roles = await prisma.role.findMany({ where: { tenantId: res.tenantId } });
     const roleIds = Object.fromEntries(roles.map((r) => [r.name, r.id]));
     await prisma.userFacility.create({ data: { tenantId: res.tenantId, userId: res.adminUserId, facilityId: facility2.id } });
+    if (!opts.defaultSettings) {
+      for (const facilityId of [res.facilityId, facility2.id]) await prisma.setting.create({ data: { tenantId: res.tenantId, facilityId, key: "OPD_FEE_BEFORE_VISIT", value: false, updatedById: res.adminUserId } });
+    }
     const token = await tokenFor(code, "admin", res.facilityId);
     return { tenantId: res.tenantId, code, facilityId: res.facilityId, facility2Id: facility2.id, admin: { id: res.adminUserId, username: "admin", token }, roleIds };
   };

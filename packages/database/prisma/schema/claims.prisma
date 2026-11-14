@@ -61,9 +61,15 @@ model Insurer {
   policies PatientPolicy[]
   rates    InsurerRate[]
   packages InsurerPackage[]
+  payments InsurerPayment[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, name])
+}
+
+enum PolicyTier {
+  PRIMARY
+  TOPUP
 }
 
 model PatientPolicy {
@@ -82,6 +88,11 @@ model PatientPolicy {
   /// Fixed amount the patient bears first, and how much of it earlier claims have already used.
   deductible     Decimal     @default(0) @db.Decimal(14, 2)
   deductibleUsed Decimal     @default(0) @db.Decimal(14, 2)
+  /// Main policy, or a top-up that covers what the main insurer leaves (docs/insurance-money.md).
+  tier           PolicyTier  @default(PRIMARY)
+  /// The room the policy entitles the patient to (for example "Semi-private") and the most it pays per day; a room above the limit is the patient's to pay.
+  roomEntitlement String?
+  roomRentLimit  Decimal?    @db.Decimal(12, 2)
   status         PayerStatus @default(ACTIVE)
   createdById    String      @db.Uuid
   createdAt      DateTime    @default(now()) @db.Timestamptz(3)
@@ -132,6 +143,9 @@ model Claim {
   verifiedById         String?            @db.Uuid
   verificationRef      String?
   verificationNote     String?
+  /// A top-up claim covers what the main insurer leaves, on the same invoice; it points at the main claim.
+  tier                 PolicyTier         @default(PRIMARY)
+  primaryClaimId       String?            @db.Uuid
   createdById          String             @db.Uuid
   createdAt            DateTime           @default(now()) @db.Timestamptz(3)
   updatedAt            DateTime           @updatedAt @db.Timestamptz(3)
@@ -141,6 +155,7 @@ model Claim {
   encounter     Encounter?          @relation(fields: [tenantId, encounterId], references: [tenantId, id], onDelete: Restrict)
   invoice       Invoice?            @relation(fields: [tenantId, invoiceId], references: [tenantId, id], onDelete: Restrict)
   events        ClaimEvent[]
+  billSends     InsurerBillSend[]
   settlements   ClaimSettlement[]
   documents     ClaimDocument[]
   enhancements  ClaimEnhancement[]
@@ -148,6 +163,11 @@ model Claim {
   extraInvoices ClaimInvoice[]
   appeals       ClaimAppeal[]
   transmissions ClaimTransmission[]
+  primaryClaim  Claim?              @relation("TopupOf", fields: [tenantId, primaryClaimId], references: [tenantId, id], onDelete: Restrict)
+  topups        Claim[]             @relation("TopupOf")
+  deductions    ClaimDeduction[]
+  writeOffs     ClaimWriteOff[]
+  followUps     ClaimFollowUp[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, claimNumber])
@@ -184,10 +204,13 @@ model ClaimSettlement {
   receiptId   String?  @db.Uuid
   /// Tax the insurer deducted at source from this payment (TDS). The claim is settled by the cash received plus this, and the invoice is credited with both.
   tdsAmount   Decimal  @default(0) @db.Decimal(14, 2)
+  /// The insurer payment this receipt was matched from (docs/insurance-money.md), if it came in as one payment for several claims.
+  paymentId   String?  @db.Uuid
   createdById String   @db.Uuid
   createdAt   DateTime @default(now()) @db.Timestamptz(3)
 
-  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+  claim   Claim          @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+  payment InsurerPayment? @relation(fields: [tenantId, paymentId], references: [tenantId, id], onDelete: Restrict)
 
   @@unique([tenantId, id])
   @@index([tenantId, claimId])
@@ -311,6 +334,12 @@ model InsurerPackage {
   code      String
   name      String
   price     Decimal     @db.Decimal(14, 2)
+  /// Implants and consumables are inside the price unless the package says otherwise, openly (exclusionNote is then required).
+  includesImplants    Boolean @default(true)
+  includesConsumables Boolean @default(true)
+  inclusions          String[] @default([])
+  exclusions          String[] @default([])
+  exclusionNote       String?
   status    PayerStatus @default(ACTIVE)
   createdAt DateTime    @default(now()) @db.Timestamptz(3)
   updatedAt DateTime    @updatedAt @db.Timestamptz(3)

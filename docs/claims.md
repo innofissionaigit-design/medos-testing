@@ -1,5 +1,7 @@
 # Insurance claims
 
+> Insurer payments, top-up cover, write-offs, the running ledger and the estimate for the family are in [insurance-money.md](insurance-money.md).
+
 ## Purpose
 Tracks money owed by insurers, TPAs and government schemes. A claim follows one issued invoice from pre-authorisation to settlement. Money the insurer pays is posted on the invoice, so the invoice and the claim never disagree.
 
@@ -48,6 +50,7 @@ Claims, insurers and policies are never deleted. The timeline and settlements ar
 ## Documents
 Supporting documents (discharge summary, policy card, ID proof, investigation reports, final bill, prescription, or anything else the insurer asks for) are attached to the claim in the claim's window. PNG, JPEG or PDF, up to 5 MB each and 30 per claim, checked against their declared type and virus-scanned like patient documents. The claims officer (`CLAIM_MANAGE`) adds and removes them while the claim is open; anyone with `CLAIM_READ` can open them. Opening a document is audited (`CLAIM_DOCUMENT_VIEWED`) because it is access to a patient's record. A wrong document is removed with a reason (5+ characters): it stops showing but stays on the record, and nothing is ever deleted. A rejected, settled or closed claim keeps its documents and takes no more (checked by the service and by the database). The documents are **kept with the claim; nothing is sent to the insurer**.
 API: `POST /claims/:id/documents?filename=&label=` (raw body), `GET /claims/:id/documents`, `GET /claim-documents/:id/content`, `POST /claim-documents/:id/remove`. Audit events: `CLAIM_DOCUMENT_ADDED`, `CLAIM_DOCUMENT_VIEWED`, `CLAIM_DOCUMENT_REMOVED`, `CLAIM_DOCUMENT_REJECTED`. Tests: `claims/claims.spec.ts`.
+See also docs/claim-checklist.md: an insurer's required documents stop a claim being sent while any is missing.
 
 ## Discharge checklist
 The claim linked to an admission (`encounterId` of the admission) feeds the **Insurance** stage of the discharge checklist: documents attached, authorisation requested and answered (docs/discharge-stages.md). The Discharge tab has an **Insurance** card to start the claim for the admission and to open the claim window (documents, pre-authorisation). The claims officer role has `ADMISSION_READ` so the TPA desk can open the admission; it still cannot waive or discharge. Migration `20261110090000_discharge_insurance_step` adds the `INSURANCE` clearance step and that permission. Demo seed user: `tpa1`. Tests: `discharge/discharge.spec.ts` ("insurance clearance").

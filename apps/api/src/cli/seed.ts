@@ -78,6 +78,9 @@ async function main(): Promise<void> {
   };
 
   step("settings, departments and staff");
+  // The demo data starts OPD visits without a consultation bill, so the rule "pay the consultation before the visit" (on by default) is held off while seeding
+  // and switched back to the default at the end.
+  await call("PUT", "/settings/OPD_FEE_BEFORE_VISIT", admin, { value: false });
   await call("PUT", "/settings/PRINT_HEADER", admin, { value: { hospitalName: "Demo City Hospital", tagline: "Care you can trust", address: "12 Synthetic Road, Kolkata 700091", phone: "033-5550123" } });
   const deptNames = ["General Medicine", "Paediatrics", "Obstetrics and Gynaecology", "Orthopaedics", "General Surgery", "ENT", "Dermatology", "Cardiology"];
   const departments: Json[] = [];
@@ -99,7 +102,7 @@ async function main(): Promise<void> {
   const rmoUserId = await mkUser("rmo1", rmoName, "RMO");
   await prisma.practitioner.create({ data: { tenantId: prov.tenantId, facilityId: prov.facilityId, userId: rmoUserId, displayName: rmoName, specialty: "Resident Medical Officer", scheduleSet: true } });
   for (let i = 0; i < COUNTS.nurses; i++) await mkUser(`nurse${i + 1}`, `Nurse ${pick(FIRST_NAMES_F)} ${pick(LAST_NAMES)}`, "NURSE");
-  for (const [u, n, r] of [["reception1", "Reception One", "RECEPTIONIST"], ["reception2", "Reception Two", "RECEPTIONIST"], ["cashier1", "Cashier One", "CASHIER"], ["cashier2", "Cashier Two", "CASHIER"], ["pharmacist1", "Pharmacist One", "PHARMACIST"], ["manager1", "Manager One", "MANAGER"], ["labtech1", "Lab Technician One", "LAB_TECHNICIAN"], ["pathologist1", "Dr. Pathologist One", "PATHOLOGIST"], ["radiographer1", "Radiographer One", "RADIOGRAPHER"], ["radiologist1", "Dr. Radiologist One", "RADIOLOGIST"], ["otcoord1", "OT Coordinator One", "OT_COORDINATOR"], ["tpa1", "TPA Desk One", "CLAIMS_OFFICER"], ["transport1", "Patient Transport One", "PATIENT_TRANSPORT"], ["housekeeping1", "Housekeeping One", "HOUSEKEEPING"], ["mrd1", "Medical Records One", "MEDICAL_RECORDS"], ["procurement1", "Procurement One", "PROCUREMENT"], ["coordinator1", "Care Coordinator One", "CARE_COORDINATOR"], ["relations1", "Patient Relations One", "PATIENT_RELATIONS"]] as const) await mkUser(u, n, r);
+  for (const [u, n, r] of [["reception1", "Reception One", "RECEPTIONIST"], ["reception2", "Reception Two", "RECEPTIONIST"], ["cashier1", "Cashier One", "CASHIER"], ["cashier2", "Cashier Two", "CASHIER"], ["pharmacist1", "Pharmacist One", "PHARMACIST"], ["manager1", "Manager One", "MANAGER"], ["labtech1", "Lab Technician One", "LAB_TECHNICIAN"], ["pathologist1", "Dr. Pathologist One", "PATHOLOGIST"], ["radiographer1", "Radiographer One", "RADIOGRAPHER"], ["radiologist1", "Dr. Radiologist One", "RADIOLOGIST"], ["otcoord1", "OT Coordinator One", "OT_COORDINATOR"], ["tpa1", "TPA Desk One", "CLAIMS_OFFICER"], ["billing1", "Billing One", "BILLING"], ["transport1", "Patient Transport One", "PATIENT_TRANSPORT"], ["housekeeping1", "Housekeeping One", "HOUSEKEEPING"], ["mrd1", "Medical Records One", "MEDICAL_RECORDS"], ["procurement1", "Procurement One", "PROCUREMENT"], ["coordinator1", "Care Coordinator One", "CARE_COORDINATOR"], ["relations1", "Patient Relations One", "PATIENT_RELATIONS"]] as const) await mkUser(u, n, r);
   const [reception, cashier, pharmacist] = await Promise.all([login("reception1"), login("cashier1"), login("pharmacist1")]);
 
   step(`registering ${COUNTS.patients} patients`);
@@ -160,8 +163,14 @@ async function main(): Promise<void> {
 
   step(`billing: ${COUNTS.invoices} invoices`);
   const services: string[] = [];
+  // The OPD desk bills only outpatient services: surgeries are inpatient (IPD) by default, so the OPD invoices below choose from the others.
+  const opdServices: string[] = [];
+  const SURGERIES = ["APPEN", "HERNIA", "ARTHRO"];
   for (const [c, n, price, cat] of [["CONS", "OPD consultation", "500", "CONSULTATION"], ["DRESS", "Dressing (small)", "150", "INJECTION_DRESSING"], ["INJ", "Injection charge", "80", "INJECTION_DRESSING"], ["ECG", "ECG", "300", "PROCEDURE"], ["APPEN", "Appendectomy", "15000", "PROCEDURE"], ["HERNIA", "Hernia repair", "18000", "PROCEDURE"], ["ARTHRO", "Knee arthroscopy", "22000", "PROCEDURE"], ["IMPLT", "Orthopaedic plate and screws (implant)", "8500", "OTHER"], ["IMPMS", "Surgical mesh (implant)", "3500", "OTHER"], ["CONKT", "Surgical consumables kit", "1800", "OTHER"], ["CONSU", "Suture pack", "600", "OTHER"]] as const) {
-    services.push((await call("POST", "/services", admin, { code: c, name: n, category: cat, price, taxPercent: 0 }))["id"] as string);
+    // An ECG is a procedure by category but an outpatient service too, so it is offered at both desks; the OPD consultation is outpatient only.
+    const id = (await call("POST", "/services", admin, { code: c, name: n, category: cat, price, taxPercent: 0, ...(c === "ECG" ? { availableFor: "BOTH" } : c === "CONS" ? { availableFor: "OPD" } : {}) }))["id"] as string;
+    services.push(id);
+    if (!SURGERIES.includes(c)) opdServices.push(id);
   }
   // The hospital's lab-test and investigation list, which feeds the Lab test dropdown of the prescription and the Cashier's test billing (synthetic prices).
   for (const [c, n, price] of [["CBC", "CBC (complete blood count)", "250"], ["ESR", "ESR", "100"], ["LFT", "Liver function test (LFT)", "600"], ["KFT", "Kidney function test (KFT)", "550"], ["RBS", "Random blood sugar", "80"], ["FBS", "Fasting blood sugar", "80"], ["HBA1C", "HbA1c", "450"], ["LIPID", "Lipid profile", "700"], ["TSH", "TSH", "350"], ["CRP", "CRP", "400"], ["URINE", "Urine routine", "120"], ["XRAYCH", "Chest X-ray", "400"], ["USGAB", "USG abdomen", "900"], ["ECHO", "2D echo", "1500"]] as const) {
@@ -169,7 +178,7 @@ async function main(): Promise<void> {
   }
   await call("POST", "/shifts/open", cashier, { openingCash: "2000" });
   for (let i = 0; i < COUNTS.invoices; i++) {
-    const inv = await call("POST", "/invoices", cashier, { patientId: patients[COUNTS.invAt + i], lines: [{ serviceId: pick(services), quantity: 1 }, ...(i % 3 === 0 ? [{ serviceId: pick(services), quantity: 2 }] : [])] });
+    const inv = await call("POST", "/invoices", cashier, { patientId: patients[COUNTS.invAt + i], lines: [{ serviceId: pick(opdServices), quantity: 1 }, ...(i % 3 === 0 ? [{ serviceId: pick(opdServices), quantity: 2 }] : [])] });
     const issued = await call("POST", `/invoices/${inv["id"]}/issue`, cashier, {});
     if (i % 4 === 0) continue; // left outstanding on purpose
     const total = Number(issued["total"]);
@@ -180,8 +189,10 @@ async function main(): Promise<void> {
     await call("POST", `/invoices/${inv["id"]}/payments`, cashier, { payments }, { "idempotency-key": randomUUID() });
   }
 
+  // Back to the product default (on), unless the seed is told otherwise: SEED_OPD_FEE_BEFORE_VISIT=false (the browser tests, which bill after the consultation).
+  await call("PUT", "/settings/OPD_FEE_BEFORE_VISIT", admin, { value: process.env["SEED_OPD_FEE_BEFORE_VISIT"] !== "false" });
   await app.close();
-  process.stdout.write(`\nSeed complete. Tenant code: ${code}\nLogin as admin, doctor1..doctor${COUNTS.doctors}, nurse1..nurse${COUNTS.nurses}, rmo1, reception1, cashier1, pharmacist1, manager1, labtech1, pathologist1, radiographer1, radiologist1, otcoord1, tpa1, transport1, housekeeping1, mrd1, procurement1.\n`);
+  process.stdout.write(`\nSeed complete. Tenant code: ${code}\nLogin as admin, doctor1..doctor${COUNTS.doctors}, nurse1..nurse${COUNTS.nurses}, rmo1, reception1, cashier1, pharmacist1, manager1, labtech1, pathologist1, radiographer1, radiologist1, otcoord1, tpa1, billing1, transport1, housekeeping1, mrd1, procurement1.\n`);
   process.stdout.write(generated ? `Password (generated, shown once): ${password}\n` : "Password: the value of SEED_PASSWORD\n");
 }
 

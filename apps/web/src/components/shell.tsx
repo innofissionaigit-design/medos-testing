@@ -8,8 +8,10 @@ import { api } from "@/lib/api";
 import { ageText, type AgeValue } from "@/lib/format";
 import { useI18n } from "@/lib/i18n";
 import { useMe } from "@/lib/me";
-import { visibleNav } from "@/lib/nav";
+import { needsDesk, useDesk } from "@/lib/desk";
+import { NAV, visibleNav } from "@/lib/nav";
 import { NotificationBell } from "./notifications";
+import { DeskChooser } from "./reception-desk";
 import { useDebounced } from "./ui";
 
 export interface PatientRow { id: string; mrn: string | null; firstName: string; lastName: string | null; gender: string; age: AgeValue; mobile: string | null }
@@ -64,11 +66,18 @@ function GlobalSearch() {
 
 export function Shell({ children }: { children: ReactNode }) {
   const { me, features } = useMe();
+  const { desk, choose } = useDesk();
+  const router = useRouter();
   const { t } = useI18n();
   const path = usePathname();
   const [menu, setMenu] = useState(false);
-  const nav = visibleNav(new Set(me.permissions), features, me.roles);
+  const picksDesk = needsDesk(me.roles, features);
+  const activeDesk = picksDesk ? (desk ?? null) : null;
+  const nav = visibleNav(new Set(me.permissions), features, me.roles, activeDesk);
+  // A screen that belongs to the other desk (for example the ward list at the OPD desk).
+  const otherDesk = activeDesk ? NAV.find((n) => n.desk && n.desk !== activeDesk && path.startsWith(n.href)) : undefined;
   async function logout() {
+    choose(null);
     await fetch("/api/session/logout", { method: "POST", credentials: "same-origin", headers: { "x-medos-csrf": "1" } });
     window.location.assign("/login");
   }
@@ -76,6 +85,8 @@ export function Shell({ children }: { children: ReactNode }) {
     await fetch("/api/session/switch", { method: "POST", credentials: "same-origin", headers: { "content-type": "application/json", "x-medos-csrf": "1" }, body: JSON.stringify({ facilityId }) });
     window.location.assign("/dashboard");
   }
+  if (picksDesk && desk === undefined) return <div className="p-6 text-slate-500">{t("Loading…")}</div>;
+  if (picksDesk && desk === null) return <DeskChooser name={me.fullName} onChoose={(d) => { choose(d); router.push("/dashboard"); }} onSignOut={logout} />;
   return (
     <div className="flex min-h-screen">
       <aside className="hidden w-52 shrink-0 flex-col border-r border-slate-200 bg-white md:flex">
@@ -97,6 +108,7 @@ export function Shell({ children }: { children: ReactNode }) {
                 {me.facilities.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
               </select>
             ) : <span className="hidden text-slate-500 sm:inline">{me.facility?.name}</span>}
+            {activeDesk && <button type="button" onClick={() => { choose(null); router.push("/dashboard"); }} className="rounded border border-brand-200 bg-brand-50 px-2 py-1 text-brand-700 hover:bg-brand-100" title={t("Switch desk")}>{activeDesk} {t("desk")} · {t("Switch")}</button>}
             <Link href="/account" className="hidden text-slate-700 hover:underline sm:inline" title={t("My account")}>{me.fullName}</Link>
             <button onClick={logout} className="rounded border border-slate-300 px-2 py-1 hover:bg-slate-50">{t("Sign out")}</button>
           </div>
@@ -112,7 +124,13 @@ export function Shell({ children }: { children: ReactNode }) {
               {me.dataScope.kind === "DOCTOR" ? t("You see only your own patients, records and reports.") : `${t("You see only the data of your department:")} ${me.dataScope.departments.map((d) => d.name).join(", ")}`}
             </p>
           )}
-          {children}
+          {otherDesk && activeDesk ? (
+            <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-sm">
+              <p className="font-medium">{otherDesk.label} {t("belongs to the")} {activeDesk === "OPD" ? "IPD" : "OPD"} {t("desk")}.</p>
+              <p className="mt-1 text-slate-700">{t("You are at the")} {activeDesk} {t("desk. Switch desk to open it.")}</p>
+              <button type="button" className="mt-3 rounded border border-slate-300 bg-white px-3 py-1.5 hover:bg-slate-50" onClick={() => { choose(null); router.push("/dashboard"); }}>{t("Switch desk")}</button>
+            </div>
+          ) : children}
         </main>
       </div>
     </div>

@@ -16,8 +16,9 @@ interface Statement { entries: Entry[]; totals: { debit: string; credit: string;
 export function LedgerCard({ patientId }: { patientId: string }) {
   const { can, money, dateTime } = useMe();
   const [all, setAll] = useState(false);
-  const q = useQuery({ queryKey: ["ledger", patientId], queryFn: () => api.get<Statement>(`/patients/${patientId}/ledger`), enabled: can("INVOICE_READ") });
-  if (!can("INVOICE_READ")) return null;
+  const q = useQuery({ queryKey: ["ledger", patientId], queryFn: () => api.get<Statement>(`/patients/${patientId}/ledger`), enabled: can("LEDGER_READ") });
+  // The receptionist does not see the account statement (the server refuses it too).
+  if (!can("LEDGER_READ")) return null;
   const d = q.data;
   // The patient's own position: the account balance less what an insurer has authorised and not yet paid (that is not the patient's debt).
   const balance = Number(d?.totals.patientBalance ?? d?.totals.balance ?? 0);

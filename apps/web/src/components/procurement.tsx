@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Select, Spinner, Table, Td, Textarea, useDebounced } from "./ui";
+import { PrintLink } from "@/components/print-link";
 
 interface Med { id: string; brandName: string; genericName: string; strength: string | null }
 interface Need { medicineId: string; medicine: string; reorderLevel: number; onHand: number; onOrder: number; onIndent: number; suggestedQuantity: number }
@@ -194,7 +195,7 @@ export function OrdersTab() {
                   <div className="flex flex-wrap gap-1">
                     {o.status === "DRAFT" && o.approvalsNeeded === 2 && !o.approvedBy && can("PURCHASE_APPROVE") && <Button variant="secondary" loading={step.isPending} onClick={() => step.mutate({ id: o.id, path: "approve" })}>Approve</Button>}
                     {o.status === "DRAFT" && (can("PURCHASE_ORDER") || can("PURCHASE_APPROVE")) && <Button loading={step.isPending} onClick={() => step.mutate({ id: o.id, path: "issue" })}>Issue to supplier</Button>}
-                    <a className="self-center text-xs text-brand-700" href={printUrl(`purchase-orders/${o.id}`)} target="_blank" rel="noreferrer">Print</a>
+                    <PrintLink className="self-center text-xs text-brand-700" href={printUrl(`purchase-orders/${o.id}`)}>Print</PrintLink>
                     {["DRAFT", "ISSUED"].includes(o.status) && can("PURCHASE_ORDER") && o.receipts.length === 0 && <Button variant="ghost" onClick={() => { const r = ask("Why is this order cancelled? (at least 5 characters)"); if (r) step.mutate({ id: o.id, path: "cancel", body: { reason: r } }); }}>Cancel</Button>}
                     {["ISSUED", "PARTIALLY_RECEIVED"].includes(o.status) && can("PURCHASE_ORDER") && <Button variant="ghost" onClick={() => { const r = ask("Why is this order closed before everything arrived? (at least 5 characters)"); if (r) step.mutate({ id: o.id, path: "close", body: { reason: r } }); }}>Close short</Button>}
                   </div>

@@ -80,6 +80,21 @@ export class DischargeController {
     return { data: await this.discharge.finalInvoice(ctx, id(admissionId)) };
   }
 
+  /** The bill so far: the charges waiting, the bills issued, and whether the final bill can be generated yet. Reads only. */
+  @RequirePermissions("ADMISSION_READ")
+  @Get("discharge/bill-preview")
+  async billPreview(@Ctx() ctx: RequestContext, @Param("id") admissionId: string) {
+    return { data: await this.discharge.billPreview(ctx, id(admissionId)) };
+  }
+
+  /** Bills the charges that arrived after the final bill on their own small bill; the final bill is never altered. */
+  @RequirePermissions("IPD_FINAL_BILL")
+  @Post("discharge/supplementary-invoice")
+  @HttpCode(200)
+  async supplementaryInvoice(@Ctx() ctx: RequestContext, @Param("id") admissionId: string) {
+    return { data: await this.discharge.supplementaryInvoice(ctx, id(admissionId)) };
+  }
+
   @RequirePermissions("ADMISSION_DISCHARGE")
   @Post("discharge/complete")
   @HttpCode(200)

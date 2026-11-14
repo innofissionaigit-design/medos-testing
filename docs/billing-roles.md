@@ -11,3 +11,6 @@ Existing hospitals: migration `20261030120000_pharmacy_bills_cashier_collects` r
 ## Cancelling a paid bill (decision 6 Nov 2026)
 
 Cancelling a bill that has received money needs two people on purpose: the **Cashier** gives the money back (Refund, with the transaction reference for UPI, card or bank), then the **Manager** cancels the bill (`INVOICE_CANCEL`) or issues a credit note (`INVOICE_ADJUST`). No single built-in role holds both `PAYMENT_REFUND` and `INVOICE_CANCEL`, so one login cannot cancel an invoice and take the cash out. A hospital that wants one person to do both can give a custom role both permissions under Administration.
+
+## The Billing role (missed billing)
+A **Billing** role raises the final IPD bill and reviews the "done but not billed" flags ([missed-billing.md](missed-billing.md)). Payments, refunds and cash shifts stay with the Cashier; discounts, cancellations and write-offs stay with the Manager.

@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge, Button, Card, ErrorNote, Field, Input, Notice, Select } from "@/components/ui";
 import { api, ApiError, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 export interface FeeConfig { enabled: boolean; amount: string; methods: string[]; exemptReasons: string[]; canCollect: boolean; canExempt: boolean }
 export interface FeeLine { method: string; amount: string; reference: string }
@@ -73,7 +74,7 @@ export function RegistrationDone({ mrn, reg }: { mrn: string | null; reg: Regist
       {reg?.status === "PAID" && <p>Registration fee {money(reg.amount)} received ({reg.methods?.map(label).join(" + ")}). Receipt <b>{reg.receiptNumber}</b>, bill {reg.invoiceNumber}.</p>}
       {reg?.status === "EXEMPTED" && <p>Registration fee exempted: {reg.exemptionReason}.</p>}
       {reg?.status === "PENDING" && <p>Registration fee {money(reg.amount)} is still to be collected.</p>}
-      {reg?.receiptId && <a href={printUrl(`receipts/${reg.receiptId}`)} target="_blank" rel="noreferrer" className="inline-block rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-50">Print receipt</a>}
+      {reg?.receiptId && <PrintLink href={printUrl(`receipts/${reg.receiptId}`)} className="inline-block rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-50">Print receipt</PrintLink>}
     </div>
   );
 }
@@ -102,7 +103,7 @@ export function RegistrationFeeCard({ patientId, onChange }: { patientId: string
         <div className="space-y-1 text-sm">
           <p>{money(v.amount ?? "0")} received{v.settledAt ? ` on ${dateTime(v.settledAt)}` : ""} ({v.methods?.map((m) => `${label(m.method)} ${money(m.amount)}`).join(" + ")}).</p>
           <p className="text-slate-600">Receipt {v.receiptNumber} · bill {v.invoiceNumber}</p>
-          {v.receiptId && <a href={printUrl(`receipts/${v.receiptId}`)} target="_blank" rel="noreferrer" className="inline-block rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-50">Print receipt</a>}
+          {v.receiptId && <PrintLink href={printUrl(`receipts/${v.receiptId}`)} className="inline-block rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-50">Print receipt</PrintLink>}
         </div>
       )}
       {v.status === "EXEMPTED" && <p className="text-sm">Fee of {money(v.amount ?? "0")} exempted: {v.exemptionReason}.</p>}

@@ -5,6 +5,7 @@ import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { RadImagesCard } from "./rad-images";
 import { Badge, Button, Card, ErrorNote, Field, Input, Modal, Notice, Select, Spinner, Table, Td, Textarea, useDebounced } from "./ui";
+import { PrintLink } from "@/components/print-link";
 
 interface WorkItem { testOrderId: string; test: string; state: string; accessionNumber: string | null; patient: string; mrn: string | null; modality: string | null; bodyPart: string | null; critical: boolean }
 interface StudyView {
@@ -79,7 +80,7 @@ function StudyModal({ testOrderId, onClose }: { testOrderId: string; onClose: ()
             {d.study && !reported && can("RAD_REPORT") && <Button disabled={findings.trim().length < 3 || impression.trim().length < 3} loading={sign.isPending} onClick={() => sign.mutate()}>Sign report</Button>}
             {reported && !amending && can("RAD_REPORT") && <Button variant="secondary" onClick={startAmend}>Amend</Button>}
             {amending && <Button disabled={reason.trim().length < 5 || findings.trim().length < 3 || impression.trim().length < 3} loading={amend.isPending} onClick={() => amend.mutate()}>Save amended report</Button>}
-            {reported && <a className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`radiology-reports/${testOrderId}`)} target="_blank" rel="noreferrer">Print report</a>}
+            {reported && <PrintLink className="rounded-md border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`radiology-reports/${testOrderId}`)}>Print report</PrintLink>}
           </div>
           {d.reports.length > 1 && <p className="text-xs text-slate-500">This report was amended {d.reports.length - 1} time(s); earlier versions are kept.</p>}
         </div>
@@ -147,7 +148,7 @@ export function VisitRadiology({ encounterId }: { encounterId: string }) {
           <div key={o.testOrderId} className="text-sm">
             <div className="flex flex-wrap items-center gap-2"><span className="font-medium">{o.test}</span><Badge tone={o.state === "REPORTED" ? "green" : "gray"}>{STATE_LABEL[o.state] ?? o.state}</Badge>{o.amended && <Badge tone="amber">amended</Badge>}
               {o.critical && o.studyId && <Button variant="secondary" loading={ack.isPending} onClick={() => ack.mutate(o.studyId!)}>Critical: acknowledge</Button>}
-              {o.state === "REPORTED" && <a className="text-brand-700" href={printUrl(`radiology-reports/${o.testOrderId}`)} target="_blank" rel="noreferrer">Print report</a>}{o.studyId && <button className="text-brand-700 hover:underline" onClick={() => setImagesOf(imagesOf === o.studyId ? null : o.studyId)}>{imagesOf === o.studyId ? "Hide images" : "Images"}</button>}</div>
+              {o.state === "REPORTED" && <PrintLink className="text-brand-700" href={printUrl(`radiology-reports/${o.testOrderId}`)}>Print report</PrintLink>}{o.studyId && <button className="text-brand-700 hover:underline" onClick={() => setImagesOf(imagesOf === o.studyId ? null : o.studyId)}>{imagesOf === o.studyId ? "Hide images" : "Images"}</button>}</div>
             {o.studyId && imagesOf === o.studyId && <div className="mt-2"><RadImagesCard studyId={o.studyId} canManage={false} /></div>}
             {o.report && <div className="mt-1 text-slate-700"><div>{o.report.findings}</div><div className="font-medium">Impression: {o.report.impression}</div></div>}
           </div>

@@ -8,8 +8,10 @@ import { UseAdvanceButton } from "@/components/advance-extras";
 import { DoctorShareCard } from "@/components/doctor-share";
 import { Gate } from "@/components/gate";
 import { Button, Card, ConfirmButton, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
+import { CANCEL_REASONS, ReasonSelect } from "@/components/reason-select";
 import { api, newKey, printUrl } from "@/lib/api";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 interface Invoice {
   id: string; invoiceNumber: string | null; status: string; kind: string; patientId: string; patientName: string; mrn: string | null; notes: string | null; issuedAt: string | null;
@@ -122,7 +124,7 @@ function EditDraft({ inv, onClose, onDone }: { inv: Invoice; onClose: () => void
   const [lines, setLines] = useState<EditLine[]>(inv.lines.map((l) => ({ serviceId: l.serviceId ?? null, description: l.description, unitPrice: l.unitPrice, taxPercent: l.taxPercent, quantity: l.quantity })));
   const [notes, setNotes] = useState(inv.notes ?? "");
   const [q, setQ] = useState("");
-  const services = useQuery({ queryKey: ["services"], queryFn: () => api.page<{ id: string; name: string; price: string; taxPercent: string }>("/services", { pageSize: 100 }) });
+  const services = useQuery({ queryKey: ["services", inv.kind], queryFn: () => api.page<{ id: string; name: string; price: string; taxPercent: string }>("/services", { pageSize: 100, ...(inv.kind === "OPD" || inv.kind === "IPD" ? { scope: inv.kind } : {}) }) });
   const matches = (services.data?.data ?? []).filter((s) => !q || s.name.toLowerCase().includes(q.toLowerCase())).slice(0, 8);
   const save = useMutation({
     mutationFn: () => api.put(`/invoices/${inv.id}`, {
@@ -206,8 +208,8 @@ export default function InvoicePage() {
           {i.status === "DRAFT" && can("INVOICE_ISSUE") && <Button loading={issue.isPending} onClick={() => issue.mutate()}>Issue bill</Button>}
           {["ISSUED", "PARTIALLY_PAID"].includes(i.status) && can("PAYMENT_CREATE") && <Button onClick={() => setModal("pay")}>Take payment</Button>}
           {["ISSUED", "PARTIALLY_PAID"].includes(i.status) && <UseAdvanceButton patientId={i.patientId} invoiceId={i.id} balanceDue={i.balanceDue} onDone={refresh} />}
-          {i.status !== "DRAFT" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`invoices/${i.id}`)} target="_blank" rel="noreferrer">Print bill</a>}
-          {i.status !== "DRAFT" && <a className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`invoices/${i.id}`)}?format=pdf&download=1`}>PDF</a>}
+          {i.status !== "DRAFT" && <PrintLink className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={printUrl(`invoices/${i.id}`)}>Print bill</PrintLink>}
+          {i.status !== "DRAFT" && <a download className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50" href={`${printUrl(`invoices/${i.id}`)}?format=pdf&download=1`}>PDF</a>}
           {Number(i.netReceived) > 0 && can("INVOICE_READ") && <Button variant="secondary" loading={emailReceipt.isPending} onClick={() => emailReceipt.mutate()}>Email receipt</Button>}
         </>}
       />
@@ -241,7 +243,7 @@ export default function InvoicePage() {
           {live && can("PAYMENT_REFUND") && Number(i.refundable) <= 0 && Number(i.netReceived) > 0 && <p className="mt-3 text-xs text-slate-500"><T>Nothing to refund yet: the patient has paid exactly what the bill says. A refund becomes possible after the Manager issues a credit note that lowers the bill below what was paid.</T></p>}
           {live && can("INVOICE_CANCEL") && (
             <div className="mt-4 space-y-2 border-t border-slate-100 pt-3">
-              <Input placeholder="Reason to cancel this bill (min 5 characters)" aria-label="Cancel reason" value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} />
+              <ReasonSelect reasons={CANCEL_REASONS.bill} label="Reason to cancel this bill" onChange={setCancelReason} />
               {Number(i.netReceived) > 0 && (
                 <div className="space-y-2 rounded-md bg-amber-50 p-3 text-sm">
                   <div className="font-medium">Cancelling gives back everything received: {money(i.netReceived)}</div>
@@ -263,7 +265,7 @@ export default function InvoicePage() {
             <Table head={["Receipt", "When", "Paid by", "Amount", ""]}>
               {i.receipts.map((r) => (
                 <tr key={r.id}><Td>{r.receiptNumber}</Td><Td>{dateTime(r.receivedAt)}</Td><Td>{r.payments.map((p) => `${p.method.toLowerCase().replace("_", " ")} ${money(p.amount)}`).join(" + ")}</Td><Td>{money(r.total)}</Td>
-                  <Td><a className="text-brand-700 hover:underline" href={printUrl(`receipts/${r.id}`)} target="_blank" rel="noreferrer">Print</a> · <a className="text-brand-700 hover:underline" href={`${printUrl(`receipts/${r.id}`)}?format=pdf&download=1`}>PDF</a></Td></tr>
+                  <Td><PrintLink className="text-brand-700 hover:underline" href={printUrl(`receipts/${r.id}`)}>Print</PrintLink> · <a download className="text-brand-700 hover:underline" href={`${printUrl(`receipts/${r.id}`)}?format=pdf&download=1`}>PDF</a></Td></tr>
               ))}
               {i.refunds.map((r) => <tr key={r.id} className="bg-red-50"><Td>{r.refundNumber}</Td><Td>{dateTime(r.createdAt)}</Td><Td>Refund · {r.method.toLowerCase()} · {r.reason}</Td><Td>−{money(r.amount)}</Td><Td /></tr>)}
               {i.creditNotes.map((c) => <tr key={c.id} className="bg-amber-50"><Td>{c.creditNoteNumber}</Td><Td /><Td>Credit note · {c.reason}</Td><Td>−{money(c.amount)}</Td><Td /></tr>)}

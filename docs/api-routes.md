@@ -187,6 +187,16 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | GET | `/booking/patients` | BOOKING_PATIENT_LOOKUP |  |
 | POST | `/booking/patients` | BOOKING_PATIENT_REGISTER |  |
 
+## ClaimChecklist
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/claims/:id/checklist` | CLAIM_READ |  |
+| POST | `/claims/:id/checklist/waive` | CLAIM_DOCUMENT_WAIVE |  |
+| GET | `/claims/insurers/:insurerId/required-documents` | CLAIM_READ |  |
+| POST | `/claims/insurers/:insurerId/required-documents` | CLAIM_MASTERS |  |
+| POST | `/claims/required-documents/:id/active` | CLAIM_MASTERS |  |
+
 ## ClaimDocuments
 
 | Method | Path | Access | Module flag |
@@ -268,6 +278,7 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | POST | `/admissions/:id/discharge-summary/sign` | CONSULTATION_SIGN | IPD_ENABLED |
 | POST | `/admissions/:id/discharge-summary/verify` | CONSULTATION_VERIFY | IPD_ENABLED |
 | GET | `/admissions/:id/discharge-summary/versions/:version` | CONSULTATION_READ | IPD_ENABLED |
+| GET | `/admissions/:id/discharge/bill-preview` | ADMISSION_READ | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/clear` | ADMISSION_READ | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/complete` | ADMISSION_DISCHARGE | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/departure` | DISCHARGE_DEPARTURE_CONFIRM | IPD_ENABLED |
@@ -276,9 +287,23 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 | POST | `/admissions/:id/discharge/pharmacy/repost-charges` | PHARMACY_DISPENSE | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/record-file` | MRD_RECORD_COMPLETE | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/records-complete` | MRD_RECORD_COMPLETE | IPD_ENABLED |
+| POST | `/admissions/:id/discharge/supplementary-invoice` | IPD_FINAL_BILL | IPD_ENABLED |
 | POST | `/admissions/:id/discharge/waive` | ADMISSION_DISCHARGE | IPD_ENABLED |
 | GET | `/admissions/:id/test-orders` | ADMISSION_READ | IPD_ENABLED |
 | POST | `/admissions/:id/test-orders` | CONSULTATION_CREATE | IPD_ENABLED |
+
+## DischargeFlow
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| GET | `/admissions/:id/discharge-flow` | ADMISSION_READ | IPD_ENABLED |
+| POST | `/admissions/:id/discharge-flow/delay` | ADMISSION_READ | IPD_ENABLED |
+| GET | `/admissions/:id/discharge-flow/family-sheet` | ADMISSION_READ | IPD_ENABLED |
+| POST | `/admissions/:id/discharge-flow/insurer-bill-sent` | CLAIM_MANAGE | IPD_ENABLED |
+| PUT | `/admissions/:id/discharge-plan` | ADMISSION_DISCHARGE | IPD_ENABLED |
+| GET | `/discharge-flow/board` | ADMISSION_READ | IPD_ENABLED |
+| GET | `/discharge-flow/my-work` | ADMISSION_READ | IPD_ENABLED |
+| GET | `/reports/ipd/discharge-flow` | any of REPORT_READ / REPORT_IPD | IPD_ENABLED |
 
 ## Earnings
 
@@ -378,6 +403,33 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 |---|---|---|---|
 | GET | `/imports/:kind` | DATA_IMPORT |  |
 | POST | `/imports/:kind` | DATA_IMPORT |  |
+
+## InsuranceMoney
+
+| Method | Path | Access | Module flag |
+|---|---|---|---|
+| POST | `/claims/:id/cuts` | CLAIM_MANAGE |  |
+| GET | `/claims/:id/ledger` | CLAIM_READ |  |
+| GET | `/claims/:id/package-lines` | CLAIM_READ |  |
+| GET | `/claims/:id/split` | CLAIM_READ |  |
+| POST | `/claims/:id/topup` | CLAIM_MANAGE |  |
+| POST | `/claims/:id/write-offs` | CLAIM_MANAGE |  |
+| POST | `/insurance/estimates` | CLAIM_READ |  |
+| GET | `/insurance/estimates/:id` | CLAIM_READ |  |
+| GET | `/insurance/follow-ups` | CLAIM_READ |  |
+| POST | `/insurance/follow-ups/:id/done` | CLAIM_MANAGE |  |
+| GET | `/insurance/ledger` | CLAIM_READ |  |
+| GET | `/insurance/ledger/:insurerId` | CLAIM_READ |  |
+| GET | `/insurance/overpayments` | CLAIM_READ |  |
+| POST | `/insurance/overpayments/:id/refunds` | CLAIM_SETTLE |  |
+| GET | `/insurance/payments` | CLAIM_READ |  |
+| POST | `/insurance/payments` | CLAIM_SETTLE |  |
+| GET | `/insurance/write-offs` | CLAIM_READ |  |
+| POST | `/insurance/write-offs/:id/decision` | CLAIM_WRITEOFF_APPROVE |  |
+| GET | `/reports/insurance/ageing` | any of REPORT_READ / REPORT_FINANCE |  |
+| GET | `/reports/insurance/late-payers` | any of REPORT_READ / REPORT_FINANCE |  |
+| GET | `/reports/insurance/owed` | any of REPORT_READ / REPORT_FINANCE |  |
+| GET | `/reports/insurance/rejections` | any of REPORT_READ / REPORT_FINANCE |  |
 
 ## Integrations
 
@@ -829,7 +881,7 @@ All paths are under `/api/v1`. Every route either is public, accepts any signed-
 
 | Method | Path | Access | Module flag |
 |---|---|---|---|
-| GET | `/patients/:id/ledger` | INVOICE_READ |  |
+| GET | `/patients/:id/ledger` | LEDGER_READ |  |
 
 ## StockLocations
 

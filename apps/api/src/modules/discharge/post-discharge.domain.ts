@@ -16,6 +16,8 @@ export interface PostDischargeInput {
   suggestedDiagnoses?: { text: string; code?: string }[];
   claim: { claimNumber: string; status: string; insurer: string; approvedAmount: { toString(): string } | null; preauthApproved: { toString(): string } | null; settledAmount: { toString(): string } } | null;
   invoice: { invoiceNumber: string | null; status: string; total: { toString(): string }; paidTotal: { toString(): string }; refundedTotal: { toString(): string }; creditedTotal: { toString(): string } } | null;
+  /** What the patient still owes on supplementary bills (late charges billed after the final bill). */
+  supplementaryDue?: { toString(): string };
   now?: Date;
 }
 
@@ -30,13 +32,14 @@ const AUTHORISED = ["PREAUTH_APPROVED", "SUBMITTED", "QUERY", "APPROVED"];
 const D = (v: { toString(): string } | null | undefined) => new Decimal(v?.toString() ?? 0);
 
 /** The receivables of a discharged stay: what the patient still owes on the final bill, and what the insurer has authorised and not yet paid. */
-export function receivables(i: Pick<PostDischargeInput, "claim" | "invoice">): { patient: Decimal; insurer: Decimal } {
+export function receivables(i: Pick<PostDischargeInput, "claim" | "invoice" | "supplementaryDue">): { patient: Decimal; insurer: Decimal } {
   const inv = i.invoice;
   const due = inv && inv.status !== "CANCELLED" && inv.status !== "REFUNDED" ? balanceDue({ total: inv.total.toString(), paidTotal: inv.paidTotal.toString(), refundedTotal: inv.refundedTotal.toString(), creditedTotal: inv.creditedTotal.toString() }) : new Decimal(0);
   const c = i.claim;
   const authorised = c && AUTHORISED.includes(c.status) ? Decimal.max(0, D(c.approvedAmount ?? c.preauthApproved).minus(D(c.settledAmount))) : new Decimal(0);
   const insurer = Decimal.min(due, authorised);
-  return { patient: due.minus(insurer), insurer };
+  // Supplementary bills are the patient's own: the insurer's authorisation covers the final bill.
+  return { patient: due.minus(insurer).plus(D(i.supplementaryDue)), insurer };
 }
 
 /** The post-discharge row: records (with the MRD sign-off), claims and receivables, and where the stay stands. */

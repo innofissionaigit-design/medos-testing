@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { CANCEL_REASONS, ReasonSelect } from "@/components/reason-select";
 import { api } from "@/lib/api";
 import { useMe } from "@/lib/me";
 import { Badge, Button, Card, ConfirmButton, ErrorNote, Field, Input, Modal, Select, Spinner, Table, Td } from "./ui";
@@ -122,7 +123,7 @@ export function CancelAdmission({ admissionId, onDone }: { admissionId: string; 
     <Card title="Admitted by mistake?">
       <div className="space-y-2">
         <p className="text-sm text-slate-600">Cancelling releases the bed and closes the admission as cancelled. For a normal end of stay, use Discharge.</p>
-        <Input placeholder="Reason (at least 3 characters)" aria-label="Cancel reason" value={reason} onChange={(e) => setReason(e.target.value)} />
+        <ReasonSelect reasons={CANCEL_REASONS.admission} label="Reason to cancel this admission" onChange={setReason} />
         <ErrorNote error={cancel.error} />
         <ConfirmButton label="Cancel this admission" confirmLabel="Yes, cancel the admission" disabled={reason.trim().length < 3} loading={cancel.isPending} onConfirm={() => cancel.mutate()} />
       </div>

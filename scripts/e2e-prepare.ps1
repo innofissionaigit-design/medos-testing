@@ -15,6 +15,9 @@ $env:JWT_ACCESS_SECRET = 'e2e-only-secret-e2e-only-secret-0001'
 $env:ARGON2_MEMORY_KIB = '1024'; $env:ARGON2_PASSES = '1'
 $env:SEED_PASSWORD = 'E2e-Passw0rd-2026!'
 $env:SEED_PROFILE = 'small'
+# The browser tests follow the flow in CLAUDE.md (register, queue, consult, then bill and pay), so the product default "consultation paid before the visit" is
+# switched off for this database. The rule itself is covered by the API tests (opd-payment.spec.ts).
+$env:SEED_OPD_FEE_BEFORE_VISIT = 'false'
 Set-Location $root
 pnpm --filter '@medos/database' migrate | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'migrations failed' }

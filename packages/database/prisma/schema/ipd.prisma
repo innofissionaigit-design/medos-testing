@@ -126,6 +126,11 @@ model Admission {
   finalInvoice         Invoice?                       @relation("AdmissionFinalInvoice", fields: [finalInvoiceId], references: [id], onDelete: Restrict)
   aftercareTasks       AftercareTask[]
   patientFeedbacks     PatientFeedback[]
+  dischargePlan        DischargePlan?
+  dischargeDelays      DischargeDelay[]
+  insurerBillSend      InsurerBillSend?
+  dischargeAlerts      DischargeAlert[]
+  supplementaryBills   SupplementaryBill[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, facilityId, id])

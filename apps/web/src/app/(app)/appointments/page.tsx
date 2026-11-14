@@ -1,4 +1,7 @@
 "use client";
+import { CANCEL_REASONS, ReasonSelect } from "@/components/reason-select";
+import { DoctorPicker } from "@/components/doctor-picker";
+import { WalkIn } from "@/components/walk-in";
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apptStatus, RemindersModal } from "@/components/follow-up-extras";
@@ -8,7 +11,7 @@ import { FeeLine, SkipFeeModal, TakeFeeModal, type FeeInfo } from "@/components/
 import { DuplicateBookingNotice, isDuplicateBooking } from "@/components/booking-guard";
 import { GiveBackDeposit } from "@/components/advance-extras";
 import { AppointmentRequestsCard } from "@/components/appointment-requests";
-import { DoctorSchedules } from "@/components/doctor-schedules";
+import { DoctorSchedules, filterDoctors } from "@/components/doctor-schedules";
 import { MakeVideoButton } from "@/components/telemedicine";
 import { Button, Card, ErrorNote, Field, Input, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api, newKey } from "@/lib/api";
@@ -16,7 +19,7 @@ import { useMe } from "@/lib/me";
 
 interface Appt extends FeeInfo { practitionerId: string; id: string; startAt: string; status: string; patientName: string; mrn: string | null; practitionerName: string; departmentName: string | null; type: string; patientId: string; version: number; followUpOfVisit: { encounterNumber: string } | null }
 interface Slot { startAt: string; endAt: string; available: boolean }
-interface Doc { id: string; displayName: string }
+interface Doc { id: string; displayName: string; departmentId?: string | null }
 
 interface Booked { startAt: string; patientName: string; practitionerName: string }
 
@@ -33,7 +36,6 @@ function zonedToIso(day: string, hm: string, tz: string): string {
 
 function Book({ date, onClose, onBooked }: { date: string; onClose: () => void; onBooked: (b: Booked) => void }) {
   const qc = useQueryClient();
-  const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<Doc[]>("/practitioners") });
   const [patient, setPatient] = useState<PickedPatient | null>(null);
   const [doc, setDoc] = useState("");
   const [day, setDay] = useState(date);
@@ -67,7 +69,7 @@ function Book({ date, onClose, onBooked }: { date: string; onClose: () => void; 
     <Modal title="Book appointment" onClose={onClose} wide>
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="sm:col-span-2"><Field as="div" label="Patient"><PatientPicker value={patient} onPick={setPatient} autoFocus /></Field></div>
-        <Field label="Doctor"><Select value={doc} onChange={(e) => { setDoc(e.target.value); setSlot(""); }}><option value="">Choose…</option>{docs.data?.map((d) => <option key={d.id} value={d.id}>{d.displayName}</option>)}</Select></Field>
+        <DoctorPicker value={doc} onChange={(id) => { setDoc(id); setSlot(""); }} />
         <Field label="Date"><Input type="date" value={day} min={date} onChange={(e) => { setDay(e.target.value); setSlot(""); }} /></Field>
         {can("APPOINTMENT_OVERBOOK") && (
           <label className="flex items-center gap-2 text-sm sm:col-span-2"><input type="checkbox" checked={exception} onChange={(e) => setException(e.target.checked)} /> Book outside the free times (exception, needs a reason)</label>
@@ -98,30 +100,10 @@ function Book({ date, onClose, onBooked }: { date: string; onClose: () => void; 
   );
 }
 
-function WalkIn({ onClose }: { onClose: () => void }) {
-  const qc = useQueryClient();
-  const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<Doc[]>("/practitioners") });
-  const [patient, setPatient] = useState<PickedPatient | null>(null);
-  const [doc, setDoc] = useState("");
-  const [key] = useState(newKey);
-  const go = useMutation({ mutationFn: (override?: string) => api.post("/appointments/walk-in", { patientId: patient!.id, practitionerId: doc, ...(override ? { duplicateOverride: { reason: override } } : {}) }, key), onSuccess: async () => { await qc.invalidateQueries({ queryKey: ["appointments"] }); await qc.invalidateQueries({ queryKey: ["queue"] }); onClose(); } });
-  return (
-    <Modal title="Walk-in patient" onClose={onClose}>
-      <div className="space-y-3">
-        <Field as="div" label="Patient"><PatientPicker value={patient} onPick={setPatient} autoFocus /></Field>
-        <Field label="Doctor"><Select value={doc} onChange={(e) => setDoc(e.target.value)}><option value="">Choose…</option>{docs.data?.map((d) => <option key={d.id} value={d.id}>{d.displayName}</option>)}</Select></Field>
-        {isDuplicateBooking(go.error) ? <DuplicateBookingNotice error={go.error} pending={go.isPending} onOverride={(r) => go.mutate(r)} /> : <ErrorNote error={go.error} />}
-        <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!patient || !doc} loading={go.isPending} onClick={() => go.mutate(undefined)}>Check in and add to queue</Button></div>
-      </div>
-    </Modal>
-  );
-}
-
 /** Move a booked appointment to another time (and optionally another doctor). The version guards against concurrent changes. */
 function Reschedule({ appt, today, onClose, onMoved }: { appt: Appt; today: string; onClose: () => void; onMoved: (b: Booked) => void }) {
   const qc = useQueryClient();
   const { dateTime } = useMe();
-  const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<Doc[]>("/practitioners") });
   const [doc, setDoc] = useState(appt.practitionerId);
   const [day, setDay] = useState(today);
   const [slot, setSlot] = useState("");
@@ -134,7 +116,7 @@ function Reschedule({ appt, today, onClose, onMoved }: { appt: Appt; today: stri
     <Modal title={`Reschedule — ${appt.patientName}`} onClose={onClose} wide>
       <div className="grid gap-3 sm:grid-cols-2">
         <p className="text-sm text-slate-500 sm:col-span-2">Currently {dateTime(appt.startAt)} with {appt.practitionerName}.</p>
-        <Field label="Doctor"><Select value={doc} onChange={(e) => { setDoc(e.target.value); setSlot(""); }}>{docs.data?.map((d) => <option key={d.id} value={d.id}>{d.displayName}</option>)}</Select></Field>
+        <DoctorPicker value={doc} onChange={(id) => { setDoc(id); setSlot(""); }} />
         <Field label="Date"><Input type="date" min={today} value={day} onChange={(e) => { setDay(e.target.value); setSlot(""); }} /></Field>
         <div className="sm:col-span-2">
           <div className="mb-1 text-sm font-medium text-slate-700">New time</div>
@@ -160,6 +142,7 @@ export default function AppointmentsPage() {
   const today = todayIn(tz);
   const [date, setDate] = useState(today);
   const [doctor, setDoctor] = useState("");
+  const [dept, setDept] = useState("");
   const [modal, setModal] = useState<"book" | "walkin" | null>(null);
   const [cancel, setCancel] = useState<Appt | null>(null);
   const [moving, setMoving] = useState<Appt | null>(null);
@@ -175,33 +158,51 @@ export default function AppointmentsPage() {
     const day = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date(b.startAt));
     setDate(day);
     setDoctor("");
+    setDept("");
     setFollowUpsOnly(false);
     setNotice(`${verb}: ${b.patientName} with ${b.practitionerName} on ${dateTime(b.startAt)}.${day !== today ? ` Showing ${day}.` : ""}`);
   };
   const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<Doc[]>("/practitioners") });
   const list = useQuery({ queryKey: ["appointments", date, doctor, followUpsOnly], queryFn: () => api.page<Appt>("/appointments", { date, ...(doctor ? { practitionerId: doctor } : {}), ...(followUpsOnly ? { type: "FOLLOW_UP" } : {}), pageSize: 100 }) });
+  const depts = useQuery({ queryKey: ["departments"], queryFn: () => api.get<{ id: string; name: string }[]>("/departments") });
+  // Only departments that have a doctor; the doctor list follows the department, and the day's list follows both.
+  const deptChoices = depts.data?.filter((d) => docs.data?.some((x) => x.departmentId === d.id)) ?? [];
+  const doctorChoices = filterDoctors(docs.data ?? [], dept, "");
+  const inDept = dept && !doctor ? new Set(doctorChoices.map((d) => d.id)) : null;
+  const shownAppts = (list.data?.data ?? []).filter((a) => !inDept || inDept.has(a.practitionerId));
   const refresh = () => qc.invalidateQueries({ queryKey: ["appointments"] });
   const act = useMutation({ mutationFn: ({ id, action, body }: { id: string; action: string; body?: unknown }) => api.post(`/appointments/${id}/${action}`, body), onSuccess: async () => { await refresh(); await qc.invalidateQueries({ queryKey: ["queue"] }); } });
   return (
     <Gate anyOf={["APPOINTMENT_READ"]}>
-      <AppointmentRequestsCard />
-      <div className="mt-4"><DoctorSchedules /></div>
       <PageHeader
         title="Appointments"
         actions={<>
-          <Input type="date" aria-label="Date" value={date} onChange={(e) => setDate(e.target.value)} className="w-40" />
-          <Select aria-label="Doctor" value={doctor} onChange={(e) => setDoctor(e.target.value)} className="w-48"><option value="">All doctors</option>{docs.data?.map((d) => <option key={d.id} value={d.id}>{d.displayName}</option>)}</Select>
-          <Select aria-label="Appointment type" value={followUpsOnly ? "FOLLOW_UP" : ""} onChange={(e) => setFollowUpsOnly(e.target.value === "FOLLOW_UP")} className="w-40"><option value="">All appointments</option><option value="FOLLOW_UP">Follow-ups only</option></Select>
           {can("APPOINTMENT_CREATE") && <Button variant="secondary" onClick={() => setModal("walkin")}>Walk-in</Button>}
           {can("APPOINTMENT_CREATE") && <Button onClick={() => setModal("book")}>Book appointment</Button>}
         </>}
       />
+      <div className="mb-4 grid gap-3 rounded-lg border border-slate-200 bg-white p-3 sm:grid-cols-2 lg:grid-cols-4">
+        <Field label="Department">
+          <Select aria-label="Department filter" value={dept} onChange={(e) => { setDept(e.target.value); setDoctor(""); }}><option value="">All departments</option>{deptChoices.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}</Select>
+        </Field>
+        <Field label="Doctor">
+          <Select aria-label="Doctor" value={doctor} onChange={(e) => setDoctor(e.target.value)}><option value="">{dept ? "All doctors in this department" : "All doctors"}</option>{doctorChoices.map((d) => <option key={d.id} value={d.id}>{d.displayName}</option>)}</Select>
+        </Field>
+        <Field label="Date">
+          <Input type="date" aria-label="Date" value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Show">
+          <Select aria-label="Appointment type" value={followUpsOnly ? "FOLLOW_UP" : ""} onChange={(e) => setFollowUpsOnly(e.target.value === "FOLLOW_UP")}><option value="">All appointments</option><option value="FOLLOW_UP">Follow-ups only</option></Select>
+        </Field>
+      </div>
+      <AppointmentRequestsCard />
+      <div className="mb-4 mt-4"><DoctorSchedules departmentId={dept} doctorId={doctor} /></div>
       <ErrorNote error={act.error} />
       {notice && <Notice tone="success"><span className="mr-3">{notice}</span><button className="text-sm underline" onClick={() => setNotice(null)}>Dismiss</button></Notice>}
       <Card>
         {list.isLoading ? <Spinner /> : (
-          <Table head={["Time", "Patient", "Doctor", "Status", ""]} {...(list.data?.data.length === 0 ? { empty: "No appointments on this day." } : {})}>
-            {list.data?.data.map((a) => (
+          <Table head={["Time", "Patient", "Doctor", "Status", ""]} {...(shownAppts.length === 0 && !list.isLoading ? { empty: "No appointments on this day." } : {})}>
+            {shownAppts.map((a) => (
               <tr key={a.id}>
                 <Td>{dateTime(a.startAt).split(", ").pop()}</Td>
                 <Td>
@@ -239,7 +240,7 @@ export default function AppointmentsPage() {
       {cancel && (
         <Modal title={`Cancel appointment for ${cancel.patientName}?`} onClose={() => setCancel(null)}>
           <div className="space-y-3">
-            <Field label="Reason"><Input autoFocus value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+            <Field label="Reason"><ReasonSelect reasons={CANCEL_REASONS.appointment} onChange={setReason} autoFocus /></Field>
             <div className="flex justify-end gap-2"><Button variant="ghost" onClick={() => setCancel(null)}>Keep</Button><Button variant="danger" disabled={reason.trim().length < 3} onClick={() => { act.mutate({ id: cancel.id, action: "cancel", body: { reason: reason.trim() } }); setCancel(null); }}>Cancel appointment</Button></div>
           </div>
         </Modal>

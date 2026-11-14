@@ -2129,7 +2129,7 @@ describe("discharge workflow, final bill and discharge summary", () => {
       assert.equal(await t.prisma.invoice.count({ where: { tenantId: x.tenant.tenantId, kind: "IPD" } }), 1);
     });
 
-    it("no new charges, bed days or counter-charged medicines once the final bill is issued", async () => {
+    it("after the final bill: bed days and counter-charged medicines stay refused; a late service charge waits for a supplementary bill", async () => {
       const x = await world("dis-lock");
       const s1 = await svc(x, "Review", "100");
       const { adm, patient } = await admit(x, "300");
@@ -2137,8 +2137,8 @@ describe("discharge workflow, final bill and discharge summary", () => {
       await t.api("post", `/admissions/${adm.id}/charges`, x.nurse.token).send({ serviceId: s1, quantity: 1 });
       await finalInvoice(x, adm.id);
       const late = await t.api("post", `/admissions/${adm.id}/charges`, x.nurse.token).send({ serviceId: s1, quantity: 1 });
-      assert.equal(late.status, 409);
-      assert.match(late.body.error.message, /final bill has already been issued/);
+      assert.equal(late.status, 201, JSON.stringify(late.body));
+      assert.equal(late.body.data.status, "PENDING", "the late charge is pending; the first bill is not touched");
       assert.equal((await t.api("post", `/admissions/${adm.id}/charges/bed-days`, x.nurse.token)).body.data.posted, 0);
       const med = (await t.api("post", "/medicines", x.pharm.token).send({ brandName: `Lock${uniqueWord(4)}`, genericName: `Lockgen${uniqueWord(4)}`, dosageForm: "TABLET", gstPercent: 0 })).body.data;
       await t.api("post", "/pharmacy/batches", x.pharm.token).set("Idempotency-Key", key()).send({ medicineId: med.id, batchNo: "LK1", expiryDate: new Date(Date.now() + 300 * 86_400_000).toISOString().slice(0, 10), mrp: "10", purchasePrice: "5", sellingPrice: "9", quantity: 10 });

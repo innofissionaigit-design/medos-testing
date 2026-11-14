@@ -23,7 +23,7 @@ export function ClaimDocuments({ claimId, open, canManage }: { claimId: string; 
   const [removing, setRemoving] = useState<DocRow | null>(null);
   const [reason, setReason] = useState("");
   const list = useQuery({ queryKey: ["claim-documents", claimId], queryFn: () => api.get<DocRow[]>(`/claims/${claimId}/documents`) });
-  const refresh = () => qc.invalidateQueries({ queryKey: ["claim-documents", claimId] });
+  const refresh = async () => { await Promise.all([qc.invalidateQueries({ queryKey: ["claim-documents", claimId] }), qc.invalidateQueries({ queryKey: ["claim-checklist", claimId] })]); };
   const chosen = (label === "Other" ? custom : label).trim();
 
   const upload = useMutation({

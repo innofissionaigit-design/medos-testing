@@ -7,18 +7,19 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ConsentCard } from "@/components/privacy-extras";
 import { AppointmentHistoryCard } from "@/components/follow-up-extras";
 import { Gate } from "@/components/gate";
-import { AdvanceCard } from "@/components/advance-extras";
 import { DuplicateBookingNotice, isDuplicateBooking } from "@/components/booking-guard";
+import { DoctorPicker } from "@/components/doctor-picker";
 import { LedgerCard } from "@/components/ledger-extras";
 import { MergeCard } from "@/components/patient-merge";
 import { RegistrationFeeCard } from "@/components/registration-fee";
-import { EditPatientModal, FilesCard, PatientPhoto, type EditablePatient } from "@/components/patient-extras";
+import { EditPatientModal, PatientPhoto, type EditablePatient } from "@/components/patient-extras";
 import { AbhaCard } from "@/components/abdm";
-import { IdentifiersCard } from "@/components/patient-identifiers";
-import { Button, Card, ErrorNote, Field, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
+import { Button, Card, ErrorNote, Input, KV, Modal, Notice, PageHeader, Select, Spinner, StatusBadge, Table, Td } from "@/components/ui";
 import { api, newKey, printUrl } from "@/lib/api";
 import { ageText, type AgeValue } from "@/lib/format";
+import { needsDesk, useDesk } from "@/lib/desk";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 interface Patient {
   id: string; mrn: string | null; firstName: string; lastName: string | null; gender: string; dateOfBirth: string | null; age: AgeValue; mobile: string | null; email?: string | null;
@@ -30,11 +31,9 @@ interface Allergy { id: string; allergen: string; type: string; severity: string
 interface Encounter { id: string; encounterNumber: string; type: string; status: string; startedAt: string; practitionerName?: string | null; departmentName?: string | null }
 interface InvoiceRow { id: string; invoiceNumber: string | null; status: string; total: string; balanceDue: string; createdAt: string; kind: string }
 interface ConsultPay { required: boolean; status: "NOT_REQUIRED" | "PAID" | "NEEDS_PAYMENT" | "NEEDS_BILL"; invoiceId?: string; invoiceNumber?: string | null; invoiceStatus?: string; total?: string; due?: string }
-interface Practitioner { id: string; displayName: string; specialty?: string | null }
 
 function StartVisit({ patientId, onClose }: { patientId: string; onClose: () => void }) {
   const router = useRouter();
-  const docs = useQuery({ queryKey: ["practitioners"], queryFn: () => api.get<Practitioner[]>("/practitioners") });
   const [doc, setDoc] = useState("");
   const m = useMutation({
     mutationFn: (override?: string) => api.post<{ encounter: { id: string } }>("/appointments/walk-in", { patientId, practitionerId: doc, ...(override ? { duplicateOverride: { reason: override } } : {}) }, newKey()),
@@ -43,7 +42,7 @@ function StartVisit({ patientId, onClose }: { patientId: string; onClose: () => 
   return (
     <Modal title="Start an OPD visit" onClose={onClose}>
       <div className="space-y-3">
-        <Field label="Doctor"><Select value={doc} onChange={(e) => setDoc(e.target.value)}><option value="">Choose a doctor…</option>{docs.data?.map((d) => <option key={d.id} value={d.id}>{d.displayName}{d.specialty ? ` — ${d.specialty}` : ""}</option>)}</Select></Field>
+        <DoctorPicker value={doc} onChange={setDoc} />
         {isDuplicateBooking(m.error) ? <DuplicateBookingNotice error={m.error} pending={m.isPending} onOverride={(r) => m.mutate(r)} /> : <ErrorNote error={m.error} />}
         <div className="flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button disabled={!doc} loading={m.isPending} onClick={() => m.mutate(undefined)}>Check in and add to queue</Button></div>
       </div>
@@ -80,7 +79,10 @@ function Allergies({ patientId }: { patientId: string }) {
 
 export default function PatientPage() {
   const { id } = useParams<{ id: string }>();
-  const { can, features, date, dateTime, money } = useMe();
+  const { me, can, features, date, dateTime, money } = useMe();
+  const { desk: chosenDesk } = useDesk();
+  // Reception at the OPD desk does not see inpatient actions, and at the IPD desk does not see outpatient ones.
+  const desk = needsDesk(me.roles, features) ? (chosenDesk ?? null) : null;
   const [visit, setVisit] = useState(false);
   const [editing, setEditing] = useState(false);
   const [merging, setMerging] = useState(false);
@@ -105,19 +107,19 @@ export default function PatientPage() {
       <PageHeader
         title={name} icon={<PatientPhoto patientId={pt.id} />} subtitle={`MRN ${pt.mrn ?? "—"} · ${pt.gender.toLowerCase()}${ageText(pt.age) ? `, ${ageText(pt.age)}` : ""}`}
         actions={<>
-          {!pt.mergedInto && can("APPOINTMENT_CREATE") && <Button disabled={mustPayFirst} title={mustPayFirst ? "Pay the OPD consultation bill first" : undefined} onClick={() => setVisit(true)}>Start OPD visit</Button>}
+          {!pt.mergedInto && can("APPOINTMENT_CREATE") && desk !== "IPD" && <Button disabled={mustPayFirst} title={mustPayFirst ? "Pay the OPD consultation bill first" : undefined} onClick={() => setVisit(true)}>Start OPD visit</Button>}
           {!pt.mergedInto && can("INVOICE_CREATE") && <Link href={`/billing?patient=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>New bill</T></Link>}
-          {!pt.mergedInto && can("ADMISSION_CREATE") && features.IPD_ENABLED && <Link href={`/ipd?admit=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Admit</T></Link>}
+          {!pt.mergedInto && can("ADMISSION_CREATE") && features.IPD_ENABLED && desk !== "OPD" && <Link href={`/ipd?admit=${pt.id}`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Admit</T></Link>}
           {!pt.mergedInto && can("PATIENT_UPDATE") && <Button variant="secondary" onClick={() => setEditing(true)}>Edit details</Button>}
           {!pt.mergedInto && can("PATIENT_MERGE") && <Button variant="secondary" onClick={() => setMerging(true)}>Merge duplicate…</Button>}
-          <a href={printUrl(`patient-labels/${pt.id}`)} target="_blank" rel="noreferrer" className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Print label</T></a>
-          <a href={`${printUrl(`patient-labels/${pt.id}`)}?format=pdf&download=1`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Label PDF</T></a>
+          <PrintLink href={printUrl(`patient-labels/${pt.id}`)} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Print label</T></PrintLink>
+          <a download href={`${printUrl(`patient-labels/${pt.id}`)}?format=pdf&download=1`} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm hover:bg-slate-50"><T>Label PDF</T></a>
         </>}
       />
       {pt.mergedInto
         ? <Notice tone="warn">This record was merged into <Link className="font-medium underline" href={`/patients/${pt.mergedInto.id}`}>MRN {pt.mergedInto.mrn ?? "—"}</Link>. Use that patient from now on; the history below is shown on that chart too.</Notice>
         : pt.status !== "ACTIVE" && <Notice tone="warn">This patient record is inactive.</Notice>}
-      {!pt.mergedInto && can("APPOINTMENT_CREATE") && consult.data?.required && (
+      {!pt.mergedInto && can("APPOINTMENT_CREATE") && desk !== "IPD" && consult.data?.required && (
         <div className="mb-3">
           {consult.data.status === "NEEDS_BILL" && <Notice tone="warn">Before the OPD visit: click <b>New bill</b>, add <b>OPD consultation</b>, create the bill and take the payment. Then <b>Start OPD visit</b> becomes available.</Notice>}
           {consult.data.status === "NEEDS_PAYMENT" && <Notice tone="warn">The consultation bill {consult.data.invoiceNumber ?? "(draft)"} of {money(consult.data.total ?? "0")} is waiting for payment ({money(consult.data.due ?? "0")} due). <Link className="font-medium underline" href={`/billing/${consult.data.invoiceId}?from=patient`}>Take payment</Link></Notice>}
@@ -127,23 +129,16 @@ export default function PatientPage() {
       {!!pt.mergedFrom?.length && <Notice>This chart also shows the history of merged duplicate record{pt.mergedFrom.length > 1 ? "s" : ""}: {pt.mergedFrom.map((m, i) => <span key={m.id}>{i > 0 && ", "}<Link className="underline" href={`/patients/${m.id}`}>MRN {m.mrn ?? "—"}</Link></span>)}.</Notice>}
       {merging && <MergeCard duplicate={{ id: pt.id, mrn: pt.mrn, version: pt.version }} onClose={() => setMerging(false)} onDone={(intoId) => router.push(`/patients/${intoId}`)} />}
       <div className="grid gap-4 lg:grid-cols-3">
-        <Card title="Details" className="lg:col-span-1">
-          <dl className="grid grid-cols-2 gap-3">
-            <KV label="Mobile">{pt.mobile}</KV><KV label="Email">{pt.email}</KV><KV label="Date of birth">{pt.dateOfBirth ? date(pt.dateOfBirth) : null}</KV>
-            <KV label="Blood group">{pt.bloodGroup?.replace("_POS", "+").replace("_NEG", "−")}</KV><KV label="City">{pt.city}</KV>
-            <div className="col-span-2"><KV label="Address">{[pt.addressLine, pt.district, pt.state, pt.postalCode].filter(Boolean).join(", ") || null}</KV></div>
-            {(pt.guardianName || pt.emergencyContactName) && <div className="col-span-2"><KV label="Guardian / emergency contact">{[pt.guardianName && `${pt.guardianName}${pt.guardianRelation ? ` (${pt.guardianRelation})` : ""} ${pt.guardianMobile ?? ""}`, pt.emergencyContactName && `${pt.emergencyContactName} ${pt.emergencyContactMobile ?? ""}`].filter(Boolean).join(" · ")}</KV></div>}
-          </dl>
-        </Card>
+        {/* Left: the patient's details, visits and admissions, appointments and bills. Right: the smaller cards. */}
         <div className="space-y-4 lg:col-span-2">
-          <Allergies patientId={pt.id} />
-          {!pt.mergedInto && <AdvanceCard patientId={pt.id} />}
-          <LedgerCard patientId={pt.id} />
-          {can("PATIENT_READ") && <ConsentCard patientId={pt.id} />}
-          {can("PATIENT_READ") && <IdentifiersCard patientId={pt.id} canEdit={can("PATIENT_UPDATE") && !pt.mergedInto} />}
-          {can("PATIENT_READ") && !pt.mergedInto && <AbhaCard patientId={pt.id} />}
-          <RegistrationFeeCard patientId={pt.id} />
-          <FilesCard patientId={pt.id} />
+          <Card title="Details">
+            <dl className="grid grid-cols-2 gap-3">
+              <KV label="Mobile">{pt.mobile}</KV><KV label="Email">{pt.email}</KV><KV label="Date of birth">{pt.dateOfBirth ? date(pt.dateOfBirth) : null}</KV>
+              <KV label="Blood group">{pt.bloodGroup?.replace("_POS", "+").replace("_NEG", "−")}</KV><KV label="City">{pt.city}</KV>
+              <div className="col-span-2"><KV label="Address">{[pt.addressLine, pt.district, pt.state, pt.postalCode].filter(Boolean).join(", ") || null}</KV></div>
+              {(pt.guardianName || pt.emergencyContactName) && <div className="col-span-2"><KV label="Guardian / emergency contact">{[pt.guardianName && `${pt.guardianName}${pt.guardianRelation ? ` (${pt.guardianRelation})` : ""} ${pt.guardianMobile ?? ""}`, pt.emergencyContactName && `${pt.emergencyContactName} ${pt.emergencyContactMobile ?? ""}`].filter(Boolean).join(" · ")}</KV></div>}
+            </dl>
+          </Card>
           <Card title="Visits and admissions">
             {enc.isLoading ? <Spinner /> : (
               <Table head={["Visit", "Type", "Status", "Doctor", "Started"]} {...(enc.data?.data.length === 0 ? { empty: "No visits yet." } : {})}>
@@ -168,6 +163,13 @@ export default function PatientPage() {
               </Table>
             </Card>
           )}
+        </div>
+        <div className="space-y-4 lg:col-span-1">
+          <Allergies patientId={pt.id} />
+          <LedgerCard patientId={pt.id} />
+          {can("PATIENT_READ") && <ConsentCard patientId={pt.id} />}
+          {can("PATIENT_READ") && !pt.mergedInto && <AbhaCard patientId={pt.id} />}
+          <RegistrationFeeCard patientId={pt.id} />
         </div>
       </div>
       {visit && <StartVisit patientId={pt.id} onClose={() => setVisit(false)} />}

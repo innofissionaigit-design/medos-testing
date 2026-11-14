@@ -7,6 +7,7 @@ import { Badge, Button, Card, ErrorNote, Input, Modal, Notice, Select, Spinner }
 import { api, printUrl } from "@/lib/api";
 import { canEditTests } from "@/lib/cashier-edit";
 import { useMe } from "@/lib/me";
+import { PrintLink } from "@/components/print-link";
 
 interface Medicine { orderNumber: string | null; source: string; pharmacy: "WAITING" | "PARTLY_GIVEN" | "GIVEN"; items: { id: string; name: string; strength: string | null; dosage: string; frequency: string; days: number | null; quantity: number | null; suggestedQuantity?: number | null; given: number; status: string }[] }
 interface Page { pageNo: number; fileId: string; fileName: string; contentType: string }
@@ -184,7 +185,7 @@ function CollectTotal({ patient, onClose }: { patient: PatientCard; onClose: () 
               <li key={r.receiptId} className="flex flex-wrap items-center gap-2 py-1.5">
                 <span className="font-medium">{r.invoiceNumber}</span><span className="text-slate-500">receipt {r.receiptNumber}</span><span className="ml-auto">{money(r.amount)}</span>
                 <span className="text-xs text-slate-500">{r.invoiceStatus.replace("_", " ").toLowerCase()}</span>
-                <a href={printUrl(`receipts/${r.receiptId}`)} target="_blank" rel="noreferrer" className="text-xs text-brand-700 hover:underline">Print receipt</a>
+                <PrintLink href={printUrl(`receipts/${r.receiptId}`)} className="text-xs text-brand-700 hover:underline">Print receipt</PrintLink>
               </li>
             ))}
           </ul>

@@ -109,7 +109,17 @@ export class DischargeService {
 
     const done = (s: Step) => clearances.find((c) => c.step === s);
     const invoiceDue = invoice ? balanceDue({ total: invoice.total, paidTotal: invoice.paidTotal, refundedTotal: invoice.refundedTotal, creditedTotal: invoice.creditedTotal }) : null;
-    const bill = await this.reconcileFinalBilling(db, ctx, adm, invoice, invoiceDue, pendingTotal, ins.payerOutstanding);
+    // Charges that arrived after the final bill wait as pending and are billed on supplementary bills; the final bill itself is never changed.
+    const lateCharges = invoice ? pendingCharges : [];
+    const lateTotal = lateCharges.reduce((a, c) => a.plus(chargeAmounts(c).total), new Decimal(0));
+    const supplementary = await db.supplementaryBill.findMany({ where: { tenantId: ctx.tenantId, admissionId: adm.id }, orderBy: { sequence: "asc" }, select: { sequence: true, invoice: { select: { invoiceNumber: true, status: true, total: true, paidTotal: true, refundedTotal: true, creditedTotal: true } } } });
+    const lateBills = supplementary.map((b) => {
+      const closedBill = b.invoice.status === "CANCELLED" || b.invoice.status === "REFUNDED";
+      return { invoiceNumber: b.invoice.invoiceNumber, sequence: b.sequence, total: new Decimal(b.invoice.total.toString()), status: b.invoice.status,
+        due: closedBill ? new Decimal(0) : balanceDue({ total: b.invoice.total, paidTotal: b.invoice.paidTotal, refundedTotal: b.invoice.refundedTotal, creditedTotal: b.invoice.creditedTotal }) };
+    });
+    const supplementaryDue = lateBills.reduce((a, b) => a.plus(b.due), new Decimal(0));
+    const bill = await this.reconcileFinalBilling(db, ctx, adm, invoice, invoiceDue, pendingTotal, ins.payerOutstanding, { count: lateCharges.length, total: lateTotal, bills: lateBills });
     const settled = bill.settled;
 
     const blockers: Record<Step, string[]> = { MEDICALLY_FIT: [], NURSING: [], CHARGES_REVIEWED: [], PHARMACY: [], LAB_RADIOLOGY: [], OT_PROCEDURE: [], INSURANCE: [], BILLING: [], FINANCIAL_RELEASE: [] };
@@ -140,7 +150,7 @@ export class DischargeService {
     const [draftDocuments, recordDone, lastClaim] = await Promise.all([
       db.clinicalDocument.count({ where: { tenantId: ctx.tenantId, encounterId: adm.encounterId, status: "DRAFT" } }),
       db.medicalRecordCompletion.findFirst({ where: { tenantId: ctx.tenantId, admissionId: adm.id } }),
-      db.claim.findFirst({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, encounterId: adm.encounterId }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], select: { claimNumber: true, status: true, approvedAmount: true, preauthApproved: true, settledAmount: true, policy: { select: { insurer: { select: { name: true } } } } } }),
+      db.claim.findFirst({ where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, encounterId: adm.encounterId, tier: "PRIMARY" }, orderBy: [{ createdAt: "desc" }, { id: "asc" }], select: { claimNumber: true, status: true, approvedAmount: true, preauthApproved: true, settledAmount: true, policy: { select: { insurer: { select: { name: true } } } } } }),
     ]);
     const heldBed = adm.status === "DISCHARGED" ? await db.bedAssignment.findFirst({ where: { tenantId: ctx.tenantId, admissionId: adm.id, releasedAt: null }, select: { bed: { select: { code: true, ward: { select: { name: true } } } } } }) : null;
     const turnover = await db.bedTurnover.findFirst({ where: { tenantId: ctx.tenantId, admissionId: adm.id }, include: { bed: { select: { code: true, ward: { select: { name: true } } } } } });
@@ -193,6 +203,7 @@ export class DischargeService {
     else if (requireVerified && !verification) completionBlockers.push("discharge summary is not verified");
     const billingWaived = done("BILLING")?.status === "WAIVED";
     if (!invoice && pendingTotal.gt(0) && !billingWaived) completionBlockers.push("charges have not been billed");
+    if (invoice && lateCharges.length > 0 && !billingWaived) completionBlockers.push("late charges have not been billed (generate a supplementary bill)");
     return {
       admissionId: adm.id, status: adm.status, dischargedAt: adm.dischargedAt, dischargeType: adm.dischargeType,
       requireSummary, summaryStatus: summary?.status ?? null, steps,
@@ -217,7 +228,7 @@ export class DischargeService {
         suggestedDiagnoses: ((signedSummary?.content as { finalDiagnoses?: { text: string; code?: string }[] } | null)?.finalDiagnoses ?? []).filter((d) => d && typeof d.text === "string"),
         recordCompletion: recordDone ? { completedAt: recordDone.completedAt, byName: names.get(recordDone.completedById) ?? null, note: recordDone.note } : null,
         claim: lastClaim ? { claimNumber: lastClaim.claimNumber, status: lastClaim.status, insurer: lastClaim.policy.insurer.name, approvedAmount: lastClaim.approvedAmount, preauthApproved: lastClaim.preauthApproved, settledAmount: lastClaim.settledAmount } : null,
-        invoice,
+        invoice, supplementaryDue,
       }),
       pendingCharges: { count: pendingCharges.length, total: fmt(pendingTotal) },
       finalInvoice: invoice ? { id: invoice.id, invoiceNumber: invoice.invoiceNumber, status: invoice.status, total: fmt(invoice.total), balanceDue: fmt(invoiceDue ?? 0) } : null,
@@ -320,6 +331,7 @@ export class DischargeService {
     db: Db, ctx: RequestContext, adm: { patientId: string; admittedAt: Date },
     invoice: { invoiceNumber: string | null; status: string; total: { toString(): string }; paidTotal: { toString(): string }; refundedTotal: { toString(): string }; creditedTotal: { toString(): string } } | null,
     invoiceDue: Decimal | null, pendingTotal: Decimal, payerOutstanding: Decimal,
+    late: { count: number; total: Decimal; bills: { invoiceNumber: string | null; sequence: number; total: Decimal; due: Decimal; status: string }[] },
   ) {
     const num = (v: { toString(): string }): Decimal => new Decimal(v.toString());
     const sum = (rows: { amount: { toString(): string } }[]): Decimal => rows.reduce((a, r) => a.plus(num(r.amount)), new Decimal(0));
@@ -336,13 +348,17 @@ export class DischargeService {
     const closed = invoice !== null && (invoice.status === "CANCELLED" || invoice.status === "REFUNDED");
     const due = invoiceDue ?? new Decimal(0);
     const payerShare = invoice && !closed ? Decimal.min(due, payerOutstanding) : new Decimal(0);
-    const liability = invoice && !closed ? due.minus(payerShare) : new Decimal(0);
-    const settled = invoice !== null && (closed || liability.isZero());
+    const finalLiability = invoice && !closed ? due.minus(payerShare) : new Decimal(0);
+    // Late charges are billed on supplementary bills; what is owed on them is the patient's own (the insurer's authorisation covers the final bill).
+    const supplementaryDue = late.bills.reduce((a, b) => a.plus(b.due), new Decimal(0));
+    const liability = finalLiability.plus(supplementaryDue);
+    const settled = invoice !== null && (closed || finalLiability.isZero()) && supplementaryDue.isZero() && late.count === 0;
     const credited = invoice ? num(invoice.creditedTotal) : new Decimal(0);
     const overpaid = invoice && !closed ? refundable({ total: invoice.total.toString(), paidTotal: invoice.paidTotal.toString(), refundedTotal: invoice.refundedTotal.toString(), creditedTotal: invoice.creditedTotal.toString() }) : new Decimal(0);
 
     const problems: string[] = [];
     if (!invoice && pendingTotal.gt(0)) problems.push("Generate the final bill");
+    if (invoice && late.count > 0) problems.push(`${late.count} late charge(s) worth ${fmt(late.total)} not yet billed: generate a supplementary bill`);
     if (invoice && liability.gt(0)) problems.push(`Payment pending: ${fmt(liability)} due from the patient${payerShare.gt(0) ? ` (the insurer's authorised ${fmt(payerShare)} is awaited separately)` : ""}`);
     if (unapplied.gt(0)) problems.push(`${fmt(unapplied)} of advance deposits not yet applied to the bill or refunded`);
     if (overpaid.gt(0)) problems.push(`The bill is overpaid by ${fmt(overpaid)} after credit notes: refund it to the patient`);
@@ -351,6 +367,7 @@ export class DischargeService {
       { name: "Final bill", ok: invoice !== null || pendingTotal.isZero(), detail: invoice ? `Bill ${invoice.invoiceNumber ?? ""} for ${fmt(num(invoice.total))} (${invoice.status.toLowerCase().replace(/_/g, " ")})` : pendingTotal.gt(0) ? `Not yet generated: ${fmt(pendingTotal)} of charges are not billed` : "No chargeable items" },
       { name: "Deposits", ok: unapplied.isZero(), detail: deposits.length === 0 ? "No advance deposits" : `${fmt(received)} taken · ${fmt(applied)} applied to bills · ${fmt(refunded)} refunded${unapplied.gt(0) ? ` · ${fmt(unapplied)} still unapplied` : ""}` },
       { name: "Credits", ok: overpaid.isZero(), detail: overpaid.gt(0) ? `Overpaid by ${fmt(overpaid)} after credit notes: refund due` : credited.gt(0) ? `Credit notes of ${fmt(credited)} are on the bill; nothing overpaid` : "No credit notes" },
+      ...(late.count > 0 || late.bills.length > 0 ? [{ name: "Late charges", ok: late.count === 0 && supplementaryDue.isZero(), detail: late.count > 0 ? `${late.count} charge(s) worth ${fmt(late.total)} arrived after the final bill: generate a supplementary bill` : supplementaryDue.gt(0) ? `${late.bills.length} supplementary bill(s); ${fmt(supplementaryDue)} still due` : `${late.bills.length} supplementary bill(s), all paid` }] : []),
       { name: "Patient liability", ok: invoice ? liability.isZero() : pendingTotal.isZero(), detail: !invoice ? (pendingTotal.gt(0) ? "Waiting for the final bill" : "Nothing to pay") : closed ? "The bill is closed: nothing owed" : liability.gt(0) ? `Patient owes ${fmt(liability)}${payerShare.gt(0) ? ` · insurer's authorised share ${fmt(payerShare)} is awaited` : ""}` : payerShare.gt(0) ? `Patient has paid their share · insurer's authorised share ${fmt(payerShare)} is awaited` : "Paid in full" },
     ];
     return {
@@ -359,6 +376,8 @@ export class DischargeService {
         billTotal: invoice ? fmt(num(invoice.total)) : null, credited: fmt(credited), overpaid: fmt(overpaid),
         deposits: { received: fmt(received), applied: fmt(applied), refunded: fmt(refunded), unapplied: fmt(unapplied) },
         insurerShare: fmt(payerShare), patientLiability: fmt(liability), problems,
+        lateCharges: { count: late.count, total: fmt(late.total) },
+        supplementaryBills: late.bills.map((b) => ({ invoiceNumber: b.invoiceNumber, sequence: b.sequence, total: fmt(b.total), due: fmt(b.due), status: b.status })),
       },
     };
   }
@@ -375,7 +394,7 @@ export class DischargeService {
     const day = new Date(new Date().toISOString().slice(0, 10));
     const [claim, policies] = await Promise.all([
       db.claim.findFirst({
-        where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, encounterId: adm.encounterId, status: { not: "CLOSED" } }, orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+        where: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, encounterId: adm.encounterId, tier: "PRIMARY", status: { not: "CLOSED" } }, orderBy: [{ createdAt: "desc" }, { id: "asc" }],
         select: { id: true, claimNumber: true, type: true, status: true, preauthRequested: true, preauthApproved: true, claimedAmount: true, approvedAmount: true, settledAmount: true, closeReason: true, policy: { select: { policyNumber: true, insurer: { select: { name: true } } } } },
       }),
       db.patientPolicy.count({ where: { tenantId: ctx.tenantId, patientId: adm.patientId, status: "ACTIVE", validFrom: { lte: day }, validTo: { gte: day }, insurer: { status: "ACTIVE" } } }),
@@ -394,6 +413,9 @@ export class DischargeService {
       };
     }
     const docs = await db.claimDocument.count({ where: { tenantId: ctx.tenantId, claimId: claim.id, status: "ACTIVE" } });
+    // A top-up insurer's share is awaited separately too: it is not the patient's to pay (docs/insurance-money.md).
+    const topups = await db.claim.findMany({ where: { tenantId: ctx.tenantId, primaryClaimId: claim.id, tier: "TOPUP", status: { in: ["SUBMITTED", "QUERY", "APPROVED"] } }, select: { approvedAmount: true, claimedAmount: true, settledAmount: true } });
+    const topupOutstanding = topups.reduce((a, t) => a.plus(Decimal.max(0, new Decimal((t.approvedAmount ?? t.claimedAmount ?? 0).toString()).minus(t.settledAmount.toString()))), new Decimal(0));
     const cashless = claim.type === "CASHLESS";
     const rejected = claim.status === "REJECTED";
     const sent = claim.status !== "DRAFT"; // asked the insurer: pre-authorisation requested, or the claim submitted
@@ -412,7 +434,7 @@ export class DischargeService {
     const problems = [...(docsOk ? [] : [`Claim ${claim.claimNumber}: ${docsDetail}`]), ...(authOk ? [] : [`Claim ${claim.claimNumber}: ${authDetail}`])];
     return {
       // What the insurer has authorised and not yet paid: it is not the patient's liability. A rejected claim has none; a payment received is already on the invoice.
-      payerOutstanding: rejected ? new Decimal(0) : Decimal.max(0, new Decimal((claim.approvedAmount ?? (claim.preauthApproved !== null && claim.claimedAmount !== null && claim.claimedAmount.lt(claim.preauthApproved) ? claim.claimedAmount : claim.preauthApproved) ?? 0).toString()).minus(claim.settledAmount.toString())),
+      payerOutstanding: topupOutstanding.plus(rejected ? new Decimal(0) : Decimal.max(0, new Decimal((claim.approvedAmount ?? (claim.preauthApproved !== null && claim.claimedAmount !== null && claim.claimedAmount.lt(claim.preauthApproved) ? claim.claimedAmount : claim.preauthApproved) ?? 0).toString()).minus(claim.settledAmount.toString()))),
       problems, note: rejected ? "Insurer rejected the claim: self-pay" : `Claim ${claim.claimNumber} (${claim.status.toLowerCase().replace(/_/g, " ")})`,
       checks: [{ name: "Documentation", ok: docsOk, detail: docsDetail }, { name: "Authorisation", ok: authOk, detail: authDetail }],
       summary: {
@@ -627,6 +649,58 @@ export class DischargeService {
       const fresh = await tx.admission.findFirstOrThrow({ where: { id: admissionId, tenantId: ctx.tenantId } });
       return { invoice: { id: inv.id, invoiceNumber: inv.invoiceNumber, total: fmt(inv.total) }, status: await this.evaluate(tx, ctx, fresh) };
     });
+  }
+
+  // ───── supplementary bill (late charges) ─────
+
+  /**
+   * Bills the charges that arrived after the final bill on their own small invoice. The final bill is never altered: each batch is a new issued invoice,
+   * numbered 1, 2, 3 for the admission (docs/discharge-flow.md). Refused until the final bill exists, and when nothing late is waiting.
+   */
+  async supplementaryInvoice(ctx: RequestContext, admissionId: string) {
+    return this.prisma.$transaction(async (tx) => {
+      const adm = await this.lockAdmission(tx, ctx, admissionId);
+      if (!adm.finalInvoiceId) throw new DomainError("INVALID_STATE", "Generate the final bill first: a supplementary bill is only for charges that arrive after it", 409);
+      const pending = await tx.charge.findMany({ where: { tenantId: ctx.tenantId, admissionId, status: "PENDING" }, orderBy: [{ chargedAt: "asc" }, { id: "asc" }] });
+      if (pending.length === 0) throw new DomainError("INVALID_STATE", "There are no late charges to bill", 409);
+      const sacById = new Map((await tx.service.findMany({ where: { tenantId: ctx.tenantId, id: { in: [...new Set(pending.flatMap((c) => (c.serviceId ? [c.serviceId] : [])))] } }, select: { id: true, sacCode: true } })).map((x) => [x.id, x.sacCode]));
+      const sequence = (await tx.supplementaryBill.count({ where: { tenantId: ctx.tenantId, admissionId } })) + 1;
+      const inv = await this.invoices.createIssuedFromSource(tx, ctx, {
+        patientId: adm.patientId, encounterId: adm.encounterId, kind: "IPD", notes: `Supplementary bill ${sequence} for admission ${adm.admissionNumber}: charges after the final bill`,
+        lines: pending.map((c) => ({ description: c.description, quantity: new Decimal(c.quantity.toString()), unitPrice: new Decimal(c.unitPrice.toString()), taxPercent: new Decimal(c.taxPercent.toString()), sourceType: "CHARGE", sourceId: c.id, hsnSac: c.serviceId ? sacById.get(c.serviceId) ?? null : null })),
+      });
+      const billed = await tx.charge.updateMany({ where: { tenantId: ctx.tenantId, admissionId, status: "PENDING", id: { in: pending.map((c) => c.id) } }, data: { status: "BILLED", invoiceId: inv.id } });
+      if (billed.count !== pending.length) throw new DomainError("INVALID_STATE", "Charges changed while billing; try again", 409);
+      await tx.supplementaryBill.create({ data: { tenantId: ctx.tenantId, facilityId: ctx.facilityId, admissionId, invoiceId: inv.id, sequence, charges: pending.length, createdById: ctx.userId } });
+      await this.audit.record(tx, actorOf(ctx), { action: "SUPPLEMENTARY_INVOICE_CREATED", entityType: "Admission", entityId: admissionId, metadata: { invoiceId: inv.id, invoiceNumber: inv.invoiceNumber, sequence, charges: pending.length, total: fmt(inv.total) } });
+      return { invoice: { id: inv.id, invoiceNumber: inv.invoiceNumber, total: fmt(inv.total), sequence }, status: await this.evaluate(tx, ctx, adm) };
+    });
+  }
+
+  /**
+   * The bill so far, during the stay: every charge waiting to be billed (and what it comes to), the bills already issued, and whether the final bill can be
+   * generated yet. Nothing is posted or changed: it only reads. Bed days not yet posted are added when the final bill is generated.
+   */
+  async billPreview(ctx: RequestContext, admissionId: string) {
+    const adm = await this.prisma.admission.findFirst({ where: { id: admissionId, tenantId: ctx.tenantId, facilityId: ctx.facilityId, AND: [admissionScope(ctx)] } });
+    if (!adm) throw new DomainError("NOT_FOUND", "Resource not found", 404);
+    const [st, pending, supplementary, invoice] = await Promise.all([
+      this.evaluate(this.prisma, ctx, adm),
+      this.prisma.charge.findMany({ where: { tenantId: ctx.tenantId, admissionId, status: "PENDING" }, orderBy: [{ chargedAt: "asc" }, { id: "asc" }] }),
+      this.prisma.supplementaryBill.findMany({ where: { tenantId: ctx.tenantId, admissionId }, orderBy: { sequence: "asc" }, select: { sequence: true, invoice: { select: { id: true, invoiceNumber: true, status: true, total: true } } } }),
+      adm.finalInvoiceId ? this.prisma.invoice.findFirst({ where: { id: adm.finalInvoiceId, tenantId: ctx.tenantId }, select: { id: true, invoiceNumber: true, status: true, total: true } }) : Promise.resolve(null),
+    ]);
+    const lines = pending.map((c) => ({ id: c.id, description: c.description, quantity: c.quantity.toString(), total: fmt(chargeAmounts(c).total), late: !!invoice }));
+    const total = pending.reduce((a, c) => a.plus(chargeAmounts(c).total), new Decimal(0));
+    const notReady = st.steps.filter((s) => s.required && s.step !== "BILLING" && s.step !== "FINANCIAL_RELEASE" && s.status === "PENDING").map((s) => ({ step: s.step, stage: s.stage, blockers: s.blockers }));
+    return {
+      admissionId, finalBill: invoice ? { id: invoice.id, invoiceNumber: invoice.invoiceNumber, status: invoice.status, total: fmt(invoice.total) } : null,
+      // Before the final bill these are the charges it will carry; after it, they are late charges waiting for a supplementary bill.
+      waiting: { kind: invoice ? "LATE" : "FINAL", count: lines.length, total: fmt(total), lines },
+      supplementaryBills: supplementary.map((b) => ({ sequence: b.sequence, id: b.invoice.id, invoiceNumber: b.invoice.invoiceNumber, status: b.invoice.status, total: fmt(b.invoice.total) })),
+      // "Not ready yet": the final bill is generated only when these are cleared, so it is right the first time.
+      finalBillReady: !invoice && adm.status === "ADMITTED" && notReady.length === 0, notReady: invoice ? [] : notReady,
+    };
   }
 
   // ───── complete ─────

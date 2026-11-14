@@ -1,0 +1,164 @@
+// Insurance money (docs/insurance-money.md): what the insurer cut and why, the payments insurers make (each matched to its claims), the running ledger, write-offs
+// that a manager approves, insurer overpayments and their refunds, follow-up tasks for short payments, and the estimate given to the family before admission.
+// Money received is never edited: every row here is append-only, except a write-off or follow-up that is decided / done once.
+
+enum DeductionCategory {
+  NOT_COVERED
+  ROOM_RENT_LIMIT
+  PATIENT_COPAY
+  OVER_RATE
+  DEDUCTIBLE
+  OTHER
+}
+
+enum WriteOffStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum FollowUpKind {
+  SHORT_PAYMENT
+  OVERPAYMENT_REFUND
+}
+
+enum FollowUpStatus {
+  OPEN
+  DONE
+}
+
+/// One part of what the insurer cut from a claim, and why. The insurance desk enters it by hand (room-rent cuts included).
+model ClaimDeduction {
+  id         String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId   String            @db.Uuid
+  claimId    String            @db.Uuid
+  category   DeductionCategory
+  amount     Decimal           @db.Decimal(14, 2)
+  note       String?
+  recordedById String          @db.Uuid
+  recordedAt DateTime          @default(now()) @db.Timestamptz(3)
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId])
+}
+
+/// One payment from an insurer, matched to the claims it pays (the lines are ClaimSettlement rows). Whatever cannot be matched is an overpayment.
+model InsurerPayment {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  insurerId   String   @db.Uuid
+  reference   String
+  receivedOn  DateTime @db.Date
+  amount      Decimal  @db.Decimal(14, 2)
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  insurer      Insurer             @relation(fields: [tenantId, insurerId], references: [tenantId, id], onDelete: Restrict)
+  lines        ClaimSettlement[]
+  overpayments InsurerOverpayment[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, insurerId, reference])
+  @@index([tenantId, facilityId, receivedOn])
+}
+
+/// Money an insurer paid that no claim of theirs is owed. Kept, and refunded later (InsurerRefund rows); never edited.
+model InsurerOverpayment {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  insurerId   String   @db.Uuid
+  paymentId   String   @db.Uuid
+  claimId     String?  @db.Uuid
+  amount      Decimal  @db.Decimal(14, 2)
+  reason      String
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  payment InsurerPayment  @relation(fields: [tenantId, paymentId], references: [tenantId, id], onDelete: Restrict)
+  refunds InsurerRefund[]
+
+  @@unique([tenantId, id])
+  @@index([tenantId, insurerId])
+}
+
+model InsurerRefund {
+  id            String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String   @db.Uuid
+  overpaymentId String   @db.Uuid
+  amount        Decimal  @db.Decimal(14, 2)
+  reference     String
+  refundedOn    DateTime @db.Date
+  createdById   String   @db.Uuid
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  overpayment InsurerOverpayment @relation(fields: [tenantId, overpaymentId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, overpaymentId])
+}
+
+/// Writing off what an insurer still owes: asked for with a reason, approved or refused once by a manager (never the person who asked).
+model ClaimWriteOff {
+  id            String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId      String         @db.Uuid
+  facilityId    String         @db.Uuid
+  claimId       String         @db.Uuid
+  amount        Decimal        @db.Decimal(14, 2)
+  reason        String
+  status        WriteOffStatus @default(PENDING)
+  requestedById String         @db.Uuid
+  requestedAt   DateTime       @default(now()) @db.Timestamptz(3)
+  decidedById   String?        @db.Uuid
+  decidedAt     DateTime?      @db.Timestamptz(3)
+  decisionNote  String?
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, claimId, status])
+}
+
+/// Work for the insurance desk: chase a short payment, or get an overpayment refunded. Done once.
+model ClaimFollowUp {
+  id          String         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String         @db.Uuid
+  facilityId  String         @db.Uuid
+  claimId     String         @db.Uuid
+  kind        FollowUpKind
+  amount      Decimal        @db.Decimal(14, 2)
+  note        String
+  status      FollowUpStatus @default(OPEN)
+  createdAt   DateTime       @default(now()) @db.Timestamptz(3)
+  doneById    String?        @db.Uuid
+  doneAt      DateTime?      @db.Timestamptz(3)
+  doneNote    String?
+
+  claim Claim @relation(fields: [tenantId, claimId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, facilityId, status, createdAt])
+}
+
+/// The estimate given to the family before admission: what each insurer is expected to pay and what the family pays. Never edited; a new estimate is a new row.
+model ClaimEstimate {
+  id          String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId    String   @db.Uuid
+  facilityId  String   @db.Uuid
+  patientId   String   @db.Uuid
+  packageId   String?  @db.Uuid
+  days        Int
+  total       Decimal  @db.Decimal(14, 2)
+  input       Json
+  result      Json
+  createdById String   @db.Uuid
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+
+  patient Patient @relation(fields: [tenantId, patientId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, patientId])
+}
